@@ -1,0 +1,329 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Личный кабинет — Дневник гипертоника</title>
+  <link rel="stylesheet" href="/static/style.css">
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+</head>
+<body>
+  <header class="topbar">
+    <div class="container topbar-row">
+      <strong>Дневник гипертоника</strong>
+      <span class="topbar-email">{{ web_user.email }}</span>
+      <form method="post" action="/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-ghost">Выйти</button>
+      </form>
+    </div>
+  </header>
+
+  <nav class="container nav">
+    <a href="#profile">Профиль</a>
+    <a href="#summary">Сводка</a>
+    <a href="#history">История</a>
+    <a href="#medications">Лекарства</a>
+    <a href="#reminders">Напоминания</a>
+  </nav>
+
+  <main class="container">
+    {% if error == "too_many" %}
+      <p class="alert alert-error">Слишком много записей, выберите период поменьше.</p>
+    {% elif error == "profile" %}
+      <p class="alert alert-error">Не удалось сохранить профиль: проверьте значения целей и часовой пояс.</p>
+    {% elif error == "password" %}
+      <p class="alert alert-error">Новый пароль — от 8 до 128 символов.</p>
+    {% elif error == "medication" %}
+      <p class="alert alert-error">Не удалось сохранить лекарство: проверьте название, дозировку и слот.</p>
+    {% elif error == "reminder" %}
+      <p class="alert alert-error">Не удалось сохранить напоминания: проверьте время (ЧЧ:ММ).</p>
+    {% elif saved == "profile" %}
+      <p class="alert alert-ok">Профиль сохранён.</p>
+    {% elif saved == "medication" %}
+      <p class="alert alert-ok">Лекарства обновлены.</p>
+    {% elif saved == "reminder" %}
+      <p class="alert alert-ok">Напоминания сохранены.</p>
+    {% endif %}
+
+    <!-- ── Личная карточка ── -->
+    <section class="card" id="profile">
+      <h2>Личная карточка</h2>
+      <dl class="facts">
+        <div><dt>E-mail</dt><dd>{{ web_user.email }}</dd></div>
+        <div><dt>Профиль</dt><dd>Пользователь Telegram, id {{ user.telegram_id }}</dd></div>
+        <div><dt>Цель давления</dt><dd>{{ user.target_systolic }} / {{ user.target_diastolic }} мм рт. ст.</dd></div>
+        <div><dt>Часовой пояс</dt><dd>{{ user.timezone }}</dd></div>
+        <div>
+          <dt>Лекарства</dt>
+          <dd>
+            {% if medications %}
+              {% for med in medications %}{{ med.name }} ({{ med.dosage }}, {{ slot_labels[med.slot] }}){% if not loop.last %}, {% endif %}{% endfor %}
+            {% else %}
+              не добавлены
+            {% endif %}
+          </dd>
+        </div>
+      </dl>
+
+      <h3>Настройки профиля</h3>
+      <form method="post" action="/profile" class="stack form-narrow">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="row">
+          <label>
+            Цель: систолическое
+            <input type="number" name="target_systolic" min="70" max="260" value="{{ user.target_systolic }}" required>
+          </label>
+          <label>
+            Цель: диастолическое
+            <input type="number" name="target_diastolic" min="40" max="160" value="{{ user.target_diastolic }}" required>
+          </label>
+        </div>
+        <label>
+          Часовой пояс (IANA)
+          <input type="text" name="timezone" value="{{ user.timezone }}" maxlength="64" required>
+        </label>
+        <label>
+          Новый пароль (оставьте пустым, чтобы не менять)
+          <input type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password">
+        </label>
+        <button type="submit" class="btn">Сохранить</button>
+      </form>
+    </section>
+
+    <!-- ── Сводка ── -->
+    <section class="card" id="summary">
+      <h2>Сводка за период</h2>
+
+      <form method="get" action="/" class="filter-row">
+        <label>
+          Период
+          <select name="days" onchange="this.form.submit()">
+            <option value="7" {% if days == "7" %}selected{% endif %}>7 дней</option>
+            <option value="30" {% if days == "30" %}selected{% endif %}>30 дней</option>
+            <option value="custom" {% if days == "custom" %}selected{% endif %}>Свой период</option>
+          </select>
+        </label>
+        <label>
+          С
+          <input type="date" name="date_from" value="{{ date_from }}">
+        </label>
+        <label>
+          По
+          <input type="date" name="date_to" value="{{ date_to }}">
+        </label>
+        <button type="submit" class="btn btn-ghost">Показать</button>
+      </form>
+
+      <p class="muted">Период: {{ start_day.strftime("%d.%m.%Y") }} — {{ end_day.strftime("%d.%m.%Y") }}</p>
+
+      {% if summary.count == 0 %}
+        <p>За этот период записей нет.</p>
+      {% else %}
+        <dl class="facts">
+          <div><dt>Записей</dt><dd>{{ summary.count }}</dd></div>
+          <div><dt>Систолическое</dt><dd>{{ summary.sys_avg }} ({{ summary.sys_min }}–{{ summary.sys_max }})</dd></div>
+          <div><dt>Диастолическое</dt><dd>{{ summary.dia_avg }} ({{ summary.dia_min }}–{{ summary.dia_max }})</dd></div>
+          {% if summary.pulse_avg is not none %}
+            <div><dt>Пульс (средний)</dt><dd>{{ summary.pulse_avg }}</dd></div>
+          {% endif %}
+          <div><dt>Тренд</dt><dd>{{ summary.trend }}</dd></div>
+          {% if summary.goal_verdict %}
+            <div><dt>Цель</dt><dd>{{ summary.goal_verdict }}</dd></div>
+          {% endif %}
+          {% if summary.adherence %}
+            <div><dt>Лекарства</dt><dd>принято {{ summary.adherence[0] }} из {{ summary.adherence[1] }} приёмов</dd></div>
+          {% endif %}
+        </dl>
+
+        <div class="chart-wrap">
+          <canvas id="bp-chart" height="110"></canvas>
+        </div>
+      {% endif %}
+
+      <div class="row">
+        <a class="btn btn-ghost" href="/export/measurements.csv?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
+          Скачать CSV измерений
+        </a>
+        <a class="btn btn-ghost" href="/export/medications.csv?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
+          Скачать CSV лекарств
+        </a>
+      </div>
+    </section>
+
+    <!-- ── История ── -->
+    <section class="card" id="history">
+      <h2>История записей</h2>
+      {% if not measurements %}
+        <p>За этот период записей нет.</p>
+      {% else %}
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr>
+                <th>Дата</th>
+                <th>Время</th>
+                <th>Сист.</th>
+                <th>Диаст.</th>
+                <th>Пульс</th>
+                <th>Лекарство</th>
+                <th>Самочувствие</th>
+                <th>Заметка</th>
+              </tr>
+            </thead>
+            <tbody>
+              {% for m in measurements %}
+                <tr>
+                  <td>{{ m.timestamp.astimezone(user_zone).strftime("%d.%m.%Y") }}</td>
+                  <td>{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
+                  <td>{{ m.systolic }}</td>
+                  <td>{{ m.diastolic }}</td>
+                  <td>{{ m.pulse if m.pulse is not none else "—" }}</td>
+                  <td>{{ medication_labels[m.medication_taken] }}</td>
+                  <td>{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
+                  <td class="note">{{ m.note or "" }}</td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+    </section>
+
+    <!-- ── Лекарства ── -->
+    <section class="card" id="medications">
+      <h2>Лекарства</h2>
+      {% if not medications %}
+        <p>Лекарства не добавлены. Добавьте — и они появятся в напоминаниях.</p>
+      {% else %}
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Название</th><th>Дозировка</th><th>Слот</th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for med in medications %}
+                <tr>
+                  <td><input form="med-edit-{{ med.id }}" type="text" name="name" value="{{ med.name }}" maxlength="100" required></td>
+                  <td><input form="med-edit-{{ med.id }}" type="text" name="dosage" value="{{ med.dosage }}" maxlength="50" required></td>
+                  <td>
+                    <select form="med-edit-{{ med.id }}" name="slot">
+                      {% for slot in slot_order %}
+                        <option value="{{ slot }}" {% if med.slot == slot %}selected{% endif %}>{{ slot_labels[slot] }}</option>
+                      {% endfor %}
+                    </select>
+                  </td>
+                  <td class="actions">
+                    <form id="med-edit-{{ med.id }}" method="post" action="/medications/{{ med.id }}" class="inline">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-ghost">Сохранить</button>
+                    </form>
+                  </td>
+                  <td class="actions">
+                    <form method="post" action="/medications/{{ med.id }}/delete" class="inline"
+                          onsubmit="return confirm('Удалить лекарство «{{ med.name }}»?');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-danger">Удалить</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+
+      <h3>Добавить лекарство</h3>
+      <form method="post" action="/medications" class="stack form-narrow">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          Название
+          <input type="text" name="name" maxlength="100" required placeholder="Например: Лозартан">
+        </label>
+        <label>
+          Дозировка
+          <input type="text" name="dosage" maxlength="50" required placeholder="Например: 50 мг">
+        </label>
+        <fieldset class="checks">
+          <legend>Когда принимать</legend>
+          {% for slot in slot_order %}
+            <label class="check">
+              <input type="checkbox" name="slot_{{ slot }}" value="1"> {{ slot_labels[slot] }}
+            </label>
+          {% endfor %}
+        </fieldset>
+        <button type="submit" class="btn">Добавить</button>
+      </form>
+    </section>
+
+    <!-- ── Напоминания ── -->
+    <section class="card" id="reminders">
+      <h2>Напоминания</h2>
+      <p class="muted">Те же слоты, что в боте. Изменения подхватываются ботом при следующем срабатывании или перезапуске.</p>
+      <form method="post" action="/settings" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% for slot in slot_order %}
+          {% set reminder = reminders.get(slot) %}
+          <div class="row slot-row">
+            <label class="check">
+              <input type="checkbox" name="slot_{{ slot }}_enabled" value="1"
+                     {% if reminder and reminder.enabled %}checked{% endif %}>
+              {{ slot_labels[slot] }}
+            </label>
+            <label>
+              Время
+              <input type="time" name="slot_{{ slot }}_time"
+                     value="{{ reminder.local_time if reminder and reminder.local_time else '08:00' }}">
+            </label>
+          </div>
+        {% endfor %}
+        <label>
+          Повторный замер после лекарства
+          <select name="med_remeasure_delay">
+            <option value="" {% if user.med_remeasure_delay is none %}selected{% endif %}>Выключен</option>
+            {% for delay in (30, 60, 120) %}
+              <option value="{{ delay }}" {% if user.med_remeasure_delay == delay %}selected{% endif %}>
+                Через {{ delay }} минут
+              </option>
+            {% endfor %}
+          </select>
+        </label>
+        <button type="submit" class="btn">Сохранить напоминания</button>
+      </form>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      Данные хранятся локально и не передаются третьим лицам.
+      Бот не является медицинским изделием и не заменяет консультацию врача.
+    </div>
+  </footer>
+
+  <script>
+    // График давления за период (Chart.js).
+    const chartData = {{ chart | tojson }};
+    window.addEventListener("load", () => {
+      const canvas = document.getElementById("bp-chart");
+      if (!canvas || typeof Chart === "undefined" || chartData.length === 0) {
+        return;
+      }
+      new Chart(canvas, {
+        type: "line",
+        data: {
+          labels: chartData.map((point) => point.t),
+          datasets: [
+            { label: "Систолическое", data: chartData.map((point) => point.s), borderColor: "#1476cc", tension: 0.2 },
+            { label: "Диастолическое", data: chartData.map((point) => point.d), borderColor: "#0f5ba3", tension: 0.2 },
+            { label: "Пульс", data: chartData.map((point) => point.p), borderColor: "#9b59b6", tension: 0.2 }
+          ]
+        },
+        options: {
+          plugins: { legend: { position: "bottom" } },
+          scales: { y: { suggestedMin: 40, suggestedMax: 200 } }
+        }
+      });
+    });
+  </script>
+</body>
+</html>

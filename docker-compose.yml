@@ -1,0 +1,69 @@
+# Развёртывание бота и личного кабинета (SPEC.md, раздел 16.3).
+# Два независимых процесса с одной SQLite в WAL (общий том).
+#
+#   ./deploy.sh            # собрать и запустить бота и кабинет
+#   ./deploy.sh https      # то же + HTTPS (Caddy, Let's Encrypt)
+#
+# Секреты (BOT_TOKEN, WEB_SECRET_KEY) берутся только из .env — в git он не попадает.
+services:
+  bot:
+    build: .
+    image: my-bp-diary:latest
+    container_name: bp-diary-bot
+    command: ["python", "-m", "bot"]
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/bot.sqlite3
+    volumes:
+      - bot-data:/app/data
+    restart: unless-stopped
+
+  cabinet:
+    build: .
+    image: my-bp-diary:latest
+    container_name: bp-diary-cabinet
+    command: ["uvicorn", "web.cabinet.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: .env
+    environment:
+      DB_PATH: /app/data/bot.sqlite3
+    volumes:
+      - bot-data:/app/data
+    ports:
+      # Только localhost сервера: наружу кабинет выходит через Caddy (HTTPS).
+      - "127.0.0.1:8000:8000"
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/login')",
+        ]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    restart: unless-stopped
+
+  # HTTPS-терминация (Let's Encrypt) — профиль `https`:
+  #   docker compose --profile https up -d
+  caddy:
+    image: caddy:2
+    container_name: bp-diary-caddy
+    profiles: ["https"]
+    env_file: .env
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./deploy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./web/landing:/srv/landing:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - cabinet
+    restart: unless-stopped
+
+volumes:
+  bot-data:
+  caddy-data:
+  caddy-config:

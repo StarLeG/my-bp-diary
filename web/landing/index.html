@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Дневник гипертоника — дневник давления в Telegram</title>
+  <meta name="description" content="Личный дневник давления в Telegram: запись за 2 нажатия, напоминания о лекарствах, сводка для врача. Бесплатно, без рекламы.">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <header class="hero">
+    <div class="container">
+      <h1>Дневник давления, который не мешает жить</h1>
+      <p class="hero-sub">
+        Запись давления — за 2 нажатия. Напоминания о лекарствах и повторных
+        замерах. Сводка и CSV для врача.
+      </p>
+      <a class="btn btn-primary" href="https://t.me/my_bp_diary_bot?start=landing">
+        Открыть в Telegram
+      </a>
+    </div>
+  </header>
+
+  <main>
+    <section class="section" id="problems">
+      <div class="container">
+        <h2>Знакомые ситуации?</h2>
+        <div class="cards">
+          <article class="card">
+            <h3>Забываете мерить?</h3>
+            <p>
+              Бот сам напомнит утром, днём и вечером — в удобное вам время.
+              Одно нажатие — и давление записано.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Не помните, приняли ли таблетку?</h3>
+            <p>
+              Напоминание придёт вместе со списком именно ваших лекарств.
+              «Принял всё ✓» — и приём отмечен.
+            </p>
+          </article>
+          <article class="card">
+            <h3>Врач просит дневник, а вести некогда?</h3>
+            <p>
+              Статистика считается сама: средние, минимумы и максимумы, тренд.
+              Экспорт в CSV — на выбор: 7 дней, 30 дней, всё время.
+            </p>
+          </article>
+        </div>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="how">
+      <div class="container">
+        <h2>Как это работает</h2>
+        <ol class="steps">
+          <li class="step">
+            <span class="step-icon" aria-hidden="true">✍️</span>
+            <h3>Записывайте</h3>
+            <p>Систолическое, диастолическое, пульс — кнопками, за пару секунд.</p>
+          </li>
+          <li class="step">
+            <span class="step-icon" aria-hidden="true">💊</span>
+            <h3>Следуйте напоминаниям</h3>
+            <p>Лекарства и повторный замер после приёма — по расписанию, без напоминаний из головы.</p>
+          </li>
+          <li class="step">
+            <span class="step-icon" aria-hidden="true">📊</span>
+            <h3>Покажите врачу</h3>
+            <p>Сводка и выгрузка CSV за период — чтобы приём прошёл по делу, а не по памяти.</p>
+          </li>
+        </ol>
+      </div>
+    </section>
+
+    <section class="section" id="trust">
+      <div class="container">
+        <h2>Почему можно доверять</h2>
+        <ul class="trust">
+          <li>Бесплатно, без рекламы</li>
+          <li>Данные хранятся локально на нашем сервере, не передаются третьим лицам</li>
+          <li>Сделано одним разработчиком</li>
+        </ul>
+      </div>
+    </section>
+
+    <section class="section section-alt" id="faq">
+      <div class="container">
+        <h2>Частые вопросы</h2>
+        <details class="faq-item">
+          <summary>Нужна ли регистрация?</summary>
+          <p>Нет. Достаточно открыть бота в Telegram и нажать «Старт» — дальше всё кнопками.</p>
+        </details>
+        <details class="faq-item">
+          <summary>Можно ли экспортировать данные?</summary>
+          <p>
+            Да. В боте есть экспорт в CSV за 7 дней, 30 дней или всё время —
+            файл открывается в Excel и подходит для врача.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Как удалить аккаунт и данные?</summary>
+          <p>
+            Напишите автору (контакт — внизу страницы): все ваши записи и
+            настройки удаляются без остатка.
+          </p>
+        </details>
+        <details class="faq-item">
+          <summary>Это медицинское изделие?</summary>
+          <p>
+            Нет. Бот — удобный дневник наблюдений, он не ставит диагнозов и не
+            заменяет консультацию врача.
+          </p>
+        </details>
+      </div>
+    </section>
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      <nav class="footer-links">
+        <a href="privacy.html">Политика конфиденциальности</a>
+      </nav>
+      <!-- ЗАМЕНИТЕ на свой контакт при развёртывании (переменная AUTHOR_CONTACT). -->
+      <p class="footer-author">Контакт автора: <span id="author-contact">см. раздел «Поддержать» в боте</span></p>
+    </div>
+  </footer>
+
+  <script src="script.js"></script>
+</body>
+</html>

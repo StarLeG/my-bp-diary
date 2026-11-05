@@ -1,0 +1,10 @@
+# Защита от случайного коммита секретов (.env, приватных ключей)
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: detect-private-key
+  - repo: https://github.com/gitleaks/gitleaks-pre-commit
+    rev: v8.24.0
+    hooks:
+      - id: gitleaks

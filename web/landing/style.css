@@ -1,0 +1,207 @@
+/* Лендинг «Дневник гипертоника» — простой адаптивный стиль, без библиотек. */
+:root {
+  --color-bg: #f7f9fb;
+  --color-surface: #ffffff;
+  --color-text: #1f2933;
+  --color-muted: #52606d;
+  --color-primary: #1476cc;
+  --color-primary-dark: #0f5ba3;
+  --color-border: #d9e2ec;
+  --radius: 12px;
+  --shadow: 0 2px 8px rgba(31, 41, 51, 0.08);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: "Segoe UI", system-ui, -apple-system, sans-serif;
+  line-height: 1.6;
+  color: var(--color-text);
+  background: var(--color-bg);
+}
+
+.container {
+  max-width: 960px;
+  margin: 0 auto;
+  padding: 0 16px;
+}
+
+/* Hero */
+.hero {
+  background: linear-gradient(160deg, #1476cc 0%, #0f5ba3 100%);
+  color: #ffffff;
+  text-align: center;
+  padding: 72px 0;
+}
+
+.hero h1 {
+  margin: 0 0 16px;
+  font-size: clamp(1.8rem, 5vw, 2.6rem);
+  line-height: 1.2;
+}
+
+.hero-sub {
+  margin: 0 auto 32px;
+  max-width: 560px;
+  font-size: 1.15rem;
+  opacity: 0.92;
+}
+
+/* Кнопки */
+.btn {
+  display: inline-block;
+  padding: 14px 32px;
+  border-radius: var(--radius);
+  font-size: 1.1rem;
+  font-weight: 600;
+  text-decoration: none;
+  transition: background-color 0.15s ease;
+}
+
+.btn-primary {
+  background: #ffffff;
+  color: var(--color-primary-dark);
+}
+
+.btn-primary:hover,
+.btn-primary:focus {
+  background: #e6f0fa;
+}
+
+/* Секции */
+.section {
+  padding: 56px 0;
+}
+
+.section-alt {
+  background: var(--color-surface);
+}
+
+.section h2 {
+  margin: 0 0 32px;
+  text-align: center;
+  font-size: 1.7rem;
+}
+
+/* Карточки проблем */
+.cards {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+}
+
+.card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 24px;
+  box-shadow: var(--shadow);
+}
+
+.card h3 {
+  margin: 0 0 8px;
+  font-size: 1.15rem;
+}
+
+.card p {
+  margin: 0;
+  color: var(--color-muted);
+}
+
+/* Шаги */
+.steps {
+  display: grid;
+  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  counter-reset: step;
+}
+
+.step {
+  text-align: center;
+  padding: 24px 16px;
+}
+
+.step-icon {
+  font-size: 2.4rem;
+}
+
+.step h3 {
+  margin: 12px 0 8px;
+}
+
+.step p {
+  margin: 0;
+  color: var(--color-muted);
+}
+
+/* Доверие */
+.trust {
+  list-style: none;
+  margin: 0 auto;
+  padding: 0;
+  max-width: 560px;
+  display: grid;
+  gap: 12px;
+}
+
+.trust li {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 16px 20px;
+}
+
+.trust li::before {
+  content: "✓ ";
+  color: var(--color-primary);
+  font-weight: 700;
+}
+
+/* FAQ */
+.faq-item {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  margin-bottom: 12px;
+  padding: 4px 20px;
+}
+
+.faq-item summary {
+  cursor: pointer;
+  font-weight: 600;
+  padding: 12px 0;
+}
+
+.faq-item p {
+  margin: 0 0 16px;
+  color: var(--color-muted);
+}
+
+/* Футер */
+.footer {
+  background: var(--color-surface);
+  border-top: 1px solid var(--color-border);
+  padding: 32px 0;
+  text-align: center;
+  color: var(--color-muted);
+}
+
+.footer-links a {
+  color: var(--color-primary);
+  text-decoration: none;
+}
+
+.footer-links a:hover,
+.footer-links a:focus {
+  text-decoration: underline;
+}
+
+.footer-author {
+  margin: 12px 0 0;
+}

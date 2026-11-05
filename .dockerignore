@@ -1,0 +1,24 @@
+# Не попадает в контекст сборки образа.
+.git
+.claude
+.venv
+__pycache__
+*.py[cod]
+*.egg-info
+dist
+build
+.pytest_cache
+.coverage
+htmlcov
+coverage.xml
+
+# Секреты и данные — только через переменные окружения и тома.
+.env
+data
+
+# Не нужно в образе: тесты, документация, инструменты.
+tests
+doc
+.pre-commit-config.yaml
+*.md
+!README.md

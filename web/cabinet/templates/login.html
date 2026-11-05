@@ -1,0 +1,49 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Вход — Дневник гипертоника</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    <h1>Личный кабинет</h1>
+    <p class="auth-sub">Дневник давления — с компьютера: история, сводка и лекарства.</p>
+
+    {% if error == "wrong" %}
+      <p class="alert alert-error">Неверный e-mail или пароль.</p>
+    {% elif error == "link_expired" %}
+      <p class="alert alert-error">
+        Ссылка устарела или уже использована. Нажмите <code>/cabinet</code> в боте —
+        придёт новая ссылка (действует 15 минут).
+      </p>
+    {% elif error == "rate" %}
+      <p class="alert alert-error">Слишком много попыток, подождите минуту.</p>
+    {% endif %}
+
+    <form method="post" action="/login" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        E-mail
+        <input type="email" name="email" required maxlength="255" autocomplete="username">
+      </label>
+      <label>
+        Пароль
+        <input type="password" name="password" required maxlength="128" autocomplete="current-password">
+      </label>
+      <button type="submit" class="btn">Войти</button>
+    </form>
+
+    <p class="auth-hint">
+      Впервые? Откройте <code>/cabinet</code> в Telegram-боте — ссылка без пароля
+      предложит создать пароль для входа с компьютера.
+    </p>
+    <p class="auth-hint">
+      Забыли пароль? Нажмите <code>/cabinet</code> в боте — по новой ссылке
+      пароль можно задать заново в профиле.
+    </p>
+    <p class="auth-foot">Дневник гипертоника — личный кабинет</p>
+  </main>
+</body>
+</html>

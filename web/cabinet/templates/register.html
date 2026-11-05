@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Создание пароля — Дневник гипертоника</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    <h1>Создание пароля</h1>
+    <p class="auth-sub">
+      Вы вошли по ссылке из Telegram. Задайте e-mail и пароль, чтобы в следующий
+      раз входить с компьютера без бота.
+    </p>
+
+    {% if error == "email" %}
+      <p class="alert alert-error">Укажите корректный e-mail.</p>
+    {% elif error == "password" %}
+      <p class="alert alert-error">Пароль — от 8 до 128 символов.</p>
+    {% elif error == "mismatch" %}
+      <p class="alert alert-error">Пароли не совпадают.</p>
+    {% elif error == "exists" %}
+      <p class="alert alert-error">
+        Такой e-mail или привязка к аккаунту уже есть. Войдите паролем —
+        или нажмите <code>/cabinet</code> в боте для новой ссылки.
+      </p>
+    {% endif %}
+
+    <form method="post" action="/register" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="token" value="{{ token }}">
+      <label>
+        E-mail
+        <input type="email" name="email" required maxlength="255" autocomplete="username">
+      </label>
+      <label>
+        Пароль
+        <input type="password" name="password" required minlength="8" maxlength="128" autocomplete="new-password">
+      </label>
+      <label>
+        Повторите пароль
+        <input type="password" name="password_confirm" required minlength="8" maxlength="128" autocomplete="new-password">
+      </label>
+      <button type="submit" class="btn">Создать пароль и войти</button>
+    </form>
+
+    <p class="auth-hint">Пароль хранится только в виде хеша и никогда не логируется.</p>
+  </main>
+</body>
+</html>

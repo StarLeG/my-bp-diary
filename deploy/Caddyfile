@@ -1,0 +1,16 @@
+# HTTPS для личного кабинета и лендинга (SPEC.md, раздел 16.2: HTTPS обязателен).
+# Caddy сам получает и продлевает сертификаты Let's Encrypt.
+#
+# CABINET_URL берётся из .env — это тот же адрес, который отдаёт команда
+# /cabinet в боте (например https://cabinet.example.org).
+{$CABINET_URL} {
+	encode gzip
+	reverse_proxy cabinet:8000
+}
+
+# Лендинг (статика из web/landing). ЗАМЕНИТЕ домен на свой и укажите DNS.
+landing.example.org {
+	encode gzip
+	root * /srv/landing
+	file_server
+}

@@ -1,0 +1,20 @@
+# Секреты и локальные настройки (в .claude/settings.json бывает токен!)
+.env
+.claude/
+
+# Данные
+data/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+
+# Тесты и покрытие
+.pytest_cache/
+.coverage
+htmlcov/
+coverage.xml
