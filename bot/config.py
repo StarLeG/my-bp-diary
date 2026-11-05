@@ -32,6 +32,40 @@ _PLACEHOLDER_URLS = frozenset(
 )
 
 
+def parse_admin_ids(raw: str) -> tuple[int, ...]:
+    """Разобрать `ADMIN_TELEGRAM_IDS`: целые ID через запятую (SPEC.md, раздел 3).
+
+    Пустая строка → пустой кортеж (админ-панель отключена). Мусорные элементы
+    отбрасываются с предупреждением; дубликаты убираются, порядок сохраняется.
+    """
+    result: list[int] = []
+    for token in raw.split(","):
+        token = token.strip()
+        if not token:
+            continue
+        try:
+            admin_id = int(token)
+        except ValueError:
+            logging.getLogger(__name__).warning(
+                "ADMIN_TELEGRAM_IDS: элемент %r не является целым числом — пропущен", token
+            )
+            continue
+        if admin_id not in result:
+            result.append(admin_id)
+    return tuple(result)
+
+
+def admin_ids_from_env() -> tuple[int, ...]:
+    """ID администраторов прямо из окружения, без полной валидации `Settings`.
+
+    Используется на импорте роутеров: `get_settings()` требует `BOT_TOKEN` и
+    при его отсутствии бросает `ValidationError`, чего на импорте быть не должно.
+    Значение то же, что `Settings.admin_telegram_ids` (обе читают
+    `ADMIN_TELEGRAM_IDS`).
+    """
+    return parse_admin_ids(os.getenv("ADMIN_TELEGRAM_IDS", ""))
+
+
 class Settings(BaseModel):
     """Настройки приложения из переменных окружения.
 
@@ -61,6 +95,27 @@ class Settings(BaseModel):
 
     cabinet_url: str = ""
     """Base URL личного кабинета. Пусто = кабинет не развёрнут."""
+
+    admin_telegram_ids: tuple[int, ...] = ()
+    """ID администраторов (`ADMIN_TELEGRAM_IDS`). Пусто = админ-панель отключена."""
+
+    backup_encryption_key: str = ""
+    """Ключ шифрования бэкапов (`BACKUP_ENCRYPTION_KEY`, SPEC.md, §20)."""
+
+    backup_dir: str = "data/backups"
+    """Каталог локальных копий (`BACKUP_DIR`)."""
+
+    s3_endpoint_url: str = ""
+    """Endpoint S3-совместимого хранилища. Пусто = off-site отключён."""
+
+    s3_bucket: str = ""
+    """Имя бакета S3 для off-site копий (§20)."""
+
+    s3_access_key_id: str = ""
+    """Access key S3."""
+
+    s3_secret_access_key: str = ""
+    """Secret key S3."""
 
     @field_validator("bot_token")
     @classmethod
@@ -93,6 +148,16 @@ class Settings(BaseModel):
             raise ValueError(f"Некорректный LOG_LEVEL: {value!r}")
         return value
 
+    @field_validator("admin_telegram_ids", mode="before")
+    @classmethod
+    def _validate_admin_ids(cls, value: object) -> tuple[int, ...]:
+        """Принимается и строка `ADMIN_TELEGRAM_IDS`, и последовательность ID."""
+        if isinstance(value, str):
+            return parse_admin_ids(value)
+        if value is None:
+            return ()
+        return tuple(int(item) for item in value)  # type: ignore[union-attr]
+
     @property
     def support_button_visible(self) -> bool:
         """Кнопка «Поддержать» видна, только если URL задан и не плейсхолдер."""
@@ -108,6 +173,19 @@ class Settings(BaseModel):
     def cabinet_button_visible(self) -> bool:
         """Кабинет развёрнут: заданы и секрет подписи, и base URL."""
         return bool(self.web_secret_key.strip() and self.cabinet_url.strip())
+
+    @property
+    def s3_configured(self) -> bool:
+        """Off-site в S3 включён: заданы endpoint, бакет и оба ключа (§20)."""
+        return all(
+            field.strip()
+            for field in (
+                self.s3_endpoint_url,
+                self.s3_bucket,
+                self.s3_access_key_id,
+                self.s3_secret_access_key,
+            )
+        )
 
 
 @lru_cache(maxsize=1)
@@ -127,4 +205,11 @@ def get_settings() -> Settings:
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         web_secret_key=os.getenv("WEB_SECRET_KEY", ""),
         cabinet_url=os.getenv("CABINET_URL", ""),
+        admin_telegram_ids=parse_admin_ids(os.getenv("ADMIN_TELEGRAM_IDS", "")),
+        backup_encryption_key=os.getenv("BACKUP_ENCRYPTION_KEY", ""),
+        backup_dir=os.getenv("BACKUP_DIR", "data/backups"),
+        s3_endpoint_url=os.getenv("S3_ENDPOINT_URL", ""),
+        s3_bucket=os.getenv("S3_BUCKET", ""),
+        s3_access_key_id=os.getenv("S3_ACCESS_KEY_ID", ""),
+        s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", ""),
     )

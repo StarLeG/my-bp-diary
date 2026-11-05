@@ -20,9 +20,10 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bot import texts
 from bot.db import create_engine, create_session_factory, init_db
+from bot.handlers import support
 from bot.handlers.stats import _support_footer
 from bot.middlewares import DebounceMiddleware
-from bot.models import Measurement, MedicationLog, Reminder, User as DbUser
+from bot.models import Measurement, MedicationLog, Reminder, User as DbUser, WebUser
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services.reminders import RemindersService
@@ -330,3 +331,55 @@ class TestSnoozeRowSemantics:
                 ).scalars()
             )
         assert snoozed == []
+
+
+class TestParallelAccountDeletion:
+    """Параллельное удаление аккаунта (§19): гонка двух подтверждений безопасна."""
+
+    async def test_parallel_delete_returns_single_true(
+        self, session_factory, user: DbUser, svc: RemindersService
+    ) -> None:
+        """Два конкурентных удаления: выигравший — True, проигравший — False.
+
+        Обе сессии читают пользователя до удаления; у проигравшего
+        `session.delete` находит 0 строк и получает `StaleDataError`,
+        который `delete_user_data` превращает в `False` без ошибки.
+        """
+
+        async def worker() -> bool:
+            async with session_factory() as session:
+                target = await measurements_service.get_user(session, TG_ID)
+                assert target is not None
+                await asyncio.sleep(0.05)  # обе сессии успевают прочитать
+                return await measurements_service.delete_user_data(
+                    session, svc, target
+                )
+
+        results = await asyncio.gather(worker(), worker())
+        assert sorted(results) == [False, True]
+        assert await count(session_factory, DbUser) == 0
+
+
+class TestCabinetRegistrationRace:
+    """Гонка создания ЛК с одним e-mail (§7.2, §16.2): один аккаунт, второй — «занят»."""
+
+    async def test_parallel_same_email_creates_one_account(
+        self, session_factory
+    ) -> None:
+        """Два конкурентных создания с одним e-mail: ровно одна запись web_users.
+
+        UNIQUE по `email` отсекает проигравшего: `_create_web_account`
+        получает `IntegrityError`, делает rollback и возвращает `False`
+        («e-mail занят»), а не падает.
+        """
+        email = "race@example.com"
+
+        async def register(telegram_id: int) -> bool:
+            async with session_factory() as session:
+                user = await measurements_service.get_or_create_user(session, telegram_id)
+                await session.commit()
+                return await support._create_web_account(session, user, email)
+
+        results = await asyncio.gather(register(1), register(2))
+        assert sorted(results) == [False, True]
+        assert await count(session_factory, WebUser) == 1

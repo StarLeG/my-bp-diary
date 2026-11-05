@@ -1,6 +1,7 @@
 # Секреты и локальные настройки (в .claude/settings.json бывает токен!)
 .env
 .claude/
+*.session
 
 # Данные
 data/
@@ -18,3 +19,6 @@ build/
 .coverage
 htmlcov/
 coverage.xml
+
+# Артефакты QA-прогонов (скриншоты, HTML-отчёты, telethon.session, diag-скрипты)
+qa/reports/

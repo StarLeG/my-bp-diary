@@ -15,6 +15,10 @@
 - catch-up при старте: просроченное отправляется один раз, не чаще 1 раза
   в день на тип (`last_sent_date`); ограничение действует только на catch-up,
   snooze в тот же день доставляется.
+- точка входа job'а — module-level `fire_reminder`, а не bound method:
+  `SQLAlchemyJobStore` сериализует job через `pickle`, а bound method тащит
+  весь сервис (включая `_scheduler`) и не сериализуется; экземпляр сервиса
+  привязывается через `bind_service`.
 """
 from __future__ import annotations
 
@@ -86,9 +90,13 @@ class RemindersService:
         return f"reminder:{reminder_id}"
 
     def _add_job(self, reminder_id: int, run_date: datetime, mode: str) -> None:
-        """Поставить одноразовый DateTrigger-job (или переставить существующий)."""
+        """Поставить одноразовый DateTrigger-job (или переставить существующий).
+
+        Точка входа — module-level `fire_reminder` (см. докстринг модуля):
+        bound method `self._fire` не сериализуется в `SQLAlchemyJobStore`.
+        """
         self._scheduler.add_job(
-            self._fire,
+            fire_reminder,
             trigger=DateTrigger(run_date=run_date, timezone="UTC"),
             id=self._job_id(reminder_id),
             args=[reminder_id, mode],
@@ -319,6 +327,27 @@ class RemindersService:
         self._remove_job(reminder_id)
         return True
 
+    async def remove_user_jobs(self, user_id: int) -> int:
+        """Снять все job'ы пользователя — перед удалением аккаунта (SPEC.md, §19).
+
+        Удаление выборочное, а не `scheduler.remove_all_jobs()`: job'ы других
+        пользователей должны остаться (изоляция данных, §7.1). Возвращает
+        количество снятых напоминаний.
+        """
+        async with self._session_factory() as session:
+            reminder_ids = (
+                (
+                    await session.execute(
+                        select(Reminder.id).where(Reminder.user_id == user_id)
+                    )
+                )
+                .scalars()
+                .all()
+            )
+        for reminder_id in reminder_ids:
+            self._remove_job(reminder_id)
+        return len(reminder_ids)
+
     # ─────────────────────────── Доставка ───────────────────────────
 
     async def _fire(self, reminder_id: int, mode: str) -> None:
@@ -471,3 +500,37 @@ class RemindersService:
                 mode = MODE_REMEASURE if reminder.type == TYPE_REMEASURE else MODE_SLOT
                 self._add_job(reminder.id, reminder.next_trigger_time, mode)
         return sent
+
+
+# ─────────────────── Точка входа job'а (module-level) ───────────────────
+
+#: Привязанный экземпляр сервиса. Job'ы переживают рестарты через
+#: `SQLAlchemyJobStore`, поэтому точка входа — сериализуемая по имени
+#: module-level функция, а не bound method (см. докстринг модуля).
+_service: Optional[RemindersService] = None
+
+
+def bind_service(service: Optional[RemindersService]) -> None:
+    """Привязать экземпляр сервиса к job-точке входа `fire_reminder`.
+
+    Вызывается при сборке приложения (`bot.main.build_app`) и в тестах.
+    `None` отвязывает сервис: сработавший без привязки job логируется
+    и игнорируется, планировщик не падает.
+    """
+    global _service
+    _service = service
+
+
+async def fire_reminder(reminder_id: int, mode: str) -> None:
+    """Точка входа job'а: сериализуема в `SQLAlchemyJobStore` (SPEC.md, §6.7).
+
+    Делегирует привязанному `RemindersService._fire`. Без привязки — ошибка
+    в лог, исключение наружу не выпускается (job не должен ронять планировщик).
+    """
+    if _service is None:
+        logger.error(
+            "Сработал job напоминания %s без привязанного сервиса (bind_service)",
+            reminder_id,
+        )
+        return
+    await _service._fire(reminder_id, mode)

@@ -24,6 +24,7 @@ BTN_DIARY = "Дневник за сегодня"
 BTN_STATS = "Статистика"
 BTN_SETTINGS = "Настройки"
 BTN_CABINET = "Личный кабинет"
+BTN_SEND_REPORT = "Отправить отчет"
 BTN_ABOUT = "О боте / Поддержать"
 BTN_BACK = "Назад"
 BTN_IN_MENU = "В меню"
@@ -56,6 +57,7 @@ BTN_EXPORT_CSV = "Экспорт CSV"
 BTN_TARGETS = "Целевые значения"
 BTN_REMINDERS = "Напоминания"
 BTN_MY_MEDS = "Мои лекарства"
+BTN_MY_DOCTOR = "Мой врач"
 BTN_TIMEZONE = "Часовой пояс"
 
 BTN_ADD = "Добавить"
@@ -319,3 +321,168 @@ SUPPORT_TEXT = (
 
 CABINET_LINK_SENT = "Ссылка для входа в личный кабинет (действует 15 минут):\n{url}"
 CABINET_DISABLED = "Личный кабинет пока не развёрнут."
+CABINET_EMAIL_PROMPT = "Для входа в личный кабинет нужен e-mail. Отправьте его сообщением:"
+CABINET_EMAIL_BAD = "Кажется, это не похоже на e-mail. Попробуйте ещё раз:"
+CABINET_EMAIL_TAKEN = "Этот e-mail уже занят. Попробуйте другой:"
+CABINET_ACCOUNT_CREATED = "Аккаунт создан. Ваша ссылка для входа:\n{url}"
+CABINET_REG_CANCELLED = "Создание кабинета отменено."
+
+# ─────────────────── Кабинет врача (SPEC.md, §21) ───────────────────
+
+BTN_REVOKE_DOCTOR = "Отозвать доступ"
+
+DOCTOR_WEB_DISABLED = "Кабинет врача пока не развёрнут."
+DOCTOR_MENU = "Мой врач"
+DOCTOR_NO_LINK = (
+    "Врач пока не добавлен.\n"
+    "Отправьте e-mail врача сообщением — подготовлю ссылку для него."
+)
+DOCTOR_EMAIL_BAD = "Кажется, это не похоже на e-mail. Попробуйте ещё раз:"
+DOCTOR_INVITE_CREATED = (
+    "Готово! Перешлите врачу сообщение ниже — по ссылке он получит доступ "
+    "к вашим измерениям:\n\nПациент {name} предоставил вам доступ.\n{url}"
+)
+DOCTOR_REPORT_LINK = "Ссылка для вашего врача сформирована. Перешлите её ему: {url}"
+DOCTOR_REPORT_NO_LINK = "Сначала добавьте врача: «Настройки» → «Мой врач»."
+DOCTOR_REPORT_REVOKED = (
+    "Доступ врача отозван. Добавьте врача заново: «Настройки» → «Мой врач»."
+)
+DOCTOR_REVOKED = "Доступ отозван."
+DOCTOR_ADD_CANCELLED = "Добавление врача отменено."
+
+DOCTOR_LINK_ITEM = "• {email} — {status}"
+DOCTOR_STATUS_LABELS = {
+    "pending": "ожидает врача",
+    "active": "доступ открыт",
+    "revoked": "доступ отозван",
+}
+
+# ─────────────────── Административная панель (SPEC.md, §18) ───────────────────
+
+ADMIN_FORBIDDEN = "Доступ запрещен"
+ADMIN_MENU = "Административная панель"
+
+BTN_ADMIN_STATS = "📊 Статистика БД"
+BTN_ADMIN_BACKUPS = "💾 Бэкапы"
+BTN_ADMIN_HEALTH = "🩺 Здоровье системы"
+BTN_ADMIN_BROADCAST = "📢 Рассылка"
+BTN_ADMIN_SEARCH = "👤 Поиск пользователя"
+BTN_REFRESH = "Обновить"
+BTN_BACKUP_CREATE = "Создать бэкап сейчас"
+BTN_BACKUP_DOWNLOAD = "Скачать последний бэкап"
+BTN_BCAST_CONFIRM = "Подтвердить отправку"
+BTN_SEND_TEST = "Отправить тестовое сообщение"
+
+# Статистика БД (§18.2) — только агрегаты, без личных данных.
+ADMIN_STATS_HEADER = "📊 Статистика БД"
+ADMIN_STATS_USERS = "Всего пользователей: {count}"
+ADMIN_STATS_DAU = "Активных за 24 часа (DAU): {count}"
+ADMIN_STATS_WAU = "Активных за 7 дней (WAU): {count}"
+ADMIN_STATS_MEASUREMENTS = "Всего записей давления: {count}"
+ADMIN_STATS_MEDICATIONS = "Всего активных лекарств: {count}"
+ADMIN_STATS_DB_SIZE = "Размер БД: {size} (WAL: {wal})"
+ADMIN_STATS_SLOTS = "Напоминания: утро — {morning}, обед — {noon}, вечер — {evening}"
+ADMIN_STATS_CACHE_NOTE = "Данные кэшируются на 5 минут."
+
+# Здоровье системы (§18.4).
+ADMIN_HEALTH_HEADER = "🩺 Здоровье системы"
+ADMIN_HEALTH_UPTIME = "Аптайм: {uptime}"
+ADMIN_HEALTH_VERSION = "Версия: {version} (Python {python})"
+ADMIN_HEALTH_SCHEDULER_RUNNING = "Running"
+ADMIN_HEALTH_SCHEDULER_STOPPED = "Stopped"
+ADMIN_HEALTH_SCHEDULER = "Планировщик: {status}, задач в очереди: {jobs}"
+ADMIN_HEALTH_ERRORS = "Ошибок за 24 часа: {count}"
+
+# Рассылка (§18.5).
+ADMIN_BCAST_PROMPT = "Введите текст рассылки (с поддержкой Markdown)."
+ADMIN_BCAST_EMPTY = "Пустой текст — отправлять нечего."
+ADMIN_BCAST_NO_USERS = "Пользователей пока нет."
+ADMIN_BCAST_PREVIEW = "Превью сообщения:\n\n{text}"
+ADMIN_BCAST_PROGRESS = "Отправлено {done} из {total}..."
+ADMIN_BCAST_REPORT = "Рассылка завершена.\nДоставлено: {delivered}, Заблокировали: {blocked}"
+ADMIN_BCAST_CANCELLED = "Рассылка отменена."
+
+# Поиск пользователя (§18.6) — без личных медицинских данных.
+ADMIN_SEARCH_PROMPT = "Введите telegram_id пользователя."
+ADMIN_SEARCH_BAD_INPUT = "Нужен целый telegram_id, например 123456789."
+ADMIN_SEARCH_USERNAME_UNSUPPORTED = (
+    "Поиск по @username недоступен: хранится только telegram_id."
+)
+ADMIN_SEARCH_NOT_FOUND = "Пользователь не найден."
+ADMIN_SEARCH_CARD = (
+    "ID: {telegram_id}\n"
+    "Дата регистрации: {created}\n"
+    "Часовой пояс: {tz}\n"
+    "Записей давления: {count}\n"
+    "Онбординг: {onboarded}\n"
+    "Напоминания: {reminders}"
+)
+ADMIN_SEARCH_ONBOARDED = "пройден"
+ADMIN_SEARCH_NOT_ONBOARDED = "не пройден"
+ADMIN_SEARCH_REMINDERS = "включены: {slots}"
+ADMIN_SEARCH_REMINDERS_OFF = "выключены"
+ADMIN_SEARCH_TEST_SENT = "Тестовое сообщение отправлено."
+ADMIN_SEARCH_TEST_FAILED = "Не удалось отправить сообщение."
+ADMIN_SEARCH_TEST_MESSAGE = "Тестовое сообщение: проверка доставки уведомлений."
+
+# Бэкапы (§18.3).
+ADMIN_BACKUP_HEADER = "💾 Бэкапы"
+ADMIN_BACKUP_NONE = "Резервных копий ещё нет."
+ADMIN_BACKUP_INTEGRITY_OK = "integrity_check: OK"
+ADMIN_BACKUP_INTEGRITY_FAIL = "integrity_check: FAIL"
+ADMIN_BACKUP_LAST = (
+    "Последний бэкап: {name}\nДата и время: {created}\nРазмер: {size}\n{integrity}"
+)
+ADMIN_BACKUP_OFFSITE_OK = "Off-site (S3): {url}"
+ADMIN_BACKUP_OFFSITE_FAIL = "Off-site (S3): ошибка — {error}"
+ADMIN_BACKUP_OFFSITE_NONE = "Off-site (S3): не настроен"
+ADMIN_BACKUP_LIST_HEADER = "Локальные копии:"
+ADMIN_BACKUP_ITEM = "• {name} — {size}"
+ADMIN_BACKUP_CREATING = "Создаю резервную копию…"
+ADMIN_BACKUP_DONE = "Бэкап создан: {name}, {size}."
+ADMIN_BACKUP_ERROR = "Не удалось создать бэкап: {error}"
+ADMIN_BACKUP_TOO_BIG = "Файл слишком большой для отправки в чат ({size}).\nСсылка: {url}"
+ADMIN_BACKUP_NO_S3 = (
+    "Файл слишком большой для отправки в чат ({size}), "
+    "а off-site хранилище не настроено."
+)
+
+# ─────────────────── Удаление аккаунта (SPEC.md, §19) ───────────────────
+
+BTN_DELETE_ACCOUNT = "Удалить аккаунт"
+DELETE_ACCOUNT_WARNING = (
+    "Это действие необратимо...\n"
+    "Все записи давления, напоминания и лекарства будут удалены без возможности "
+    "восстановления."
+)
+BTN_CONFIRM_DELETE_ACCOUNT = "Да, удалить"
+DELETE_ACCOUNT_DONE = "Ваш аккаунт и все данные удалены"
+
+
+def fmt_size(size_bytes: int) -> str:
+    """Размер файла человекочитаемо: «850 КБ», «12,3 МБ» (§18.3)."""
+    if size_bytes < 1024:
+        return f"{size_bytes} байт"
+    if size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.0f} КБ"
+    return f"{size_bytes / (1024 * 1024):.1f} МБ".replace(".", ",")
+
+
+def fmt_uptime(seconds: int) -> str:
+    """Аптайм: «2 д 3 ч», «15 мин» (§18.4)."""
+    minutes = max(seconds, 0) // 60
+    days, rest = divmod(minutes, 60 * 24)
+    hours, mins = divmod(rest, 60)
+    parts: list[str] = []
+    if days:
+        parts.append(f"{days} д")
+    if hours:
+        parts.append(f"{hours} ч")
+    if mins or not parts:
+        parts.append(f"{mins} мин")
+    return " ".join(parts)
+
+
+def fmt_backup_status(integrity_ok: bool) -> str:
+    """Статус верификации копии (§18.3)."""
+    return ADMIN_BACKUP_INTEGRITY_OK if integrity_ok else ADMIN_BACKUP_INTEGRITY_FAIL

@@ -30,18 +30,21 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bot import texts
 from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
-from bot.models import Measurement, Medication, Reminder, User, WebUser
+from bot.models import Doctor, Measurement, Medication, Reminder, User, WebUser
 from bot.services import csv_export
+from bot.services import doctor as doctor_service
 from bot.services import medications as medications_service
 from bot.services import stats
 from bot.services.measurements import measurements_for_period
 from bot.services.reminders import next_slot_occurrence
-from web.cabinet import auth
+from web.cabinet import auth, doctor_auth
 
 #: Имя сессионной cookie (SPEC.md, раздел 16.2: HTTP-only, 7 дней).
 SESSION_COOKIE = "cabinet_session"
 #: Имя cookie с CSRF-токеном (double-submit вместе с hidden field).
 CSRF_COOKIE = "csrf_token"
+#: Имя сессионной cookie врача (SPEC.md, раздел 21: stateless, 7 дней).
+DOCTOR_COOKIE = "doctor_session"
 
 #: Сессия живёт 7 дней — в секундах, для Max-Age cookie.
 SESSION_MAX_AGE = 7 * 24 * 3600
@@ -141,6 +144,8 @@ def create_app(
     magic = auth.MagicLink(settings.web_secret_key)
     csrf = auth.Csrf(settings.web_secret_key)
     limiter = auth.RateLimiter()
+    doctor_magic = doctor_auth.DoctorMagicLink(settings.web_secret_key)
+    doctor_sessions = doctor_auth.DoctorSession(settings.web_secret_key)
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
@@ -157,6 +162,8 @@ def create_app(
     app.state.magic = magic
     app.state.csrf = csrf
     app.state.limiter = limiter
+    app.state.doctor_magic = doctor_magic
+    app.state.doctor_sessions = doctor_sessions
     app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
 
     # ───────────────────── Зависимости ─────────────────────
@@ -244,6 +251,59 @@ def create_app(
 
     def login_redirect() -> RedirectResponse:
         return RedirectResponse(url="/login", status_code=303)
+
+    # ───────────────────── Кабинет врача: зависимости ─────────────────────
+
+    async def get_doctor(
+        request: Request, db: AsyncSession = Depends(get_db)
+    ) -> Optional[Doctor]:
+        """Врач по сессионной cookie (или None — не залогинен, §21)."""
+        token = request.cookies.get(DOCTOR_COOKIE, "")
+        doctor_id = doctor_sessions.verify(token)
+        if doctor_id is None:
+            return None
+        return (
+            await db.execute(select(Doctor).where(Doctor.id == doctor_id))
+        ).scalar_one_or_none()
+
+    async def require_doctor(doctor: Optional[Doctor] = Depends(get_doctor)) -> Doctor:
+        """Требовать вход врача: без сессии — страница входа кабинета врача."""
+        if doctor is None:
+            raise HTTPException(status_code=303, headers={"Location": "/doctor"})
+        return doctor
+
+    def set_doctor_cookie(request: Request, response: Response, doctor_id: int) -> None:
+        """Поставить сессионную cookie врача (HTTP-only, 7 дней, Secure по схеме)."""
+        response.set_cookie(
+            DOCTOR_COOKIE,
+            doctor_sessions.make(doctor_id),
+            max_age=doctor_auth.DOCTOR_SESSION_MAX_AGE,
+            httponly=True,
+            secure=cookie_secure(request),
+            samesite="lax",
+            path="/",
+        )
+
+    async def require_patient_link(
+        db: AsyncSession, doctor: Doctor, user_id: int
+    ) -> User:
+        """Пациент, к которому у врача есть доступ: только `status='active'` (§21).
+
+        Проверяется на каждый запрос данных пациента (CLAUDE.md, «Роли и
+        доступ»): `revoked` (пациент отозвал) и `pending` (врач ещё не
+        открывал ссылку) — редирект с ошибкой.
+        """
+        link = await doctor_service.link_for_pair(db, doctor.id, user_id)
+        if link is None or link.status != "active":
+            raise HTTPException(
+                status_code=303, headers={"Location": "/doctor?error=denied"}
+            )
+        user = (
+            await db.execute(select(User).where(User.id == user_id))
+        ).scalar_one_or_none()
+        if user is None:  # pragma: no cover — FK CASCADE не даёт осиротеть записи
+            raise HTTPException(status_code=404, detail="Пациент не найден")
+        return user
 
     # ───────────────────── Вход, регистрация, magic link ─────────────────────
 
@@ -464,6 +524,7 @@ def create_app(
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
         medications = await medications_service.list_medications(db, user)
+        doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         reminders = list(
             (
                 await db.execute(
@@ -489,6 +550,7 @@ def create_app(
                 "summary": summary,
                 "medications": medications,
                 "reminders": {r.type: r for r in reminders},
+                "doctor_notes": doctor_notes,
                 "chart": _chart_payload(measurements, user.timezone),
                 "days": days,
                 "date_from": date_from,
@@ -733,6 +795,260 @@ def create_app(
                     f'attachment; filename="{csv_export.file_name("meds", start_day, end_day)}"'
                 )
             },
+        )
+
+    # ───────────────────── Кабинет врача (SPEC.md, раздел 21) ─────────────────────
+
+    def set_csrf_cookie(request: Request, response: Response, csrf_token: str) -> None:
+        """Поставить CSRF-куку (double-submit вместе с hidden field формы)."""
+        response.set_cookie(
+            CSRF_COOKIE,
+            csrf_token,
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            secure=cookie_secure(request),
+            samesite="lax",
+            path="/",
+        )
+
+    async def _doctor_magic_response(
+        request: Request, db: AsyncSession, token: str
+    ) -> Response:
+        """Вход по magic link для врача (§21): активация связи и сессия.
+
+        Ссылка одноразовая (`consume`); `revoked`-связь не активируется —
+        пациент отозвал доступ до того, как врач открыл ссылку.
+        """
+        payload = doctor_magic.consume(token)
+        if payload is None:
+            return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
+        doctor_id, patient_user_id = payload
+        doctor = (
+            await db.execute(select(Doctor).where(Doctor.id == doctor_id))
+        ).scalar_one_or_none()
+        if doctor is None:
+            return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
+        if not await doctor_service.activate_link(db, doctor.id, patient_user_id):
+            return RedirectResponse(url="/doctor?error=denied", status_code=303)
+        response = RedirectResponse(
+            url=f"/doctor/patient/{patient_user_id}", status_code=303
+        )
+        set_doctor_cookie(request, response, doctor.id)
+        return response
+
+    @app.get("/doctor", response_class=HTMLResponse)
+    async def doctor_page(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        doctor: Optional[Doctor] = Depends(get_doctor),
+    ) -> Response:
+        """Кабинет врача: вход или список пациентов (§21).
+
+        `?token=` — вход по magic link из бота (15 минут, одноразовый):
+        активирует связь и открывает карточку пациента из ссылки.
+        """
+        token = request.query_params.get("token", "")
+        if token:
+            return await _doctor_magic_response(request, db, token)
+        csrf_token = csrf.issue()
+        if doctor is not None:
+            patients = await doctor_service.active_links_for_doctor(db, doctor.id)
+            response = _templates.TemplateResponse(
+                request,
+                "doctor_dashboard.html",
+                {
+                    "view": "list",
+                    "doctor": doctor,
+                    "patients": patients,
+                    "error": request.query_params.get("error", ""),
+                    "csrf_token": csrf_token,
+                },
+            )
+        else:
+            response = _templates.TemplateResponse(
+                request,
+                "doctor_dashboard.html",
+                {
+                    "view": "login",
+                    "doctor": None,
+                    "error": request.query_params.get("error", ""),
+                    "csrf_token": csrf_token,
+                },
+            )
+        set_csrf_cookie(request, response, csrf_token)
+        return response
+
+    @app.post("/doctor/login")
+    async def doctor_login(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        doctor: Optional[Doctor] = Depends(get_doctor),
+    ) -> Response:
+        """Вход врача e-mail + пароль (Argon2id; rate limiting 5 попыток/мин).
+
+        Работает для врачей с установленным паролем: в MVP пароль при
+        добавлении генерируется ботом случайным, основной вход — по ссылке.
+        """
+        if doctor is not None:
+            return RedirectResponse(url="/doctor", status_code=303)
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        email = str(form.get("email", "")).strip().lower()
+        password = str(form.get("password", ""))
+        key = f"doctor:{_client_ip(request)}:{email}"
+        if not limiter.allow(key):
+            raise HTTPException(
+                status_code=429, detail="Слишком много попыток, подождите минуту"
+            )
+        limiter.hit(key)
+        record = (
+            await db.execute(select(Doctor).where(Doctor.email == email))
+        ).scalar_one_or_none()
+        if record is None or not auth.verify_password(record.password_hash, password):
+            return RedirectResponse(url="/doctor?error=wrong", status_code=303)
+        limiter.reset(key)
+        response = RedirectResponse(url="/doctor", status_code=303)
+        set_doctor_cookie(request, response, record.id)
+        return response
+
+    @app.post("/doctor/logout")
+    async def doctor_logout(request: Request) -> Response:
+        """Выход врача: stateless-сессия снимается удалением cookie (§21)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        response = RedirectResponse(url="/doctor", status_code=303)
+        response.delete_cookie(DOCTOR_COOKIE, path="/")
+        return response
+
+    @app.get("/doctor/patient/{user_id}", response_class=HTMLResponse)
+    async def doctor_patient(
+        user_id: int,
+        request: Request,
+        days: str = Query("7"),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        db: AsyncSession = Depends(get_db),
+        doctor: Doctor = Depends(require_doctor),
+    ) -> Response:
+        """Карточка пациента: график, таблица, сводка и заметки врача (§21).
+
+        Только чтение: врач не редактирует записи пациента, добавляет лишь
+        заметки (§21, «Логика для врача»).
+        """
+        user = await require_patient_link(db, doctor, user_id)
+        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        measurements = await measurements_for_period(db, user, start_day, end_day)
+        summary = await stats.summary(db, user, start_day, end_day)
+        notes = await doctor_service.notes_for_patient(db, user.id)
+        csrf_token = csrf.issue()
+        response = _templates.TemplateResponse(
+            request,
+            "doctor_dashboard.html",
+            {
+                "view": "patient",
+                "doctor": doctor,
+                "user": user,
+                "user_zone": ZoneInfo(user.timezone),
+                "feeling_labels": texts.FEELING_LABELS,
+                "medication_labels": MEDICATION_TAKEN_LABELS,
+                "measurements": measurements,
+                "summary": summary,
+                "notes": notes,
+                "chart": _chart_payload(measurements, user.timezone),
+                "days": days,
+                "date_from": date_from,
+                "date_to": date_to,
+                "start_day": start_day,
+                "end_day": end_day,
+                "error": request.query_params.get("error", ""),
+                "saved": request.query_params.get("saved", ""),
+                "csrf_token": csrf_token,
+            },
+        )
+        set_csrf_cookie(request, response, csrf_token)
+        return response
+
+    @app.get("/doctor/patient/{user_id}/export.csv")
+    async def doctor_patient_export_csv(
+        user_id: int,
+        days: str = Query("7"),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        db: AsyncSession = Depends(get_db),
+        doctor: Doctor = Depends(require_doctor),
+    ) -> Response:
+        """CSV измерений пациента за период (только `status='active'`, §21)."""
+        user = await require_patient_link(db, doctor, user_id)
+        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        payload = await csv_export.export_measurements(
+            db, user, start_day, end_day, limit=CSV_EXPORT_LIMIT
+        )
+        if payload is None:
+            return RedirectResponse(
+                url=f"/doctor/patient/{user_id}?error=too_many", status_code=303
+            )
+        return Response(
+            content=payload,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{csv_export.file_name("bp", start_day, end_day)}"'
+                )
+            },
+        )
+
+    @app.get("/doctor/patient/{user_id}/export.pdf")
+    async def doctor_patient_export_pdf(
+        user_id: int,
+        days: str = Query("7"),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        db: AsyncSession = Depends(get_db),
+        doctor: Doctor = Depends(require_doctor),
+    ) -> Response:
+        """PDF-отчёт по пациенту за период (только `status='active'`, §21)."""
+        user = await require_patient_link(db, doctor, user_id)
+        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        measurements = await measurements_for_period(db, user, start_day, end_day)
+        payload = doctor_service.build_report_pdf(
+            patient_label=f"Пациент {user.telegram_id}",
+            measurements=measurements,
+            tz_name=user.timezone,
+        )
+        return Response(
+            content=payload,
+            media_type="application/pdf",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="bp-{start_day.isoformat()}-{end_day.isoformat()}.pdf"'
+                )
+            },
+        )
+
+    @app.post("/doctor/patient/{user_id}/note")
+    async def doctor_patient_note(
+        user_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        doctor: Doctor = Depends(require_doctor),
+    ) -> Response:
+        """Заметка врача пациенту: сохраняется в `doctor_notes` (§21, §4.10).
+
+        Видна пациенту в его личном кабинете; длина — до 1000 символов.
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await require_patient_link(db, doctor, user_id)
+        try:
+            await doctor_service.add_note(
+                db, doctor.id, user.id, str(form.get("text", ""))
+            )
+        except ValueError:
+            return RedirectResponse(
+                url=f"/doctor/patient/{user_id}?error=note#notes", status_code=303
+            )
+        return RedirectResponse(
+            url=f"/doctor/patient/{user_id}?saved=note#notes", status_code=303
         )
 
     return app

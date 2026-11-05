@@ -25,6 +25,7 @@
     <a href="#history">История</a>
     <a href="#medications">Лекарства</a>
     <a href="#reminders">Напоминания</a>
+    <a href="#doctor-notes">Заметки врача</a>
   </nav>
 
   <main class="container">
@@ -290,6 +291,23 @@
         </label>
         <button type="submit" class="btn">Сохранить напоминания</button>
       </form>
+    </section>
+
+    <!-- ── Заметки врача ── -->
+    <section class="card" id="doctor-notes">
+      <h2>Заметки врача</h2>
+      {% if not doctor_notes %}
+        <p>Заметок от врача пока нет.</p>
+      {% else %}
+        <ul class="facts">
+          {% for note, note_doctor in doctor_notes %}
+            <li>
+              <span class="muted">{{ note.created_at.strftime("%d.%m.%Y %H:%M") }} — {{ note_doctor.name }}</span><br>
+              {{ note.text }}
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
     </section>
   </main>
 

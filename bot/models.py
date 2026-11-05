@@ -270,3 +270,84 @@ class WebSession(Base):
         UTCDateTime(), nullable=False, default=_utcnow
     )
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class Doctor(Base):
+    """Врач, который может просматривать данные пациентов (SPEC.md, раздел 4.8).
+
+    Пароль хранится только как хеш Argon2id; запись создаётся ботом при
+    добавлении врача пациентом (пароль — случайный, вход по ссылке).
+    """
+
+    __tablename__ = "doctors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    name: Mapped[str] = mapped_column(String(100), nullable=False)
+    clinic: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(name) BETWEEN 1 AND 100", name="ck_doctors_name_length"),
+        CheckConstraint(
+            "clinic IS NULL OR length(clinic) <= 100", name="ck_doctors_clinic_length"
+        ),
+    )
+
+
+class DoctorPatient(Base):
+    """Связь врач–пациент: право доступа к данным (SPEC.md, раздел 4.9).
+
+    Статусы: `pending` — пациент добавил врача, `active` — врач открыл
+    ссылку-приглашение (доступ открыт), `revoked` — пациент отозвал доступ.
+    """
+
+    __tablename__ = "doctor_patients"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    doctor_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("doctors.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    status: Mapped[str] = mapped_column(String(16), nullable=False, default="pending")
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        UniqueConstraint("doctor_id", "user_id", name="uq_doctor_patients_doctor_user"),
+        CheckConstraint(
+            "status IN ('pending', 'active', 'revoked')",
+            name="ck_doctor_patients_status",
+        ),
+    )
+
+
+class DoctorNote(Base):
+    """Заметка врача пациенту (SPEC.md, раздел 4.10).
+
+    Хранится в БД и видна пациенту в его личном кабинете.
+    """
+
+    __tablename__ = "doctor_notes"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    doctor_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("doctors.id", ondelete="CASCADE"), nullable=False
+    )
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint("length(text) BETWEEN 1 AND 1000", name="ck_doctor_notes_text_length"),
+    )

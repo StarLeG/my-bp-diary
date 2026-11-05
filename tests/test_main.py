@@ -22,7 +22,9 @@ from bot.config import Settings
 from bot.handlers import router
 from bot.main import App, build_app, build_scheduler, main, run
 from bot.middlewares import DbSessionMiddleware, DebounceMiddleware, ThrottleMiddleware
-from bot.services.reminders import RemindersService
+from bot.services.admin import AdminService, ErrorCounter
+from bot.services.backup import BACKUP_JOB_ID, BackupService, fire_backup
+from bot.services.reminders import RemindersService, fire_reminder
 
 #: Фейковый токен валидного формата: проверяется только формат, сеть не нужна.
 FAKE_TOKEN = f"123456:{'A' * 35}"
@@ -105,6 +107,15 @@ class TestBuildApp:
         app = build_app(settings)
         assert app.dp.workflow_data["reminders"] is app.reminders
 
+    async def test_reminders_service_bound_to_job_entry(
+        self, settings: Settings, mocker
+    ) -> None:
+        """Job-точка входа `fire_reminder` делегирует сервису из `build_app`."""
+        app = build_app(settings)
+        fire = mocker.patch.object(app.reminders, "_fire", new=mocker.AsyncMock())
+        await fire_reminder(5, "slot")
+        fire.assert_awaited_once_with(5, "slot")
+
     def test_router_registered(self, settings: Settings) -> None:
         app = build_app(settings)
         assert router in app.dp.sub_routers
@@ -135,6 +146,50 @@ class TestBuildApp:
         bad = Settings(bot_token="не-токен", db_path=str(tmp_path / "bot.sqlite3"))
         with pytest.raises(TokenValidationError):
             build_app(bad)
+
+
+class TestBuildAppBackupAdmin:
+    """Компоненты §18–§20: бэкапы, админ-сервис, счётчик ошибок."""
+
+    def test_backup_admin_error_counter_created(self, settings: Settings) -> None:
+        app = build_app(settings)
+        assert isinstance(app.backup, BackupService)
+        assert isinstance(app.admin, AdminService)
+        assert isinstance(app.error_counter, ErrorCounter)
+
+    def test_backup_and_admin_in_workflow_data(self, settings: Settings) -> None:
+        app = build_app(settings)
+        assert app.dp.workflow_data["backup"] is app.backup
+        assert app.dp.workflow_data["admin"] is app.admin
+
+    def test_daily_backup_job_scheduled(self, settings: Settings) -> None:
+        """Ежедневный job бэкапа привязан к планировщику приложения (§20)."""
+        app = build_app(settings)
+        job = app.scheduler.get_job(BACKUP_JOB_ID)
+        assert job is not None
+        assert job.func is fire_backup
+
+    async def test_daily_backup_job_survives_jobstore(self, settings: Settings) -> None:
+        """Job сериализуется в SQLAlchemyJobStore и восстанавливается как `fire_backup`."""
+        app = build_app(settings)
+        app.scheduler.start()
+        try:
+            job = app.scheduler.get_job(BACKUP_JOB_ID)
+            assert job is not None
+            assert job.func is fire_backup
+        finally:
+            app.scheduler.shutdown(wait=False)
+
+    async def test_fire_backup_delegates_to_service(
+        self, settings: Settings, mocker
+    ) -> None:
+        """`fire_backup` (точка входа job'а) делегирует сервису из `build_app`."""
+        app = build_app(settings)
+        create = mocker.patch.object(
+            app.backup, "create_backup", new_callable=mocker.AsyncMock
+        )
+        await fire_backup()
+        create.assert_awaited_once()
 
 
 class TestRun:

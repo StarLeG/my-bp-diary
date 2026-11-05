@@ -705,3 +705,90 @@ class TestMeds:
             session=session,
         )
         assert edit.call_args.args[0] != texts.MEDS_DELETED
+
+
+class TestDeleteAccount:
+    """Удаление аккаунта (§19): предупреждение, порядок «job'ы → данные», идемпотентность."""
+
+    async def test_delete_warning(self, session, edit, cb_answer) -> None:
+        await call(
+            settings.cb_delete_account,
+            callback=make_callback("set:delete", make_message()),
+        )
+        assert edit.call_args.args[0] == texts.DELETE_ACCOUNT_WARNING
+        assert (
+            edit.call_args.kwargs["reply_markup"] == keyboards.delete_account_kb()
+        )
+
+    async def test_confirm_removes_jobs_then_data(
+        self, session, user, edit, cb_answer, state, mocker
+    ) -> None:
+        order: list[str] = []
+
+        async def remove_jobs(user_id: int) -> int:
+            order.append("jobs")
+            return 1
+
+        reminders = mocker.Mock()
+        reminders.remove_user_jobs = remove_jobs
+
+        real_delete = session.delete
+
+        async def tracked_delete(obj) -> None:
+            order.append("delete")
+            await real_delete(obj)
+
+        mocker.patch.object(session, "delete", tracked_delete)
+        await call(
+            settings.cb_delete_account_confirm,
+            callback=make_callback("set:delete:ok", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        # Порядок обязателен (§19): сначала job'ы, потом удаление данных.
+        assert order == ["jobs", "delete"]
+        assert edit.call_args.args[0] == texts.DELETE_ACCOUNT_DONE
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        remaining = (
+            await session.execute(
+                select(UserModel).where(UserModel.telegram_id == TG_ID)
+            )
+        ).scalar_one_or_none()
+        assert remaining is None
+
+    async def test_confirm_double_press_is_idempotent(
+        self, session, user, edit, cb_answer, state, mocker
+    ) -> None:
+        reminders = mocker.Mock()
+        reminders.remove_user_jobs = mocker.AsyncMock(return_value=1)
+        callback = make_callback("set:delete:ok", make_message())
+        for _ in range(2):
+            await call(
+                settings.cb_delete_account_confirm,
+                callback=callback,
+                state=state,
+                session=session,
+                reminders=reminders,
+            )
+        # Повторное нажатие не трогает job'ы и показывает тот же финал.
+        reminders.remove_user_jobs.assert_awaited_once()
+        assert [c.args[0] for c in edit.call_args_list] == [
+            texts.DELETE_ACCOUNT_DONE,
+            texts.DELETE_ACCOUNT_DONE,
+        ]
+
+    async def test_confirm_without_user(
+        self, session, edit, cb_answer, state, mocker
+    ) -> None:
+        reminders = mocker.Mock()
+        reminders.remove_user_jobs = mocker.AsyncMock(return_value=0)
+        await call(
+            settings.cb_delete_account_confirm,
+            callback=make_callback("set:delete:ok", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        reminders.remove_user_jobs.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.DELETE_ACCOUNT_DONE

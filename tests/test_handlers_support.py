@@ -10,10 +10,13 @@ from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Chat, Message, User
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, texts
 from bot.config import Settings
 from bot.handlers import support
+from bot.models import User as DbUser, WebUser
 
 TG_ID = 111_111
 DONATE_URL = "https://example.org/donate"
@@ -170,20 +173,51 @@ class TestAboutScreen:
         assert edit.call_args.args[0] == texts.ABOUT_TEXT
 
 
+async def make_web_user(
+    session: AsyncSession, user: DbUser, email: str = "user@example.com"
+) -> WebUser:
+    """Аккаунт кабинета для пользователя (хеш Argon2id как в auth.py)."""
+    web_user = WebUser(
+        user_id=user.id, email=email, password_hash="$argon2id$v=19$m=65536,t=3,p=4$test"
+    )
+    session.add(web_user)
+    await session.commit()
+    return web_user
+
+
 class TestCabinetCommand:
-    async def test_disabled_without_secret(self, answer, state, with_settings) -> None:
+    async def test_disabled_without_secret(
+        self, answer, state, with_settings, session
+    ) -> None:
         with_settings(cabinet_url="https://cabinet.example.org")
-        await call(support.cmd_cabinet, message=make_message(), state=state)
+        await call(support.cmd_cabinet, message=make_message(), state=state, session=session)
         assert answer.call_args.args[0] == texts.CABINET_DISABLED
 
-    async def test_disabled_without_url(self, answer, state, with_settings) -> None:
+    async def test_disabled_without_url(
+        self, answer, state, with_settings, session
+    ) -> None:
         with_settings(web_secret_key="secret")
-        await call(support.cmd_cabinet, message=make_message(), state=state)
+        await call(support.cmd_cabinet, message=make_message(), state=state, session=session)
         assert answer.call_args.args[0] == texts.CABINET_DISABLED
 
-    async def test_sends_signed_link(self, answer, state, with_settings) -> None:
+    async def test_no_account_starts_registration(
+        self, answer, state, with_settings, session, user
+    ) -> None:
+        """Без записи в web_users — FSM запроса e-mail (§16.2, п.1)."""
         with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
-        await call(support.cmd_cabinet, message=make_message(), state=state)
+        await call(support.cmd_cabinet, message=make_message(), state=state, session=session)
+        assert answer.call_args.args[0] == texts.CABINET_EMAIL_PROMPT
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb(
+            "cabinet:cancel"
+        )
+        assert await state.get_state() == support.CabinetRegistration.email.state
+
+    async def test_sends_signed_link(
+        self, answer, state, with_settings, session, user
+    ) -> None:
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        await make_web_user(session, user)
+        await call(support.cmd_cabinet, message=make_message(), state=state, session=session)
         text = answer.call_args.args[0]
         assert text.startswith("Ссылка для входа в личный кабинет")
         url = text.rsplit("\n", 1)[1]
@@ -195,24 +229,27 @@ class TestCabinetCommand:
         assert payload["uid"] == TG_ID
         assert answer.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
 
-    async def test_resets_fsm(self, answer, state, with_settings) -> None:
+    async def test_resets_fsm(self, answer, state, with_settings, session) -> None:
         with_settings()
         state = make_state()
         await state.set_state("Draft:input")
-        await call(support.cmd_cabinet, message=make_message(), state=state)
+        await call(support.cmd_cabinet, message=make_message(), state=state, session=session)
         assert await state.get_state() is None
 
 
 class TestCabinetButton:
-    """Кнопка «Личный кабинет» в главном меню (§16.2)."""
+    """Кнопка «Личный кабинет» в главном меню (§6.2, §16.2)."""
 
     async def test_menu_cabinet_edits_with_signed_link(
-        self, edit, cb_answer, with_settings
+        self, edit, cb_answer, with_settings, session, user
     ) -> None:
         with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        await make_web_user(session, user)
         await call(
             support.cb_cabinet,
             callback=make_callback("menu:cabinet", make_message()),
+            state=make_state(),
+            session=session,
         )
         text = edit.call_args.args[0]
         assert text.startswith("Ссылка для входа в личный кабинет")
@@ -226,13 +263,153 @@ class TestCabinetButton:
         assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
         cb_answer.assert_awaited()
 
-    async def test_disabled_without_secret(self, edit, cb_answer, with_settings) -> None:
+    async def test_no_account_prompts_email(
+        self, edit, cb_answer, with_settings, session, user
+    ) -> None:
+        """Без аккаунта кнопка тоже запускает FSM (§6.2: «запускает FSM-диалог»)."""
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        state = make_state()
+        await call(
+            support.cb_cabinet,
+            callback=make_callback("menu:cabinet", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.CABINET_EMAIL_PROMPT
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb(
+            "cabinet:cancel"
+        )
+        assert await state.get_state() == support.CabinetRegistration.email.state
+
+    async def test_disabled_without_secret(
+        self, edit, cb_answer, with_settings, session
+    ) -> None:
         with_settings(cabinet_url="https://cabinet.example.org")
         await call(
             support.cb_cabinet,
             callback=make_callback("menu:cabinet", make_message()),
+            state=make_state(),
+            session=session,
         )
         assert edit.call_args.args[0] == texts.CABINET_DISABLED
+
+
+class TestCabinetRegistration:
+    """FSM `CabinetRegistration.email`: формат, занятость, создание (§16.2)."""
+
+    async def _in_state(self) -> FSMContext:
+        state = make_state()
+        await state.set_state(support.CabinetRegistration.email)
+        return state
+
+    async def test_bad_format_keeps_state(
+        self, answer, with_settings, session, user
+    ) -> None:
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        state = await self._in_state()
+        await call(
+            support.msg_cabinet_email,
+            message=make_message("не email"),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.args[0] == texts.CABINET_EMAIL_BAD
+        assert await state.get_state() == support.CabinetRegistration.email.state
+
+    async def test_empty_text_rejected(
+        self, answer, with_settings, session, user
+    ) -> None:
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        state = await self._in_state()
+        await call(
+            support.msg_cabinet_email,
+            message=make_message("   "),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.args[0] == texts.CABINET_EMAIL_BAD
+
+    async def test_valid_email_creates_account_and_link(
+        self, answer, with_settings, session
+    ) -> None:
+        """Успех: запись web_users (Argon2id-хеш), ссылка, FSM сброшен (§16.2)."""
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        state = await self._in_state()
+        await call(
+            support.msg_cabinet_email,
+            message=make_message("User@Example.COM"),
+            state=state,
+            session=session,
+        )
+        text = answer.call_args.args[0]
+        assert text.startswith("Аккаунт создан. Ваша ссылка для входа:")
+        url = text.rsplit("\n", 1)[1]
+        assert url.startswith("https://cabinet.example.org/login?token=")
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        assert await state.get_state() is None
+        from sqlalchemy import select
+
+        web_user = (
+            await session.execute(select(WebUser))
+        ).scalar_one()
+        # e-mail нормализуется; пароль — только хеш Argon2id.
+        assert web_user.email == "user@example.com"
+        assert web_user.password_hash.startswith("$argon2id$")
+
+    async def test_taken_email_asks_another(
+        self, answer, with_settings, session, user
+    ) -> None:
+        """Занятый e-mail (UNIQUE) — ошибка и просьба ввести другой (§16.2, п.3)."""
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        other = DbUser(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        await make_web_user(session, other, email="busy@example.com")
+        state = await self._in_state()
+        await call(
+            support.msg_cabinet_email,
+            message=make_message("busy@example.com"),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.args[0] == texts.CABINET_EMAIL_TAKEN
+        assert await state.get_state() == support.CabinetRegistration.email.state
+
+    async def test_integrity_race_treated_as_taken(
+        self, answer, with_settings, session, user, mocker
+    ) -> None:
+        """Гонка двух вводов: проигравший коммит — «e-mail занят», не падение (§7.2)."""
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        uid = user.id  # до rollback: откат истекает атрибуты ORM-объекта
+        state = await self._in_state()
+        mocker.patch.object(
+            session,
+            "flush",
+            new_callable=mocker.AsyncMock,
+            side_effect=IntegrityError("INSERT", {}, Exception("UNIQUE")),
+        )
+        await call(
+            support.msg_cabinet_email,
+            message=make_message("race@example.com"),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.args[0] == texts.CABINET_EMAIL_TAKEN
+        assert await state.get_state() == support.CabinetRegistration.email.state
+        # К объекту после rollback не прикасаемся (атрибуты истекли) — только по id.
+        assert (await session.get(DbUser, uid)) is not None
+
+    async def test_cancel_returns_to_menu(self, edit, cb_answer, with_settings) -> None:
+        state = await self._in_state()
+        await call(
+            support.cb_cabinet_cancel,
+            callback=make_callback("cabinet:cancel", make_message()),
+            state=state,
+        )
+        assert await state.get_state() is None
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
+        cb_answer.assert_awaited_once_with(texts.CABINET_REG_CANCELLED)
 
 
 class TestMakeCabinetLink:

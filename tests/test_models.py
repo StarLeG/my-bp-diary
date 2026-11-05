@@ -8,7 +8,18 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models import Measurement, Medication, MedicationLog, Reminder, User, WebSession, WebUser
+from bot.models import (
+    Doctor,
+    DoctorNote,
+    DoctorPatient,
+    Measurement,
+    Medication,
+    MedicationLog,
+    Reminder,
+    User,
+    WebSession,
+    WebUser,
+)
 
 UTC = timezone.utc
 
@@ -29,6 +40,13 @@ def make_measurement(user_id: int, **overrides) -> Measurement:
     }
     data.update(overrides)
     return Measurement(**data)
+
+
+def make_doctor(email: str = "doc@example.org", **overrides) -> Doctor:
+    """Валидная запись врача с возможностью подменить поля (§4.8)."""
+    data = {"email": email, "name": "Врач", "password_hash": "$argon2id$fake"}
+    data.update(overrides)
+    return Doctor(**data)
 
 
 async def _flush_fails(session: AsyncSession) -> None:
@@ -462,4 +480,173 @@ class TestWebSession:
         await session.delete(web_user)
         await session.commit()
         rows = (await session.execute(WebSession.__table__.select())).all()
+        assert rows == []
+
+
+class TestDoctor:
+    """Врачи (SPEC.md, раздел 4.8): UNIQUE e-mail, длина имени и клиники."""
+
+    async def test_insert_valid(self, session: AsyncSession) -> None:
+        doctor = make_doctor()
+        session.add(doctor)
+        await session.commit()
+        assert doctor.created_at.tzinfo is not None
+        assert doctor.clinic is None
+
+    async def test_email_unique(self, session: AsyncSession) -> None:
+        session.add(make_doctor("a@example.org"))
+        await session.commit()
+        session.add(make_doctor("a@example.org", name="Другой"))
+        await _flush_fails(session)
+
+    async def test_email_other_doctor_ok(self, session: AsyncSession) -> None:
+        session.add(make_doctor("a@example.org"))
+        session.add(make_doctor("b@example.org"))
+        await session.commit()
+
+    @pytest.mark.parametrize("name", ["", "x" * 101])
+    async def test_name_length_invalid(self, session: AsyncSession, name: str) -> None:
+        session.add(make_doctor(name=name))
+        await _flush_fails(session)
+
+    async def test_name_length_boundary_ok(self, session: AsyncSession) -> None:
+        session.add(make_doctor(name="x" * 100))
+        await session.commit()
+
+    async def test_clinic_null_ok(self, session: AsyncSession) -> None:
+        session.add(make_doctor(clinic=None))
+        await session.commit()
+
+    async def test_clinic_length_boundary_ok(self, session: AsyncSession) -> None:
+        session.add(make_doctor(clinic="x" * 100))
+        await session.commit()
+
+    async def test_clinic_too_long(self, session: AsyncSession) -> None:
+        session.add(make_doctor(clinic="x" * 101))
+        await _flush_fails(session)
+
+
+class TestDoctorPatient:
+    """Связи врач–пациент (SPEC.md, раздел 4.9): статусы и UNIQUE пары."""
+
+    async def _doctor(self, session: AsyncSession) -> Doctor:
+        doctor = make_doctor()
+        session.add(doctor)
+        await session.commit()
+        return doctor
+
+    def _link(self, doctor_id: int, user_id: int, **overrides) -> DoctorPatient:
+        data = {"doctor_id": doctor_id, "user_id": user_id}
+        data.update(overrides)
+        return DoctorPatient(**data)
+
+    async def test_default_status_pending(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        link = self._link(doctor.id, user.id)
+        session.add(link)
+        await session.commit()
+        assert link.status == "pending"
+        assert link.created_at.tzinfo is not None
+
+    @pytest.mark.parametrize("status", ["pending", "active", "revoked"])
+    async def test_status_valid(
+        self, session: AsyncSession, user: User, status: str
+    ) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._link(doctor.id, user.id, status=status))
+        await session.commit()
+
+    @pytest.mark.parametrize("status", ["deleted", "PENDING", ""])
+    async def test_status_invalid(
+        self, session: AsyncSession, user: User, status: str
+    ) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._link(doctor.id, user.id, status=status))
+        await _flush_fails(session)
+
+    async def test_unique_pair(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._link(doctor.id, user.id))
+        await session.commit()
+        session.add(self._link(doctor.id, user.id))
+        await _flush_fails(session)
+
+    async def test_same_doctor_other_patient_ok(self, session: AsyncSession, user: User) -> None:
+        other = make_user(222_222)
+        session.add(other)
+        await session.commit()
+        doctor = await self._doctor(session)
+        session.add(self._link(doctor.id, user.id))
+        session.add(self._link(doctor.id, other.id))
+        await session.commit()
+
+    async def test_cascade_delete_user(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._link(doctor.id, user.id))
+        await session.commit()
+        await session.delete(user)
+        await session.commit()
+        rows = (await session.execute(DoctorPatient.__table__.select())).all()
+        assert rows == []
+
+    async def test_cascade_delete_doctor(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._link(doctor.id, user.id))
+        await session.commit()
+        await session.delete(doctor)
+        await session.commit()
+        rows = (await session.execute(DoctorPatient.__table__.select())).all()
+        assert rows == []
+
+
+class TestDoctorNote:
+    """Заметки врача (SPEC.md, раздел 4.10): длина текста и каскады."""
+
+    async def _doctor(self, session: AsyncSession) -> Doctor:
+        doctor = make_doctor()
+        session.add(doctor)
+        await session.commit()
+        return doctor
+
+    def _note(self, doctor_id: int, user_id: int, text: str = "Продолжайте измерения") -> DoctorNote:
+        return DoctorNote(doctor_id=doctor_id, user_id=user_id, text=text)
+
+    async def test_insert_valid(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        note = self._note(doctor.id, user.id)
+        session.add(note)
+        await session.commit()
+        assert note.created_at.tzinfo is not None
+
+    async def test_text_empty_invalid(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._note(doctor.id, user.id, text=""))
+        await _flush_fails(session)
+
+    async def test_text_boundary_ok(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._note(doctor.id, user.id, text="x" * 1000))
+        await session.commit()
+
+    async def test_text_too_long(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._note(doctor.id, user.id, text="x" * 1001))
+        await _flush_fails(session)
+
+    async def test_cascade_delete_user(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._note(doctor.id, user.id))
+        await session.commit()
+        await session.delete(user)
+        await session.commit()
+        rows = (await session.execute(DoctorNote.__table__.select())).all()
+        assert rows == []
+
+    async def test_cascade_delete_doctor(self, session: AsyncSession, user: User) -> None:
+        doctor = await self._doctor(session)
+        session.add(self._note(doctor.id, user.id))
+        await session.commit()
+        await session.delete(doctor)
+        await session.commit()
+        rows = (await session.execute(DoctorNote.__table__.select())).all()
         assert rows == []

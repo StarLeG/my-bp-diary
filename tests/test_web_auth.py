@@ -352,6 +352,19 @@ class TestSessionsDb:
         assert found is not None
         assert found.id == web_user.id
 
+    async def test_create_commits_immediately(
+        self, session: AsyncSession, web_user: WebUser
+    ) -> None:
+        """Сессия сохраняется сразу, без отложенного коммита хендлера.
+
+        Регрессия: `create_web_session` делал только `flush`, а `get_db`
+        коммитил в teardown после отправки ответа. Мгновенный `GET /` после
+        редиректа входа не находил сессию и откатывал на `/login`.
+        """
+        token = await auth.create_web_session(session, web_user.id)
+        await session.rollback()  # «откат» не должен стирать выданную сессию
+        assert await auth.get_web_user_by_token(session, token) is not None
+
     async def test_unknown_or_empty_token(self, session: AsyncSession) -> None:
         assert await auth.get_web_user_by_token(session, "нет-такого") is None
         assert await auth.get_web_user_by_token(session, "") is None

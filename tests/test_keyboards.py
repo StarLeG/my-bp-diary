@@ -8,8 +8,8 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot import keyboards, texts
 
-#: Области callback_data, зафиксированные в SPEC.md, раздел 8.
-KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "set", "med", "rem", "about"}
+#: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
+KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "set", "med", "rem", "about", "adm"}
 
 CALLBACK_RE = re.compile(r"^(?P<area>[a-z]+):(?P<action>[a-z0-9_-]+)(?::(?P<value>.*))?$")
 
@@ -81,6 +81,17 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("about_kb", keyboards.about_kb(support_visible=True, author_visible=True)),
         ("about_kb_empty", keyboards.about_kb()),
         ("support_kb", keyboards.support_kb("https://example.org/donate")),
+        ("delete_account_kb", keyboards.delete_account_kb()),
+        ("admin_menu_kb", keyboards.admin_menu_kb()),
+        ("admin_stats_kb", keyboards.admin_stats_kb()),
+        ("admin_health_kb", keyboards.admin_health_kb()),
+        ("admin_backups_kb", keyboards.admin_backups_kb()),
+        ("admin_broadcast_preview_kb", keyboards.admin_broadcast_preview_kb()),
+        ("admin_search_card_kb", keyboards.admin_search_card_kb(111111)),
+        ("doctor_kb", keyboards.doctor_kb([(1, "doc@example.org", "active")])),
+        ("doctor_kb_pending", keyboards.doctor_kb([(1, "doc@example.org", "pending")])),
+        ("doctor_kb_revoked", keyboards.doctor_kb([(1, "doc@example.org", "revoked")])),
+        ("doctor_kb_empty", keyboards.doctor_kb([])),
     ]
 
 
@@ -253,6 +264,7 @@ class TestMainMenuKeyboards:
             "menu:stats",
             "menu:settings",
             "menu:cabinet",
+            "menu:report",
             "menu:about",
         }
 
@@ -268,8 +280,10 @@ class TestSettingsKeyboards:
             "set:targets",
             "set:reminders",
             "set:meds",
+            "set:doctor",
             "set:tz",
             "set:csv",
+            "set:delete",
             "menu:back",
         }
 
@@ -437,3 +451,81 @@ class TestAboutKeyboards:
         assert len(url_buttons) == 1
         assert url_buttons[0].url == "https://example.org/donate"
         assert url_buttons[0].text == texts.BTN_OPEN_SUPPORT
+
+
+class TestDeleteAccountKeyboards:
+    def test_delete_account_kb(self) -> None:
+        data = {
+            button.callback_data for button in callback_buttons(keyboards.delete_account_kb())
+        }
+        assert data == {"set:delete:ok", "set:back"}
+
+
+class TestDoctorKeyboards:
+    def test_revoke_buttons_for_open_links(self) -> None:
+        markup = keyboards.doctor_kb([(7, "doc@example.org", "active")])
+        texts_by_data = {
+            button.callback_data: button.text for button in callback_buttons(markup)
+        }
+        assert texts_by_data == {
+            "set:doctor:revoke:7": f"{texts.BTN_REVOKE_DOCTOR}: doc@example.org",
+            "set:back": texts.BTN_BACK,
+        }
+
+    def test_revoked_link_has_no_revoke_button(self) -> None:
+        markup = keyboards.doctor_kb([(7, "doc@example.org", "revoked")])
+        data = {button.callback_data for button in callback_buttons(markup)}
+        assert data == {"set:back"}
+
+    def test_multiple_links(self) -> None:
+        markup = keyboards.doctor_kb(
+            [
+                (7, "a@example.org", "pending"),
+                (8, "b@example.org", "active"),
+                (9, "c@example.org", "revoked"),
+            ]
+        )
+        data = {button.callback_data for button in callback_buttons(markup)}
+        assert data == {"set:doctor:revoke:7", "set:doctor:revoke:8", "set:back"}
+
+    def test_empty_list_has_only_back(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.doctor_kb([]))}
+        assert data == {"set:back"}
+
+
+class TestAdminKeyboards:
+    def test_admin_menu_items(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.admin_menu_kb())}
+        assert data == {
+            "adm:stats",
+            "adm:backups",
+            "adm:health",
+            "adm:bcast",
+            "adm:search",
+            "menu:back",
+        }
+
+    def test_admin_stats_and_health_refresh(self) -> None:
+        stats = {b.callback_data for b in callback_buttons(keyboards.admin_stats_kb())}
+        health = {b.callback_data for b in callback_buttons(keyboards.admin_health_kb())}
+        assert stats == {"adm:refresh", "adm:back"}
+        assert health == {"adm:health", "adm:back"}
+
+    def test_admin_backups_actions(self) -> None:
+        data = {
+            button.callback_data for button in callback_buttons(keyboards.admin_backups_kb())
+        }
+        assert data == {"adm:backup:create", "adm:backup:download", "adm:back"}
+
+    def test_admin_broadcast_preview_actions(self) -> None:
+        data = {
+            button.callback_data
+            for button in callback_buttons(keyboards.admin_broadcast_preview_kb())
+        }
+        assert data == {"adm:bcast:confirm", "adm:bcast:cancel"}
+
+    def test_admin_search_card_carries_telegram_id(self) -> None:
+        data = {
+            button.callback_data for button in callback_buttons(keyboards.admin_search_card_kb(42))
+        }
+        assert data == {"adm:test:42", "adm:back"}

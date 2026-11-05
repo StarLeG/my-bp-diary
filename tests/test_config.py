@@ -6,7 +6,13 @@ import logging
 import pytest
 from pydantic import ValidationError
 
-from bot.config import DEFAULT_TIMEZONE, Settings, get_settings
+from bot.config import (
+    DEFAULT_TIMEZONE,
+    Settings,
+    admin_ids_from_env,
+    get_settings,
+    parse_admin_ids,
+)
 
 
 def make_settings(**overrides: str) -> Settings:
@@ -127,3 +133,114 @@ class TestGetSettings:
                 get_settings()
         finally:
             get_settings.cache_clear()
+
+    def test_reads_backup_and_admin_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BOT_TOKEN", "env-token")
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "1, 2, 2, три")
+        monkeypatch.setenv("BACKUP_ENCRYPTION_KEY", "backup-key")
+        monkeypatch.setenv("BACKUP_DIR", "tmp/backups")
+        monkeypatch.setenv("S3_ENDPOINT_URL", "https://s3.example")
+        monkeypatch.setenv("S3_BUCKET", "bp-diary")
+        monkeypatch.setenv("S3_ACCESS_KEY_ID", "akid")
+        monkeypatch.setenv("S3_SECRET_ACCESS_KEY", "secret")
+        get_settings.cache_clear()
+        try:
+            settings = get_settings()
+            assert settings.admin_telegram_ids == (1, 2)
+            assert settings.backup_encryption_key == "backup-key"
+            assert settings.backup_dir == "tmp/backups"
+            assert settings.s3_endpoint_url == "https://s3.example"
+            assert settings.s3_bucket == "bp-diary"
+            assert settings.s3_access_key_id == "akid"
+            assert settings.s3_secret_access_key == "secret"
+            assert settings.s3_configured is True
+        finally:
+            get_settings.cache_clear()
+
+
+class TestParseAdminIds:
+    def test_empty_returns_empty_tuple(self) -> None:
+        assert parse_admin_ids("") == ()
+        assert parse_admin_ids("   ") == ()
+        assert parse_admin_ids(", ,") == ()
+
+    def test_single_id(self) -> None:
+        assert parse_admin_ids("123456") == (123456,)
+
+    def test_multiple_ids_with_spaces(self) -> None:
+        assert parse_admin_ids(" 1 , 22 ,333 ") == (1, 22, 333)
+
+    def test_garbage_skipped(self) -> None:
+        assert parse_admin_ids("1, abc, 2, 3.5") == (1, 2)
+
+    def test_duplicates_removed_order_kept(self) -> None:
+        assert parse_admin_ids("5, 3, 5, 3, 7") == (5, 3, 7)
+
+    def test_negative_ids_allowed(self) -> None:
+        # Telegram ID — int; знак не валидируем, только целочисленность.
+        assert parse_admin_ids("-1, -1, 2") == (-1, 2)
+
+
+class TestAdminIdsFromEnv:
+    def test_reads_env(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "10, 20")
+        assert admin_ids_from_env() == (10, 20)
+
+    def test_missing_env_returns_empty(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("ADMIN_TELEGRAM_IDS", raising=False)
+        assert admin_ids_from_env() == ()
+
+
+class TestValidateAdminIds:
+    def test_string_is_parsed(self) -> None:
+        assert make_settings(admin_telegram_ids="1, 2").admin_telegram_ids == (1, 2)
+
+    def test_none_becomes_empty(self) -> None:
+        assert make_settings(admin_telegram_ids=None).admin_telegram_ids == ()
+
+    def test_sequence_converted_to_tuple(self) -> None:
+        assert make_settings(admin_telegram_ids=[7, 8]).admin_telegram_ids == (7, 8)
+        assert make_settings(admin_telegram_ids=(9,)).admin_telegram_ids == (9,)
+
+    def test_default_is_empty(self) -> None:
+        assert make_settings().admin_telegram_ids == ()
+
+
+class TestBackupSettingsDefaults:
+    def test_backup_fields_default(self) -> None:
+        settings = make_settings()
+        assert settings.backup_encryption_key == ""
+        assert settings.backup_dir == "data/backups"
+
+    def test_s3_fields_default(self) -> None:
+        settings = make_settings()
+        assert settings.s3_endpoint_url == ""
+        assert settings.s3_bucket == ""
+        assert settings.s3_access_key_id == ""
+        assert settings.s3_secret_access_key == ""
+        assert settings.s3_configured is False
+
+
+class TestS3Configured:
+    def _full(self, **overrides: str) -> Settings:
+        data = {
+            "s3_endpoint_url": "https://s3.example",
+            "s3_bucket": "bp-diary",
+            "s3_access_key_id": "akid",
+            "s3_secret_access_key": "secret",
+        }
+        data.update(overrides)
+        return make_settings(**data)
+
+    def test_all_fields_set(self) -> None:
+        assert self._full().s3_configured is True
+
+    @pytest.mark.parametrize(
+        "missing",
+        ["s3_endpoint_url", "s3_bucket", "s3_access_key_id", "s3_secret_access_key"],
+    )
+    def test_partial_configuration_is_off(self, missing: str) -> None:
+        assert self._full(**{missing: ""}).s3_configured is False
+
+    def test_blank_field_counts_as_unset(self) -> None:
+        assert self._full(s3_bucket="   ").s3_configured is False

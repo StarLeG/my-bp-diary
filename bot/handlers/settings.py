@@ -398,6 +398,40 @@ async def cb_csv(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
+# ─────────────────────────── Удаление аккаунта (§19) ───────────────────────────
+
+
+@router.callback_query(F.data == "set:delete")
+async def cb_delete_account(callback: CallbackQuery) -> None:
+    """«Удалить аккаунт» — предупреждение «Это действие необратимо...» (§19)."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.DELETE_ACCOUNT_WARNING, reply_markup=keyboards.delete_account_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:delete:ok")
+async def cb_delete_account_confirm(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    reminders: RemindersService,
+) -> None:
+    """Подтверждение: job'ы → удаление данных (§19). Двойное нажатие безопасно.
+
+    Если пользователя уже нет (повторный клик, гонка) — тот же финальный текст:
+    цель действия достигнута, ошибки не показываем.
+    """
+    await state.clear()
+    user = await measurements_service.get_user(session, callback.from_user.id)
+    if user is not None:
+        await measurements_service.delete_user_data(session, reminders, user)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.DELETE_ACCOUNT_DONE, reply_markup=keyboards.back_to_menu()
+    )
+    await callback.answer()
+
+
 # ─────────────────────────── Мои лекарства ───────────────────────────
 
 

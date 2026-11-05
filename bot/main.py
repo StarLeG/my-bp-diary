@@ -24,7 +24,9 @@ from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
 from bot.handlers import router
 from bot.middlewares import DbSessionMiddleware, DebounceMiddleware, ThrottleMiddleware
-from bot.services.reminders import RemindersService
+from bot.services.admin import AdminService, ErrorCounter
+from bot.services.backup import BackupService, S3Uploader, bind_backup
+from bot.services.reminders import RemindersService, bind_service
 
 logger = logging.getLogger(__name__)
 
@@ -53,6 +55,15 @@ class App:
 
     reminders: RemindersService
     """Сервис напоминаний: строки `reminders` — источник истины, job'ы — доставка."""
+
+    backup: BackupService
+    """Резервное копирование (§20): ежедневный job 03:00 UTC и ручные копии."""
+
+    admin: AdminService
+    """Админ-панель (§18): агрегаты, здоровье системы, карточки пользователей."""
+
+    error_counter: ErrorCounter
+    """Счётчик ошибок логов за 24 часа для экрана здоровья (§18.4)."""
 
 
 def build_scheduler(db_path: str) -> AsyncIOScheduler:
@@ -91,6 +102,33 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
         await bot.send_message(telegram_id, text, reply_markup=markup)  # type: ignore[arg-type]
 
     reminders = RemindersService(session_factory, send, scheduler)
+    # Job'ы сериализуются в SQLAlchemyJobStore: точка входа — module-level
+    # `fire_reminder`, экземпляр сервиса привязывается явно.
+    bind_service(reminders)
+
+    uploader = (
+        S3Uploader(
+            settings.s3_endpoint_url,
+            settings.s3_bucket,
+            settings.s3_access_key_id,
+            settings.s3_secret_access_key,
+        )
+        if settings.s3_configured
+        else None
+    )
+    backup = BackupService(
+        settings.db_path,
+        settings.backup_dir,
+        settings.backup_encryption_key,
+        uploader=uploader,
+    )
+    # Точка входа job'а бэкапа — module-level `fire_backup` (как у напоминаний).
+    bind_backup(backup)
+    backup.schedule_daily(scheduler)
+    error_counter = ErrorCounter()
+    admin = AdminService(
+        session_factory, settings.db_path, scheduler, error_counter=error_counter
+    )
 
     dp = Dispatcher()
     dp.include_router(router)
@@ -98,6 +136,8 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     dp.callback_query.outer_middleware.register(DebounceMiddleware())
     dp.callback_query.outer_middleware.register(ThrottleMiddleware())
     dp.workflow_data["reminders"] = reminders
+    dp.workflow_data["backup"] = backup
+    dp.workflow_data["admin"] = admin
     return App(
         bot=bot,
         dp=dp,
@@ -105,6 +145,9 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
         session_factory=session_factory,
         scheduler=scheduler,
         reminders=reminders,
+        backup=backup,
+        admin=admin,
+        error_counter=error_counter,
     )
 
 
@@ -153,6 +196,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 1
+    # Счётчик ошибок логов за 24 часа — экран здоровья системы (§18.4).
+    logging.getLogger().addHandler(app.error_counter)
     try:
         asyncio.run(run(app))
     except KeyboardInterrupt:

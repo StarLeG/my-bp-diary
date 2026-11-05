@@ -1,0 +1,272 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Кабинет врача — Дневник гипертоника</title>
+  <link rel="stylesheet" href="/static/style.css">
+  {% if view == "patient" %}
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
+  {% endif %}
+</head>
+<body{% if view == "login" %} class="auth-body"{% endif %}>
+
+{% if view == "login" %}
+  <!-- ── Вход врача ── -->
+  <main class="auth-card">
+    <h1>Кабинет врача</h1>
+    <p class="auth-sub">История давления пациентов, которые дали вам доступ.</p>
+
+    {% if error == "wrong" %}
+      <p class="alert alert-error">Неверный e-mail или пароль.</p>
+    {% elif error == "link_expired" %}
+      <p class="alert alert-error">
+        Ссылка устарела или уже использована. Попросите пациента отправить
+        отчет заново — новая ссылка действует 15 минут.
+      </p>
+    {% elif error == "denied" %}
+      <p class="alert alert-error">Пациент отозвал доступ. Попросите добавить вас заново.</p>
+    {% elif error == "rate" %}
+      <p class="alert alert-error">Слишком много попыток, подождите минуту.</p>
+    {% endif %}
+
+    <form method="post" action="/doctor/login" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>
+        E-mail
+        <input type="email" name="email" required maxlength="255" autocomplete="username">
+      </label>
+      <label>
+        Пароль
+        <input type="password" name="password" required maxlength="128" autocomplete="current-password">
+      </label>
+      <button type="submit" class="btn">Войти</button>
+    </form>
+
+    <p class="auth-hint">
+      Впервые? Пациент перешлёт вам сообщение со ссылкой — вход по ней
+      без пароля (действует 15 минут).
+    </p>
+    <p class="auth-foot">Дневник гипертоника — кабинет врача</p>
+  </main>
+
+{% else %}
+  <header class="topbar">
+    <div class="container topbar-row">
+      <strong>Кабинет врача</strong>
+      <span class="topbar-email">{{ doctor.email }}</span>
+      <form method="post" action="/doctor/logout" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-ghost">Выйти</button>
+      </form>
+    </div>
+  </header>
+
+  <main class="container">
+    {% if error == "denied" %}
+      <p class="alert alert-error">Пациент отозвал доступ к данным.</p>
+    {% elif error == "link_expired" %}
+      <p class="alert alert-error">Ссылка устарела или уже использована.</p>
+    {% endif %}
+
+    {% if view == "list" %}
+      <!-- ── Список пациентов ── -->
+      <section class="card">
+        <h2>Пациенты</h2>
+        {% if not patients %}
+          <p>Пациентов пока нет. Попросите пациента добавить вас в «Мой врач»
+             и переслать вам ссылку.</p>
+        {% else %}
+          <ul class="facts">
+            {% for link, patient in patients %}
+              <li>
+                <a href="/doctor/patient/{{ patient.id }}">Пациент {{ patient.telegram_id }}</a>
+                <span class="muted">— доступ открыт {{ link.created_at.strftime("%d.%m.%Y") }}</span>
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </section>
+
+    {% else %}
+      <!-- ── Карточка пациента ── -->
+      <nav class="container nav">
+        <a href="/doctor">← Пациенты</a>
+        <a href="#summary">Сводка</a>
+        <a href="#history">История</a>
+        <a href="#notes">Заметки</a>
+      </nav>
+
+      {% if error == "too_many" %}
+        <p class="alert alert-error">Слишком много записей, выберите период поменьше.</p>
+      {% elif error == "note" %}
+        <p class="alert alert-error">Заметка не сохранена: нужен текст до 1000 символов.</p>
+      {% elif saved == "note" %}
+        <p class="alert alert-ok">Заметка сохранена — пациент увидит её в личном кабинете.</p>
+      {% endif %}
+
+      <section class="card" id="summary">
+        <h2>Пациент {{ user.telegram_id }} — сводка за период</h2>
+
+        <form method="get" action="/doctor/patient/{{ user.id }}" class="filter-row">
+          <label>
+            Период
+            <select name="days" onchange="this.form.submit()">
+              <option value="7" {% if days == "7" %}selected{% endif %}>7 дней</option>
+              <option value="30" {% if days == "30" %}selected{% endif %}>30 дней</option>
+              <option value="custom" {% if days == "custom" %}selected{% endif %}>Свой период</option>
+            </select>
+          </label>
+          <label>
+            С
+            <input type="date" name="date_from" value="{{ date_from }}">
+          </label>
+          <label>
+            По
+            <input type="date" name="date_to" value="{{ date_to }}">
+          </label>
+          <button type="submit" class="btn btn-ghost">Показать</button>
+        </form>
+
+        <p class="muted">Период: {{ start_day.strftime("%d.%m.%Y") }} — {{ end_day.strftime("%d.%m.%Y") }}</p>
+
+        {% if summary.count == 0 %}
+          <p>За этот период записей нет.</p>
+        {% else %}
+          <dl class="facts">
+            <div><dt>Записей</dt><dd>{{ summary.count }}</dd></div>
+            <div><dt>Систолическое</dt><dd>{{ summary.sys_avg }} ({{ summary.sys_min }}–{{ summary.sys_max }})</dd></div>
+            <div><dt>Диастолическое</dt><dd>{{ summary.dia_avg }} ({{ summary.dia_min }}–{{ summary.dia_max }})</dd></div>
+            {% if summary.pulse_avg is not none %}
+              <div><dt>Пульс (средний)</dt><dd>{{ summary.pulse_avg }}</dd></div>
+            {% endif %}
+            <div><dt>Тренд</dt><dd>{{ summary.trend }}</dd></div>
+            {% if summary.goal_verdict %}
+              <div><dt>Цель</dt><dd>{{ summary.goal_verdict }}</dd></div>
+            {% endif %}
+            {% if summary.adherence %}
+              <div><dt>Лекарства</dt><dd>принято {{ summary.adherence[0] }} из {{ summary.adherence[1] }} приёмов</dd></div>
+            {% endif %}
+          </dl>
+
+          <div class="chart-wrap">
+            <canvas id="bp-chart" height="110"></canvas>
+          </div>
+        {% endif %}
+
+        <div class="row">
+          <a class="btn btn-ghost"
+             href="/doctor/patient/{{ user.id }}/export.csv?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
+            Скачать CSV
+          </a>
+          <a class="btn btn-ghost"
+             href="/doctor/patient/{{ user.id }}/export.pdf?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
+            Скачать PDF
+          </a>
+        </div>
+      </section>
+
+      <section class="card" id="history">
+        <h2>История записей</h2>
+        {% if not measurements %}
+          <p>За этот период записей нет.</p>
+        {% else %}
+          <div class="table-scroll">
+            <table>
+              <thead>
+                <tr>
+                  <th>Дата</th>
+                  <th>Время</th>
+                  <th>Сист.</th>
+                  <th>Диаст.</th>
+                  <th>Пульс</th>
+                  <th>Лекарство</th>
+                  <th>Самочувствие</th>
+                  <th>Заметка</th>
+                </tr>
+              </thead>
+              <tbody>
+                {% for m in measurements %}
+                  <tr>
+                    <td>{{ m.timestamp.astimezone(user_zone).strftime("%d.%m.%Y") }}</td>
+                    <td>{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
+                    <td>{{ m.systolic }}</td>
+                    <td>{{ m.diastolic }}</td>
+                    <td>{{ m.pulse if m.pulse is not none else "—" }}</td>
+                    <td>{{ medication_labels[m.medication_taken] }}</td>
+                    <td>{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
+                    <td class="note">{{ m.note or "" }}</td>
+                  </tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        {% endif %}
+      </section>
+
+      <section class="card" id="notes">
+        <h2>Заметки врача</h2>
+        <p class="muted">Заметки видны пациенту в его личном кабинете.</p>
+
+        <form method="post" action="/doctor/patient/{{ user.id }}/note" class="stack form-narrow">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <label>
+            Новая заметка
+            <textarea name="text" rows="3" maxlength="1000" required
+                      placeholder="Например: продолжайте измерять давление утром и вечером"></textarea>
+          </label>
+          <button type="submit" class="btn">Сохранить заметку</button>
+        </form>
+
+        {% if notes %}
+          <h3>Сохранённые заметки</h3>
+          <ul class="facts">
+            {% for note, note_doctor in notes %}
+              <li>
+                <span class="muted">{{ note.created_at.strftime("%d.%m.%Y %H:%M") }} — {{ note_doctor.name }}</span><br>
+                {{ note.text }}
+              </li>
+            {% endfor %}
+          </ul>
+        {% endif %}
+      </section>
+    {% endif %}
+  </main>
+
+  <footer class="footer">
+    <div class="container">
+      Данные пациентов видны только при открытом доступе.
+      Бот не является медицинским изделием и не заменяет консультацию врача.
+    </div>
+  </footer>
+{% endif %}
+
+{% if view == "patient" %}
+  <script>
+    // График давления за период (Chart.js).
+    const chartData = {{ chart | tojson }};
+    window.addEventListener("load", () => {
+      const canvas = document.getElementById("bp-chart");
+      if (!canvas || typeof Chart === "undefined" || chartData.length === 0) {
+        return;
+      }
+      new Chart(canvas, {
+        type: "line",
+        data: {
+          labels: chartData.map((point) => point.t),
+          datasets: [
+            { label: "Систолическое", data: chartData.map((point) => point.s), borderColor: "#1476cc", tension: 0.2 },
+            { label: "Диастолическое", data: chartData.map((point) => point.d), borderColor: "#0f5ba3", tension: 0.2 },
+            { label: "Пульс", data: chartData.map((point) => point.p), borderColor: "#9b59b6", tension: 0.2 }
+          ]
+        },
+        options: {
+          plugins: { legend: { position: "bottom" } },
+          scales: { y: { suggestedMin: 40, suggestedMax: 200 } }
+        }
+      });
+    });
+  </script>
+{% endif %}
+</body>
+</html>

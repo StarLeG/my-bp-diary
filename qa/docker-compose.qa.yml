@@ -1,0 +1,78 @@
+# QA-стенд (SPEC.md, §22): бот, личный кабинет и контейнер E2E-тестов.
+#
+#   docker compose -f qa/docker-compose.qa.yml up -d --build bot cabinet
+#   docker compose -f qa/docker-compose.qa.yml run --rm qa
+#
+# Первая авторизация Telethon интерактивна (код подтверждения из Telegram) —
+# запускайте `run` в терминале; сессия сохранится в qa/reports/telethon.session.
+# Переменные TELEGRAM_API_ID / TELEGRAM_API_HASH / TELEGRAM_TEST_PHONE (§3) и
+# QA_BOT_USERNAME берутся из окружения хоста или файла qa/.env.
+# Секреты (BOT_TOKEN, WEB_SECRET_KEY) — только из .env, в git он не попадает.
+# Результат прогона: qa/reports/ (скриншоты + report.html).
+services:
+  bot:
+    build: ..
+    image: my-bp-diary:latest
+    container_name: bp-qa-bot
+    command: ["python", "-m", "bot"]
+    env_file: ../.env
+    environment:
+      DB_PATH: /app/data/bot.sqlite3
+      # Ссылки бота открываются браузером QA-контейнера внутри сети стенда.
+      CABINET_URL: http://cabinet:8000
+    volumes:
+      - qa-data:/app/data
+    restart: unless-stopped
+
+  cabinet:
+    build: ..
+    image: my-bp-diary:latest
+    container_name: bp-qa-cabinet
+    command:
+      ["uvicorn", "web.cabinet.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    env_file: ../.env
+    environment:
+      DB_PATH: /app/data/bot.sqlite3
+      CABINET_URL: http://cabinet:8000
+    volumes:
+      - qa-data:/app/data
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/login')",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  qa:
+    build:
+      context: ..
+      dockerfile: qa/Dockerfile
+    image: my-bp-diary-qa:latest
+    container_name: bp-qa-runner
+    depends_on:
+      cabinet:
+        condition: service_healthy
+      bot:
+        condition: service_started
+    env_file: ../.env
+    environment:
+      DB_PATH: /app/data/bot.sqlite3
+      CABINET_URL: http://cabinet:8000
+      TELEGRAM_API_ID: ${TELEGRAM_API_ID}
+      TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
+      TELEGRAM_TEST_PHONE: ${TELEGRAM_TEST_PHONE}
+      QA_BOT_USERNAME: ${QA_BOT_USERNAME}
+    volumes:
+      - qa-data:/app/data
+      - ./reports:/app/qa/reports
+    command:
+      ["pytest", "qa/", "--html=qa/reports/report.html", "--self-contained-html", "-q", "-s"]
+
+volumes:
+  qa-data:

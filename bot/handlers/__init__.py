@@ -10,7 +10,8 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 
 from bot import keyboards, texts
-from bot.handlers import diary, measure, reminders, settings, start, stats, support
+from bot.config import admin_ids_from_env
+from bot.handlers import admin, diary, doctor, measure, reminders, settings, start, stats, support
 
 router = Router(name="root")
 router.include_router(start.router)
@@ -18,8 +19,14 @@ router.include_router(measure.router)
 router.include_router(diary.router)
 router.include_router(stats.router)
 router.include_router(settings.router)
+router.include_router(doctor.router)
 router.include_router(support.router)
 router.include_router(reminders.router)
+# Админ-панель подключается только при заданных ADMIN_TELEGRAM_IDS (§18).
+# `admin_ids_from_env` вместо `get_settings`: на импорте не должно требоваться
+# BOT_TOKEN.
+if admin_ids_from_env():
+    router.include_router(admin.router)
 
 fallback_router = Router(name="fallback")
 

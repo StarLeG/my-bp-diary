@@ -28,6 +28,7 @@ CALLBACK_DATA_LIMIT = 64
 # med:   лекарства
 # rem:   напоминания (кнопки слот-сообщений)
 # about: «О боте / Поддержать»
+# adm:   административная панель
 
 #: Целевые значения по умолчанию (кнопка → (систолическое, диастолическое)).
 TARGET_PRESETS = {
@@ -90,13 +91,14 @@ def _numbers(
 
 
 def main_menu() -> InlineKeyboardMarkup:
-    """Главное меню (SPEC.md, раздел 6.2)."""
+    """Главное меню (SPEC.md, раздел 6.2; «Отправить отчет» — §21)."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
     builder.row(InlineKeyboardButton(text=texts.BTN_DIARY, callback_data="menu:diary"))
     builder.row(InlineKeyboardButton(text=texts.BTN_STATS, callback_data="menu:stats"))
     builder.row(InlineKeyboardButton(text=texts.BTN_SETTINGS, callback_data="menu:settings"))
     builder.row(InlineKeyboardButton(text=texts.BTN_CABINET, callback_data="menu:cabinet"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_SEND_REPORT, callback_data="menu:report"))
     builder.row(InlineKeyboardButton(text=texts.BTN_ABOUT, callback_data="menu:about"))
     return builder.as_markup()
 
@@ -261,14 +263,49 @@ def csv_period_kb() -> InlineKeyboardMarkup:
 
 
 def settings_kb() -> InlineKeyboardMarkup:
-    """Меню настроек (SPEC.md, раздел 6.6)."""
+    """Меню настроек (SPEC.md, раздел 6.6; удаление аккаунта — §19, врач — §21)."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_TARGETS, callback_data="set:targets"))
     builder.row(InlineKeyboardButton(text=texts.BTN_REMINDERS, callback_data="set:reminders"))
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_MEDS, callback_data="set:meds"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_MY_DOCTOR, callback_data="set:doctor"))
     builder.row(InlineKeyboardButton(text=texts.BTN_TIMEZONE, callback_data="set:tz"))
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_CSV, callback_data="set:csv"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def doctor_kb(links: Sequence[tuple[int, str, str]]) -> InlineKeyboardMarkup:
+    """Экран «Мой врач»: отзыв доступа по связям и «Назад» (§21).
+
+    `links` — кортежи (id врача, e-mail, статус); ожидающие и открытые
+    связи получают кнопку отзыва. Врач у пациента один: пока связь есть,
+    добавить вторую нельзя (отзыв → повторный ввод e-mail).
+    """
+    builder = InlineKeyboardBuilder()
+    for doctor_id, email, status in links:
+        if status == "revoked":
+            continue
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{texts.BTN_REVOKE_DOCTOR}: {email}",
+                callback_data=f"set:doctor:revoke:{doctor_id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def delete_account_kb() -> InlineKeyboardMarkup:
+    """Подтверждение удаления аккаунта: «Да, удалить» / «Отмена» (§19)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_CONFIRM_DELETE_ACCOUNT, callback_data="set:delete:ok"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="set:back"))
     return builder.as_markup()
 
 
@@ -587,4 +624,72 @@ def support_kb(url: str) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_OPEN_SUPPORT, url=url))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+# ─────────────────── Административная панель (SPEC.md, §18) ───────────────────
+
+
+def admin_menu_kb() -> InlineKeyboardMarkup:
+    """Главное меню админки (§18.1): пять разделов + «В меню»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADMIN_STATS, callback_data="adm:stats"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADMIN_BACKUPS, callback_data="adm:backups"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADMIN_HEALTH, callback_data="adm:health"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADMIN_BROADCAST, callback_data="adm:bcast"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADMIN_SEARCH, callback_data="adm:search"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def admin_stats_kb() -> InlineKeyboardMarkup:
+    """Статистика БД: «Обновить» (кэш 5 минут сбрасывается) и «Назад»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_REFRESH, callback_data="adm:refresh"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="adm:back"))
+    return builder.as_markup()
+
+
+def admin_health_kb() -> InlineKeyboardMarkup:
+    """Здоровье системы: «Обновить» (перечитать экран) и «Назад»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_REFRESH, callback_data="adm:health"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="adm:back"))
+    return builder.as_markup()
+
+
+def admin_backups_kb() -> InlineKeyboardMarkup:
+    """Бэкапы: создать сейчас / скачать последний / назад (§18.3)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_BACKUP_CREATE, callback_data="adm:backup:create")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_BACKUP_DOWNLOAD, callback_data="adm:backup:download"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="adm:back"))
+    return builder.as_markup()
+
+
+def admin_broadcast_preview_kb() -> InlineKeyboardMarkup:
+    """Превью рассылки: «Подтвердить отправку» / «Отмена» (§18.5)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_BCAST_CONFIRM, callback_data="adm:bcast:confirm")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="adm:bcast:cancel"))
+    return builder.as_markup()
+
+
+def admin_search_card_kb(telegram_id: int) -> InlineKeyboardMarkup:
+    """Карточка пользователя: «Отправить тестовое сообщение» (§18.6)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_SEND_TEST, callback_data=f"adm:test:{telegram_id}"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="adm:back"))
     return builder.as_markup()

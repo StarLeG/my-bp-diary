@@ -1,0 +1,7 @@
+# QA-стенд (SPEC.md, §22): Telethon (юзербот), Playwright (Web UI),
+# pytest с HTML-отчётом. Ставятся в образ qa/Dockerfile поверх зависимостей
+# проекта; для локального запуска: pip install -r qa/requirements.txt.
+telethon>=1.36
+playwright>=1.45
+pytest>=8.0
+pytest-html>=4.1

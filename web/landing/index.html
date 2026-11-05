@@ -5,125 +5,408 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Дневник гипертоника — дневник давления в Telegram</title>
   <meta name="description" content="Личный дневник давления в Telegram: запись за 2 нажатия, напоминания о лекарствах, сводка для врача. Бесплатно, без рекламы.">
-  <link rel="stylesheet" href="style.css">
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💓</text></svg>">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = {
+      theme: {
+        extend: {
+          fontFamily: { sans: ["Inter", "system-ui", "-apple-system", "sans-serif"] },
+        },
+      },
+    };
+  </script>
 </head>
-<body>
-  <header class="hero">
-    <div class="container">
-      <h1>Дневник давления, который не мешает жить</h1>
-      <p class="hero-sub">
-        Запись давления — за 2 нажатия. Напоминания о лекарствах и повторных
-        замерах. Сводка и CSV для врача.
-      </p>
-      <a class="btn btn-primary" href="https://t.me/my_bp_diary_bot?start=landing">
+<body class="bg-white text-slate-800 font-sans antialiased">
+
+  <!-- Шапка -->
+  <header class="sticky top-0 z-50 bg-white/80 backdrop-blur border-b border-slate-100">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+      <a href="#" class="flex items-center gap-2.5">
+        <span class="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 text-white flex items-center justify-center text-lg shadow-md shadow-blue-600/30">💓</span>
+        <span class="font-bold text-slate-900">Дневник гипертоника</span>
+      </a>
+      <nav class="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600">
+        <a class="hover:text-blue-700 transition" href="#how">Как работает</a>
+        <a class="hover:text-blue-700 transition" href="#trust">Почему нам доверяют</a>
+        <a class="hover:text-blue-700 transition" href="#faq">Вопросы</a>
+        <a class="hover:text-blue-700 transition" href="#support">Поддержать</a>
+      </nav>
+      <a class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-4 py-2.5 rounded-full shadow-lg shadow-blue-600/25 transition"
+         href="https://t.me/my_bp_diary_bot?start=landing">
         Открыть в Telegram
       </a>
     </div>
   </header>
 
+  <!-- Hero -->
+  <section class="relative overflow-hidden bg-gradient-to-b from-blue-50 via-white to-white">
+    <div class="absolute -top-24 -right-24 w-96 h-96 bg-blue-100 rounded-full blur-3xl opacity-60" aria-hidden="true"></div>
+    <div class="absolute top-40 -left-24 w-80 h-80 bg-sky-100 rounded-full blur-3xl opacity-60" aria-hidden="true"></div>
+
+    <div class="relative max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-16 md:py-24">
+      <div class="grid lg:grid-cols-2 gap-12 lg:gap-16 items-center">
+
+        <!-- Текст -->
+        <div>
+          <p class="inline-flex items-center gap-2 bg-blue-100/70 text-blue-800 text-sm font-medium px-4 py-1.5 rounded-full mb-6">
+            <span aria-hidden="true">🩺</span> Дневник давления в Telegram
+          </p>
+          <h1 class="text-4xl md:text-5xl lg:text-6xl font-extrabold tracking-tight text-slate-900 leading-[1.1]">
+            Дневник давления,<br>
+            который <span class="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-sky-500">не мешает жить</span>
+          </h1>
+          <p class="mt-6 text-lg md:text-xl text-slate-600 leading-relaxed max-w-xl">
+            Запись давления — за 2 нажатия. Напоминания о лекарствах и повторных
+            замерах. Сводка и CSV для врача.
+          </p>
+          <div class="mt-8 flex flex-wrap items-center gap-4">
+            <a class="inline-flex items-center gap-2.5 bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-full shadow-xl shadow-blue-600/30 transition hover:-translate-y-0.5"
+               href="https://t.me/my_bp_diary_bot?start=landing">
+              <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+              Открыть в Telegram
+            </a>
+            <span class="text-slate-500 text-sm">Бесплатно · без регистрации</span>
+          </div>
+
+          <!-- Сигналы доверия (первый экран) -->
+          <ul class="mt-10 flex flex-wrap gap-3">
+            <li class="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+              <span class="text-emerald-500" aria-hidden="true">✓</span> Бесплатно, без рекламы
+            </li>
+            <li class="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+              <span class="text-emerald-500" aria-hidden="true">✓</span> Данные не передаются третьим лицам
+            </li>
+            <li class="inline-flex items-center gap-2 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm">
+              <span class="text-emerald-500" aria-hidden="true">✓</span> Сделано одним разработчиком
+            </li>
+          </ul>
+        </div>
+
+        <!-- Мокап диалога с ботом -->
+        <div class="relative mx-auto w-full max-w-sm">
+          <div class="absolute -inset-4 bg-gradient-to-tr from-blue-200 via-sky-100 to-blue-100 rounded-[2.5rem] blur-2xl opacity-70" aria-hidden="true"></div>
+          <div class="relative bg-white rounded-[2rem] shadow-2xl shadow-slate-900/10 border border-slate-100 overflow-hidden">
+            <div class="flex items-center gap-3 px-5 py-4 bg-gradient-to-r from-blue-600 to-sky-600 text-white">
+              <span class="w-9 h-9 rounded-full bg-white/20 flex items-center justify-center text-lg">💓</span>
+              <div>
+                <p class="font-semibold text-sm leading-tight">Дневник гипертоника</p>
+                <p class="text-xs text-blue-100 leading-tight">бот · онлайн</p>
+              </div>
+            </div>
+            <div class="p-5 space-y-3 bg-slate-50">
+              <div class="bg-white rounded-2xl rounded-tl-md px-4 py-3 shadow-sm border border-slate-100">
+                <p class="text-sm text-slate-700">Пора измерить давление 🌅</p>
+              </div>
+              <div class="bg-blue-600 text-white rounded-2xl rounded-tr-md px-4 py-3 shadow-sm ml-8">
+                <p class="text-sm font-medium">Записать давление</p>
+              </div>
+              <div class="bg-white rounded-2xl rounded-tl-md px-4 py-3 shadow-sm border border-slate-100">
+                <p class="text-sm text-slate-700">✅ 130/85, пульс 70. Записано.</p>
+                <div class="mt-2.5 flex flex-wrap gap-1.5">
+                  <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1">💊 Лекарства</span>
+                  <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1">📊 Статистика</span>
+                  <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1">📄 CSV врачу</span>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </section>
+
   <main>
-    <section class="section" id="problems">
-      <div class="container">
-        <h2>Знакомые ситуации?</h2>
-        <div class="cards">
-          <article class="card">
-            <h3>Забываете мерить?</h3>
-            <p>
+    <!-- Проблема / решение -->
+    <section class="py-20" id="problems">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl md:text-4xl font-bold text-slate-900 text-center">Знакомые ситуации?</h2>
+        <p class="mt-3 text-slate-500 text-center max-w-2xl mx-auto">Дневник давления обычно живёт недолго. Мы убрали причины, по которым он бросается.</p>
+        <div class="mt-12 grid gap-6 md:grid-cols-3">
+
+          <article class="group bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 p-7">
+            <div class="w-12 h-12 rounded-2xl bg-amber-100 text-amber-600 flex items-center justify-center text-2xl mb-5 group-hover:scale-110 transition">⏰</div>
+            <h3 class="text-lg font-semibold text-slate-900 mb-2">Забываете мерить?</h3>
+            <p class="text-slate-600 leading-relaxed">
               Бот сам напомнит утром, днём и вечером — в удобное вам время.
               Одно нажатие — и давление записано.
             </p>
           </article>
-          <article class="card">
-            <h3>Не помните, приняли ли таблетку?</h3>
-            <p>
+
+          <article class="group bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 p-7">
+            <div class="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center text-2xl mb-5 group-hover:scale-110 transition">💊</div>
+            <h3 class="text-lg font-semibold text-slate-900 mb-2">Не помните, приняли ли таблетку?</h3>
+            <p class="text-slate-600 leading-relaxed">
               Напоминание придёт вместе со списком именно ваших лекарств.
               «Принял всё ✓» — и приём отмечен.
             </p>
           </article>
-          <article class="card">
-            <h3>Врач просит дневник, а вести некогда?</h3>
-            <p>
+
+          <article class="group bg-white rounded-2xl border border-slate-100 shadow-sm hover:shadow-xl hover:-translate-y-1 transition-all duration-300 p-7">
+            <div class="w-12 h-12 rounded-2xl bg-blue-100 text-blue-600 flex items-center justify-center text-2xl mb-5 group-hover:scale-110 transition">📋</div>
+            <h3 class="text-lg font-semibold text-slate-900 mb-2">Врач просит дневник, а вести некогда?</h3>
+            <p class="text-slate-600 leading-relaxed">
               Статистика считается сама: средние, минимумы и максимумы, тренд.
               Экспорт в CSV — на выбор: 7 дней, 30 дней, всё время.
             </p>
           </article>
+
         </div>
       </div>
     </section>
 
-    <section class="section section-alt" id="how">
-      <div class="container">
-        <h2>Как это работает</h2>
-        <ol class="steps">
-          <li class="step">
-            <span class="step-icon" aria-hidden="true">✍️</span>
-            <h3>Записывайте</h3>
-            <p>Систолическое, диастолическое, пульс — кнопками, за пару секунд.</p>
+    <!-- Как это работает -->
+    <section class="py-20 bg-gradient-to-b from-slate-50 to-white" id="how">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl md:text-4xl font-bold text-slate-900 text-center">Как это работает</h2>
+        <p class="mt-3 text-slate-500 text-center max-w-2xl mx-auto">Три простых шага — и дневник ведётся сам.</p>
+        <ol class="mt-12 grid gap-6 md:grid-cols-3">
+
+          <li class="relative bg-white rounded-2xl border border-slate-100 shadow-sm p-7">
+            <span class="absolute top-6 right-6 text-5xl font-extrabold text-blue-100 leading-none select-none" aria-hidden="true">1</span>
+            <span class="inline-flex w-12 h-12 rounded-2xl bg-blue-600 text-white items-center justify-center text-2xl shadow-lg shadow-blue-600/30 mb-5">✍️</span>
+            <h3 class="text-lg font-semibold text-slate-900 mb-2">Записывайте</h3>
+            <p class="text-slate-600 leading-relaxed">Систолическое, диастолическое, пульс — кнопками, за пару секунд.</p>
           </li>
-          <li class="step">
-            <span class="step-icon" aria-hidden="true">💊</span>
-            <h3>Следуйте напоминаниям</h3>
-            <p>Лекарства и повторный замер после приёма — по расписанию, без напоминаний из головы.</p>
+
+          <li class="relative bg-white rounded-2xl border border-slate-100 shadow-sm p-7">
+            <span class="absolute top-6 right-6 text-5xl font-extrabold text-blue-100 leading-none select-none" aria-hidden="true">2</span>
+            <span class="inline-flex w-12 h-12 rounded-2xl bg-blue-600 text-white items-center justify-center text-2xl shadow-lg shadow-blue-600/30 mb-5">💊</span>
+            <h3 class="text-lg font-semibold text-slate-900 mb-2">Следуйте напоминаниям</h3>
+            <p class="text-slate-600 leading-relaxed">Лекарства и повторный замер после приёма — по расписанию, без напоминаний из головы.</p>
           </li>
-          <li class="step">
-            <span class="step-icon" aria-hidden="true">📊</span>
-            <h3>Покажите врачу</h3>
-            <p>Сводка и выгрузка CSV за период — чтобы приём прошёл по делу, а не по памяти.</p>
+
+          <li class="relative bg-white rounded-2xl border border-slate-100 shadow-sm p-7">
+            <span class="absolute top-6 right-6 text-5xl font-extrabold text-blue-100 leading-none select-none" aria-hidden="true">3</span>
+            <span class="inline-flex w-12 h-12 rounded-2xl bg-blue-600 text-white items-center justify-center text-2xl shadow-lg shadow-blue-600/30 mb-5">📊</span>
+            <h3 class="text-lg font-semibold text-slate-900 mb-2">Покажите врачу</h3>
+            <p class="text-slate-600 leading-relaxed">Сводка и выгрузка CSV за период — чтобы приём прошёл по делу, а не по памяти.</p>
           </li>
+
         </ol>
       </div>
     </section>
 
-    <section class="section" id="trust">
-      <div class="container">
-        <h2>Почему можно доверять</h2>
-        <ul class="trust">
-          <li>Бесплатно, без рекламы</li>
-          <li>Данные хранятся локально на нашем сервере, не передаются третьим лицам</li>
-          <li>Сделано одним разработчиком</li>
-        </ul>
+    <!-- Сигналы доверия -->
+    <section class="py-20" id="trust">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl md:text-4xl font-bold text-slate-900 text-center">Почему можно доверять</h2>
+        <div class="mt-12 grid gap-6 md:grid-cols-3">
+
+          <div class="flex items-start gap-4 bg-emerald-50/60 rounded-2xl border border-emerald-100 p-6">
+            <span class="flex-shrink-0 w-10 h-10 rounded-full bg-emerald-500 text-white flex items-center justify-center text-lg" aria-hidden="true">✓</span>
+            <div>
+              <h3 class="font-semibold text-slate-900">Бесплатно, без рекламы</h3>
+              <p class="mt-1 text-slate-600 text-sm leading-relaxed">Все функции доступны сразу и навсегда — без платных подписок.</p>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-4 bg-blue-50/60 rounded-2xl border border-blue-100 p-6">
+            <span class="flex-shrink-0 w-10 h-10 rounded-full bg-blue-600 text-white flex items-center justify-center text-lg" aria-hidden="true">🔒</span>
+            <div>
+              <h3 class="font-semibold text-slate-900">Данные хранятся локально на нашем сервере, не передаются третьим лицам</h3>
+              <p class="mt-1 text-slate-600 text-sm leading-relaxed">Только вы и, по вашему решению, ваш врач видят записи.</p>
+            </div>
+          </div>
+
+          <div class="flex items-start gap-4 bg-violet-50/60 rounded-2xl border border-violet-100 p-6">
+            <span class="flex-shrink-0 w-10 h-10 rounded-full bg-violet-600 text-white flex items-center justify-center text-lg" aria-hidden="true">👤</span>
+            <div>
+              <h3 class="font-semibold text-slate-900">Сделано одним разработчиком</h3>
+              <p class="mt-1 text-slate-600 text-sm leading-relaxed">Без посредников: напишите автору — и ответ получите от него самого.</p>
+            </div>
+          </div>
+
+        </div>
       </div>
     </section>
 
-    <section class="section section-alt" id="faq">
-      <div class="container">
-        <h2>Частые вопросы</h2>
-        <details class="faq-item">
-          <summary>Нужна ли регистрация?</summary>
-          <p>Нет. Достаточно открыть бота в Telegram и нажать «Старт» — дальше всё кнопками.</p>
-        </details>
-        <details class="faq-item">
-          <summary>Можно ли экспортировать данные?</summary>
-          <p>
-            Да. В боте есть экспорт в CSV за 7 дней, 30 дней или всё время —
-            файл открывается в Excel и подходит для врача.
-          </p>
-        </details>
-        <details class="faq-item">
-          <summary>Как удалить аккаунт и данные?</summary>
-          <p>
-            Напишите автору (контакт — внизу страницы): все ваши записи и
-            настройки удаляются без остатка.
-          </p>
-        </details>
-        <details class="faq-item">
-          <summary>Это медицинское изделие?</summary>
-          <p>
-            Нет. Бот — удобный дневник наблюдений, он не ставит диагнозов и не
-            заменяет консультацию врача.
-          </p>
-        </details>
+    <!-- FAQ -->
+    <section class="py-20 bg-gradient-to-b from-slate-50 to-white" id="faq">
+      <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+        <h2 class="text-3xl md:text-4xl font-bold text-slate-900 text-center">Частые вопросы</h2>
+        <div class="mt-12 space-y-4">
+
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
+              Нужна ли регистрация?
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">Нет. Достаточно открыть бота в Telegram и нажать «Старт» — дальше всё кнопками.</p>
+          </details>
+
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
+              Можно ли экспортировать данные?
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">
+              Да. В боте есть экспорт в CSV за 7 дней, 30 дней или всё время —
+              файл открывается в Excel и подходит для врача.
+            </p>
+          </details>
+
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
+              Как удалить аккаунт и данные?
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">
+              Напишите автору (контакт — внизу страницы): все ваши записи и
+              настройки удаляются без остатка.
+            </p>
+          </details>
+
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
+              Это медицинское изделие?
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">
+              Нет. Бот — удобный дневник наблюдений, он не ставит диагнозов и не
+              заменяет консультацию врача.
+            </p>
+          </details>
+
+        </div>
+      </div>
+    </section>
+
+    <!-- Секция Поддержки -->
+    <section id="support" class="py-20 bg-white">
+        <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
+
+            <!-- Об авторе -->
+            <div class="mb-12">
+                <h2 class="text-3xl font-bold text-slate-900 mb-6">Автор</h2>
+                <div class="bg-white rounded-2xl shadow-sm p-6 border border-slate-100">
+                    <p class="text-lg text-slate-800 font-medium mb-2">Старинский Олег Григорьевич</p>
+                    <ul class="space-y-1 text-slate-600">
+                        <li>📧 Email: <a href="mailto:info@electroman.by" class="text-blue-600 hover:underline">info@electroman.by</a></li>
+                        <li>✈️ Telegram: <a href="https://t.me/ElectroManBY" class="text-blue-600 hover:underline" target="_blank">@ElectroManBY</a></li>
+                    </ul>
+                </div>
+            </div>
+
+            <!-- Поддержать проект -->
+            <div class="mb-12">
+                <h2 class="text-3xl font-bold text-slate-900 mb-4">Поддержать проект</h2>
+                <p class="text-slate-600 mb-6 text-lg">
+                    Бот бесплатный, без рекламы и платных подписок. Поддержка добровольная — функции за оплатой не закрыты.
+                    Деньги идут на хостинг, развитие бота и тестирование на реальных тонометрах.
+                </p>
+
+                <div class="bg-white rounded-2xl shadow-sm overflow-hidden border border-slate-100">
+                    <ul class="divide-y divide-slate-100">
+
+                        <!-- ЮMoney -->
+                        <li class="p-4 flex items-start space-x-4 hover:bg-slate-50 transition">
+                            <div class="flex-shrink-0 text-2xl mt-1">💳</div>
+                            <div class="flex-1">
+                                <h3 class="text-lg font-medium text-slate-900">ЮMoney</h3>
+                                <p class="text-slate-600 mt-1">Картой любого банка, без регистрации. Кошелёк: <span class="font-mono bg-slate-100 px-2 py-0.5 rounded">4100119514684342</span></p>
+                                <a href="https://yoomoney.ru/to/4100119514684342" target="_blank" class="mt-2 inline-block text-blue-600 hover:underline font-medium">Перевести →</a>
+                            </div>
+                        </li>
+
+                        <!-- WebMoney -->
+                        <li class="p-4 flex items-start space-x-4 hover:bg-slate-50 transition">
+                            <div class="flex-shrink-0 text-2xl mt-1">💎</div>
+                            <div class="flex-1">
+                                <h3 class="text-lg font-medium text-slate-900">WebMoney</h3>
+                                <p class="text-slate-600 mt-1">Безопасный перевод через WebMoney.</p>
+                                <!-- Замените ссылку на реальную, если есть -->
+                                <a href="https://modbustoolkit.electroman.by/support.html" target="_blank" class="mt-2 inline-block text-blue-600 hover:underline font-medium">Перевести →</a>
+                            </div>
+                        </li>
+
+                        <!-- IBAN -->
+                        <li class="p-4 flex items-start space-x-4 hover:bg-slate-50 transition">
+                            <div class="flex-shrink-0 text-2xl mt-1">🏦</div>
+                            <div class="flex-1">
+                                <h3 class="text-lg font-medium text-slate-900">Пополнение счёта по IBAN (Беларусь)</h3>
+                                <p class="text-slate-600 mt-1 text-sm mb-2">Из интернет-банка или приложения другого банка. Через ЕРИП: Банковские, финансовые услуги → Банки → Сбер Банк → Пополнение счета с картой.</p>
+                                <div class="bg-slate-50 p-3 rounded border border-slate-200 font-mono text-sm text-slate-800 break-all">
+                                    BY18 BPSB 3014 F000 0000 1164 7609
+                                </div>
+                                <p class="text-xs text-slate-500 mt-2">Клиентам Сбер Банка — перевод по номеру телефона: <span class="font-mono text-slate-800">+375 29 714-28-82</span></p>
+                            </div>
+                        </li>
+
+                        <!-- СберБанк РФ -->
+                        <li class="p-4 flex items-start space-x-4 hover:bg-slate-50 transition">
+                            <div class="flex-shrink-0 text-2xl mt-1">🇷🇺</div>
+                            <div class="flex-1">
+                                <h3 class="text-lg font-medium text-slate-900">СберБанк (Россия)</h3>
+                                <p class="text-slate-600 mt-1 text-sm mb-2">В СберБанк Онлайн: перевод в Беларусь по номеру телефона.</p>
+                                <div class="bg-slate-50 p-2 rounded border border-slate-200 font-mono text-sm text-slate-800">
+                                    +375 29 714-28-82
+                                </div>
+                                <p class="text-xs text-slate-500 mt-2">Перед переводом приложение покажет имя получателя — проверьте его.</p>
+                            </div>
+                        </li>
+
+                    </ul>
+                </div>
+                <p class="text-sm text-slate-500 mt-4">Перед переводом приложение покажет имя получателя — проверьте его. Не только деньгами: отчёт о баге или рассказ коллегам помогают проекту не меньше.</p>
+            </div>
+
+            <!-- Для бизнеса -->
+            <div>
+                <h2 class="text-2xl font-bold text-slate-900 mb-4">Для бизнеса</h2>
+                <div class="bg-blue-50 rounded-2xl p-6 border border-blue-100">
+                    <p class="text-slate-700 mb-4">
+                        Проект распространяется под лицензией <strong>PolyForm Noncommercial 1.0.0</strong>.
+                        Использование бесплатно для личных целей. Для клиник и коммерческих организаций требуется отдельная лицензия.
+                    </p>
+                    <p class="text-slate-700">
+                        Для запроса счёта или коммерческой лицензии напишите на <a href="mailto:info@electroman.by" class="text-blue-600 hover:underline font-medium">info@electroman.by</a>.
+                    </p>
+                </div>
+            </div>
+
+        </div>
+    </section>
+
+    <!-- CTA -->
+    <section class="relative overflow-hidden py-20 bg-gradient-to-r from-blue-700 via-blue-600 to-sky-600">
+      <div class="absolute -top-16 left-1/4 w-72 h-72 bg-white/10 rounded-full blur-3xl" aria-hidden="true"></div>
+      <div class="absolute bottom-0 right-1/4 w-80 h-80 bg-sky-300/20 rounded-full blur-3xl" aria-hidden="true"></div>
+      <div class="relative max-w-3xl mx-auto px-4 sm:px-6 lg:px-8 text-center">
+        <h2 class="text-3xl md:text-4xl font-bold text-white">Начните вести дневник сегодня</h2>
+        <p class="mt-4 text-blue-100 text-lg">
+          Настройка занимает минуту, дальше — всё кнопками. Бесплатно и без рекламы.
+        </p>
+        <a class="mt-8 inline-flex items-center gap-2.5 bg-white hover:bg-blue-50 text-blue-700 text-lg font-semibold px-8 py-4 rounded-full shadow-xl transition hover:-translate-y-0.5"
+           href="https://t.me/my_bp_diary_bot?start=landing">
+          <svg class="w-5 h-5" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="M11.944 0A12 12 0 0 0 0 12a12 12 0 0 0 12 12 12 12 0 0 0 12-12A12 12 0 0 0 12 0a12 12 0 0 0-.056 0zm4.962 7.224c.1-.002.321.023.465.14a.506.506 0 0 1 .171.325c.016.093.036.306.02.472-.18 1.898-.962 6.502-1.36 8.627-.168.9-.499 1.201-.82 1.23-.696.065-1.225-.46-1.9-.902-1.056-.693-1.653-1.124-2.678-1.8-1.185-.78-.417-1.21.258-1.91.177-.184 3.247-2.977 3.307-3.23.007-.032.014-.15-.056-.212s-.174-.041-.249-.024c-.106.024-1.793 1.14-5.061 3.345-.48.33-.913.49-1.302.48-.428-.008-1.252-.241-1.865-.44-.752-.245-1.349-.374-1.297-.789.027-.216.325-.437.893-.663 3.498-1.524 5.83-2.529 6.998-3.014 3.332-1.386 4.025-1.627 4.476-1.635z"/></svg>
+          Открыть в Telegram
+        </a>
       </div>
     </section>
   </main>
 
-  <footer class="footer">
-    <div class="container">
-      <nav class="footer-links">
-        <a href="privacy.html">Политика конфиденциальности</a>
-      </nav>
-      <!-- ЗАМЕНИТЕ на свой контакт при развёртывании (переменная AUTHOR_CONTACT). -->
-      <p class="footer-author">Контакт автора: <span id="author-contact">см. раздел «Поддержать» в боте</span></p>
+  <!-- Футер -->
+  <footer class="bg-slate-900 text-slate-300">
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-12">
+      <div class="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+        <div class="flex items-center gap-2.5">
+          <span class="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 text-white flex items-center justify-center text-lg">💓</span>
+          <div>
+            <p class="font-semibold text-white">Дневник гипертоника</p>
+            <p class="text-sm text-slate-400">Дневник давления в Telegram</p>
+          </div>
+        </div>
+        <nav class="flex flex-wrap gap-x-6 gap-y-2 text-sm">
+          <a class="text-slate-300 hover:text-white hover:underline" href="privacy.html">Политика конфиденциальности</a>
+          <a class="text-slate-300 hover:text-white hover:underline" href="#support">Контакт автора</a>
+        </nav>
+      </div>
+      <p class="mt-8 pt-6 border-t border-slate-800 text-sm text-slate-400">Контакт автора: <a class="hover:underline" href="mailto:info@electroman.by">info@electroman.by</a></p>
     </div>
   </footer>
 

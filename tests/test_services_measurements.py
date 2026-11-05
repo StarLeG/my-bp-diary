@@ -4,8 +4,9 @@ from __future__ import annotations
 from datetime import date, datetime, timedelta, timezone
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from bot.models import Measurement, User
 from bot.services import measurements as service
@@ -332,3 +333,56 @@ class TestHasRecentMeasurement:
             )
             is True
         )
+
+
+class TestDeleteUserData:
+    """Удаление аккаунта (§19): job'ы до данных, гонка — `False` без ошибки."""
+
+    async def test_removes_jobs_then_deletes_user(
+        self, session: AsyncSession, user: User, mocker
+    ) -> None:
+        order: list[str] = []
+        reminders = mocker.Mock()
+        reminders.remove_user_jobs = mocker.AsyncMock(
+            side_effect=lambda user_id: order.append("jobs") or 1
+        )
+        real_delete = session.delete
+
+        async def tracked_delete(obj) -> None:
+            order.append("delete")
+            await real_delete(obj)
+
+        mocker.patch.object(session, "delete", tracked_delete)
+        assert await service.delete_user_data(session, reminders, user) is True
+        # Порядок обязателен (§19): сначала job'ы, потом `session.delete`.
+        assert order == ["jobs", "delete"]
+        reminders.remove_user_jobs.assert_awaited_once_with(user.id)
+        assert await service.get_user(session, user.telegram_id) is None
+
+    async def test_already_deleted_user_returns_false(
+        self, session: AsyncSession, user: User, session_factory, mocker
+    ) -> None:
+        reminders = mocker.Mock()
+        reminders.remove_user_jobs = mocker.AsyncMock(return_value=0)
+        async with session_factory() as other:
+            await other.execute(sa_delete(User).where(User.id == user.id))
+            await other.commit()
+        assert await service.delete_user_data(session, reminders, user) is False
+        reminders.remove_user_jobs.assert_not_awaited()
+
+    async def test_stale_delete_returns_false(
+        self, session: AsyncSession, user: User, mocker
+    ) -> None:
+        uid, tg = user.id, user.telegram_id  # до rollback: откат истекает атрибуты
+        reminders = mocker.Mock()
+        reminders.remove_user_jobs = mocker.AsyncMock(return_value=1)
+        mocker.patch.object(
+            session,
+            "delete",
+            new_callable=mocker.AsyncMock,
+            side_effect=StaleDataError("UPDATE/DELETE statement expected to delete 1 row(s); 0 were matched"),
+        )
+        assert await service.delete_user_data(session, reminders, user) is False
+        reminders.remove_user_jobs.assert_awaited_once_with(uid)
+        # Откат: строка пользователя осталась на месте.
+        assert await service.get_user(session, tg) is not None

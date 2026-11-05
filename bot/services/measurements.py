@@ -12,15 +12,19 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
 from sqlalchemy import exists, func, insert, literal, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm.exc import StaleDataError
 
 from bot.models import Measurement, User
 from bot.schemas import FeelingLiteral
+
+if TYPE_CHECKING:
+    from bot.services.reminders import RemindersService
 
 #: Окно дедупликации: записи в одну минуту считаются одним измерением.
 DEDUP_WINDOW = timedelta(minutes=1)
@@ -50,6 +54,24 @@ def _current_save_lock() -> asyncio.Lock:
         _save_lock = asyncio.Lock()
         _save_lock_loop = loop
     return _save_lock
+
+
+_delete_lock: Optional[asyncio.Lock] = None
+_delete_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _current_delete_lock() -> asyncio.Lock:
+    """Лок удалений текущего event loop (гонка двойного подтверждения, §19).
+
+    Удаление аккаунта сериализуется в рамках процесса: проигравший гонку
+    находит строку уже стёртой и получает `False` вместо «тихого» повтора.
+    """
+    global _delete_lock, _delete_lock_loop
+    loop = asyncio.get_running_loop()
+    if _delete_lock is None or _delete_lock_loop is not loop:
+        _delete_lock = asyncio.Lock()
+        _delete_lock_loop = loop
+    return _delete_lock
 
 
 def utcnow() -> datetime:
@@ -89,6 +111,45 @@ async def get_or_create_user(
             await session.execute(select(User).where(User.telegram_id == telegram_id))
         ).scalar_one()
     return user
+
+
+async def get_user(session: AsyncSession, telegram_id: int) -> Optional[User]:
+    """Пользователь по `telegram_id` без создания записи (§19, удаление)."""
+    return (
+        await session.execute(select(User).where(User.telegram_id == telegram_id))
+    ).scalar_one_or_none()
+
+
+async def delete_user_data(
+    session: AsyncSession, reminders: "RemindersService", user: User
+) -> bool:
+    """Удалить аккаунт (SPEC.md, §19): СНАЧАЛА job'ы, ПОТОМ `session.delete`.
+
+    Порядок обязателен: оставшийся job упал бы с `User not found` при попытке
+    отправить напоминание. Удаление выборочное (`remove_user_jobs`), а не
+    `scheduler.remove_all_jobs()` — job'ы других пользователей не трогаются
+    (изоляция данных, §7.1).
+
+    Гонка двойного подтверждения безопасна: удаление идёт под локом с повторной
+    проверкой строки в БД — проигравший получает `False` и ничего не трогает
+    (в SQLAlchemy 2.x 0-row DELETE лишь предупреждает, а не бросает
+    `StaleDataError`, поэтому одной проверки `get_user` перед вызовом мало).
+    `StaleDataError` отменяется в `False` на случай внешнего вмешательства.
+    """
+    async with _current_delete_lock():
+        found = (
+            await session.execute(select(User.id).where(User.id == user.id))
+        ).first()
+        if found is None:
+            return False
+        await reminders.remove_user_jobs(user.id)
+        try:
+            await session.delete(user)
+            await session.commit()
+        except StaleDataError:
+            await session.rollback()
+            return False
+    return True
 
 
 async def save_measurement(

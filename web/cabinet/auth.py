@@ -195,6 +195,11 @@ async def create_web_session(db: AsyncSession, web_user_id: int) -> str:
     """Создать сессию в SQLite, вернуть сессионный токен (для cookie).
 
     Заодно удаляются просроченные сессии — таблица не растёт бесконечно.
+
+    Запись коммитится сразу (`commit`, не `flush`): хендлеры выдают куку и
+    редирект `/`, а коммит сессии в `get_db` происходит в teardown — уже после
+    отправки ответа. Мгновенный `GET /` после редиректа не находил сессию и
+    откатывал пользователя на `/login`.
     """
     now = utcnow()
     await db.execute(delete(WebSession).where(WebSession.expires_at <= now))
@@ -207,7 +212,7 @@ async def create_web_session(db: AsyncSession, web_user_id: int) -> str:
             expires_at=now + SESSION_TTL,
         )
     )
-    await db.flush()
+    await db.commit()
     return token
 
 

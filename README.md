@@ -2,7 +2,7 @@
 
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2AABEE)
-![License](https://img.shields.io/badge/license-MIT-green)
+![License](https://img.shields.io/badge/license-PolyForm--Noncommercial--1.0.0-blue)
 [![Тесты](https://github.com/StarLeG/my-bp-diary/actions/workflows/tests.yml/badge.svg)](https://github.com/StarLeG/my-bp-diary/actions/workflows/tests.yml)
 
 Telegram-бот для ведения дневника измерений артериального давления: быстрая запись за
@@ -129,9 +129,7 @@ pull request — статус сборки виден бейджем в нача
 
 ## 📄 Лицензия
 
-Этот проект распространяется под лицензией **MIT**. Вы можете свободно использовать,
-изменять и распространять код, в том числе в коммерческих целях, при условии сохранения
-упоминания об авторстве. Подробнее — в файле [LICENSE](LICENSE).
+Исходный код доступен. Использование бесплатно для личных и некоммерческих целей. Для коммерческого использования требуется отдельная лицензия — свяжитесь с автором. Полный текст лицензии: LICENSE.
 
 Бот и его код предоставляются «как есть», без гарантий. Автор не несёт ответственности
 за любые последствия использования, включая медицинские. Бот не является медицинским

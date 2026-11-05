@@ -147,6 +147,40 @@ class TestCanonicalTexts:
     def test_csv_too_many_text(self) -> None:
         assert texts.CSV_TOO_MANY == "Слишком много записей, выберите 7 или 30 дней"
 
+    def test_admin_forbidden_canonical(self) -> None:
+        # SPEC.md, §18: ответ на чужой запрос — «Доступ запрещен» (без «ё»).
+        assert texts.ADMIN_FORBIDDEN == "Доступ запрещен"
+
+    def test_doctor_report_link_canonical(self) -> None:
+        # SPEC.md, §21, п.5 — дословно.
+        assert texts.DOCTOR_REPORT_LINK == (
+            "Ссылка для вашего врача сформирована. Перешлите её ему: {url}"
+        )
+
+    def test_admin_broadcast_texts_canonical(self) -> None:
+        # SPEC.md, §18.5 — дословно.
+        assert texts.ADMIN_BCAST_PROGRESS == "Отправлено {done} из {total}..."
+        assert texts.ADMIN_BCAST_REPORT == (
+            "Рассылка завершена.\nДоставлено: {delivered}, Заблокировали: {blocked}"
+        )
+
+    def test_admin_menu_buttons_canonical(self) -> None:
+        # SPEC.md, §18.1 — пункты inline-клавиатуры дословно.
+        assert texts.BTN_ADMIN_STATS == "📊 Статистика БД"
+        assert texts.BTN_ADMIN_BACKUPS == "💾 Бэкапы"
+        assert texts.BTN_ADMIN_HEALTH == "🩺 Здоровье системы"
+        assert texts.BTN_ADMIN_BROADCAST == "📢 Рассылка"
+        assert texts.BTN_ADMIN_SEARCH == "👤 Поиск пользователя"
+
+    def test_delete_account_texts_canonical(self) -> None:
+        # SPEC.md, §19 — дословно.
+        assert texts.DELETE_ACCOUNT_WARNING.startswith("Это действие необратимо...")
+        assert texts.DELETE_ACCOUNT_DONE == "Ваш аккаунт и все данные удалены"
+
+    def test_backup_integrity_status_canonical(self) -> None:
+        # SPEC.md, §18.3: статус верификации — «integrity_check: OK».
+        assert texts.fmt_backup_status(True) == "integrity_check: OK"
+
 
 class TestTone:
     def test_no_word_donate(self) -> None:
@@ -172,8 +206,17 @@ class TestTone:
             assert "замер" not in value.lower()
 
     def test_all_texts_are_russian_or_symbols(self) -> None:
-        # Тексты не пустые и без латинских предложений (кроме IANA-примеров).
-        exceptions = (texts.ONB_TZ_OTHER_PROMPT, texts.TZ_OTHER_PROMPT, texts.CABINET_LINK_SENT)
+        # Тексты не пустые и без латинских предложений (кроме IANA-примеров
+        # и технических статусов SPEC.md, §18.3–§18.4: «integrity_check: FAIL»,
+        # «Running»/«Stopped» — дословно).
+        exceptions = (
+            texts.ONB_TZ_OTHER_PROMPT,
+            texts.TZ_OTHER_PROMPT,
+            texts.CABINET_LINK_SENT,
+            texts.ADMIN_BACKUP_INTEGRITY_FAIL,
+            texts.ADMIN_HEALTH_SCHEDULER_RUNNING,
+            texts.ADMIN_HEALTH_SCHEDULER_STOPPED,
+        )
         for value in all_text_values():
             if value in exceptions:
                 continue
