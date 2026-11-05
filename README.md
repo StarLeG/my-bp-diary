@@ -3,6 +3,7 @@
 ![Python](https://img.shields.io/badge/python-3.11%2B-blue)
 ![aiogram](https://img.shields.io/badge/aiogram-3.x-2AABEE)
 ![License](https://img.shields.io/badge/license-MIT-green)
+[![Тесты](https://github.com/StarLeG/my-bp-diary/actions/workflows/tests.yml/badge.svg)](https://github.com/StarLeG/my-bp-diary/actions/workflows/tests.yml)
 
 Telegram-бот для ведения дневника измерений артериального давления: быстрая запись за
 2 нажатия, напоминания о лекарствах, статистика и CSV для врача. Бесплатный, без рекламы.
@@ -116,6 +117,9 @@ uv run pytest -q --cov=bot --cov-fail-under=90
 
 900 тестов; покрытие `bot/` — 100% строк и веток (требование спецификации: ≥ 90% строк,
 бизнес-логика — 100% веток, обязательны тесты конкурентности).
+
+Те же тесты запускаются в GitHub Actions (Python 3.11–3.14) при каждом push и
+pull request — статус сборки виден бейджем в начале страницы.
 
 ## Поддержать проект
 

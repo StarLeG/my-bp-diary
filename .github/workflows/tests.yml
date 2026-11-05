@@ -1,0 +1,38 @@
+name: Тесты
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: pytest (Python ${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Установить uv и Python ${{ matrix.python-version }}
+        uses: astral-sh/setup-uv@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          enable-cache: true
+
+      - name: Установить зависимости
+        run: uv sync --frozen
+
+      - name: Проверить наличие LICENSE (SPEC.md, §13)
+        run: test -f LICENSE
+
+      - name: Прогнать тесты
+        run: uv run pytest -q --no-header --cov=bot --cov-report=term --cov-fail-under=90
