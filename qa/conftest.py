@@ -432,8 +432,26 @@ def _send_telegram(token: str, chat_id: int, text: str) -> None:
     urllib.request.urlopen(request, timeout=15)
 
 
+#: Файлы E2E-набора QA Bot (§22): отчёт админу — только после их запуска,
+#: чтобы нагрузочный прогон (test_load_burst.py) не слал отчёт QA-стенда.
+_E2E_TEST_FILES = {"test_telegram_e2e.py", "test_web_e2e.py"}
+_e2e_started = False
+
+
+def pytest_runtest_logreport(report: pytest.TestReport) -> None:
+    """Запомнить, что E2E-тесты реально запускались (хотя бы один)."""
+    global _e2e_started
+    if _e2e_started:
+        return
+    if report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1] in _E2E_TEST_FILES:
+        _e2e_started = True
+
+
 def _notify_admin(session: pytest.Session) -> None:
     """Краткий отчёт админу в Telegram (§22) — штатным Bot API бота."""
+    if not _e2e_started:
+        print("QA: отчёт админу не отправлен (E2E-тесты не запускались).")
+        return
     token = _env("BOT_TOKEN")
     admins = _parse_admin_ids(_env("ADMIN_TELEGRAM_IDS"))
     if not token or not admins:

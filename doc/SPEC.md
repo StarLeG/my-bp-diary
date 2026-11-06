@@ -735,8 +735,8 @@ FastAPI + Jinja2 + uvicorn; зависимости: `fastapi`, `uvicorn`, `jinja
 **только к тестовому стенду** — в прод-БД их запускать нельзя.
 
 1. **HTTP-кабинет (Locust, `qa/locustfile.py`)**: 20 виртуальных пользователей
-   (вход 2/сек), сценарий: вход → дашборд → экспорт CSV → добавление лекарства →
-   настройки. Учётные записи готовит `qa/seed_load_users.py`
+   (вход 2/сек), сценарий: вход → дашборд → экспорт CSV за 30 дней → добавление
+   лекарства → профиль и настройки. Учётные записи готовит `qa/seed_load_users.py`
    (`load{n}@load.test`, история измерений за 30 дней).
 2. **Сервисный слой (pytest, `qa/test_load_burst.py`)**: 20 пользователей × N
    конкурентных операций на файловой SQLite с PRAGMA продакшена (WAL,
@@ -757,8 +757,11 @@ FastAPI + Jinja2 + uvicorn; зависимости: `fastapi`, `uvicorn`, `jinja
 # burst сервисного слоя:
 LOAD_TEST=1 uv run pytest qa/test_load_burst.py -v -s
 
-# сид нагрузочных аккаунтов и нагрузка кабинета (только тестовый стенд):
-uv run python qa/seed_load_users.py --db data/test-stand.sqlite3
-uv run locust -f qa/locustfile.py --host=http://127.0.0.1:8000 \
+# сид нагрузочных аккаунтов и нагрузка кабинета (только тестовый стенд;
+# пароль нагрузочных аккаунтов — только из окружения, в коде не хранится):
+LOAD_PASSWORD='<пароль стенда>' \
+    uv run python qa/seed_load_users.py --db data/test-stand.sqlite3
+LOAD_PASSWORD='<пароль стенда>' \
+    uv run locust -f qa/locustfile.py --host=http://127.0.0.1:8000 \
     -u 20 -r 2 -t 5m --headless --csv=qa/reports/load/locust
 ```
