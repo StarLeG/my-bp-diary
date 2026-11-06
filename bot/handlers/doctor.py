@@ -154,6 +154,7 @@ async def msg_doctor_email(
             name=message.from_user.first_name, url=link  # type: ignore[union-attr]
         ),
         reply_markup=keyboards.back_to_menu(),
+        link_preview_options=keyboards.NO_LINK_PREVIEW,
     )
 
 
@@ -223,5 +224,7 @@ async def cb_send_report(
             link = make_doctor_link(settings, doctor.id, user.id)
             text = texts.DOCTOR_REPORT_LINK.format(url=link)
             markup = keyboards.back_to_menu()
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+    )
     await callback.answer()

@@ -485,7 +485,7 @@ async def cb_med_dose_other(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.in_(f"med:dose:{d}" for d in keyboards.DOSAGE_PRESETS))
+@router.callback_query(F.data.in_(keyboards.DOSAGE_CALLBACKS))
 async def cb_med_dose(callback: CallbackQuery, state: FSMContext) -> None:
     dosage = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     await state.update_data(**{M_DOSAGE: dosage})

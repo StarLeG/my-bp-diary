@@ -439,3 +439,47 @@ class TestMakeCabinetLink:
             URLSafeTimedSerializer("other", salt=support.CABINET_SALT).loads(
                 token, max_age=support.CABINET_TOKEN_MAX_AGE
             )
+
+
+class TestNoLinkPreview:
+    """Регресс: превью ссылок выключено — иначе Telegram сжигает magic link.
+
+    Превью открывает ссылку до клика пользователя, одноразовый токен
+    списывается — человек попадает на `link_expired`. Все отправки со
+    ссылками обязаны передавать `keyboards.NO_LINK_PREVIEW`.
+    """
+
+    async def test_cmd_cabinet_disables_preview(
+        self, answer, state, with_settings, session, user
+    ) -> None:
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        await make_web_user(session, user)
+        await call(support.cmd_cabinet, message=make_message(), state=state, session=session)
+        assert answer.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW
+
+    async def test_cb_cabinet_disables_preview(
+        self, edit, cb_answer, with_settings, session, user
+    ) -> None:
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        await make_web_user(session, user)
+        await call(
+            support.cb_cabinet,
+            callback=make_callback("menu:cabinet", make_message()),
+            state=make_state(),
+            session=session,
+        )
+        assert edit.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW
+
+    async def test_msg_cabinet_email_disables_preview(
+        self, answer, with_settings, session
+    ) -> None:
+        with_settings(web_secret_key="secret", cabinet_url="https://cabinet.example.org")
+        state = make_state()
+        await state.set_state(support.CabinetRegistration.email)
+        await call(
+            support.msg_cabinet_email,
+            message=make_message("User@Example.COM"),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW

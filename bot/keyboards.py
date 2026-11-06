@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Iterable, Mapping, Optional, Sequence
 
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot import texts
@@ -49,6 +49,13 @@ TIMEZONE_CITIES = {
 
 #: Популярные дозировки (кнопки шага 2 настройки лекарства).
 DOSAGE_PRESETS = ("5 мг", "10 мг", "20 мг", "50 мг", "100 мг")
+
+#: callback_data кнопок дозировки (frozenset, а не генератор: генератор
+#: исчерпывается после первого прохода и фильтр перестаёт срабатывать).
+DOSAGE_CALLBACKS = frozenset(f"med:dose:{d}" for d in DOSAGE_PRESETS)
+
+#: Отключить превью ссылок (одноразовые magic link сжигаются превью Telegram).
+NO_LINK_PREVIEW = LinkPreviewOptions(is_disabled=True)
 
 #: Варианты «Повтор после лекарства».
 REMEASURE_VARIANTS = {

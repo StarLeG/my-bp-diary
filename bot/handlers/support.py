@@ -204,7 +204,7 @@ async def cmd_cabinet(message: Message, state: FSMContext, session: AsyncSession
     """
     await state.clear()
     text, markup = await _cabinet_entry(session, state, message.from_user.id)  # type: ignore[union-attr]
-    await message.answer(text, reply_markup=markup)
+    await message.answer(text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW)
 
 
 @router.callback_query(F.data == "menu:cabinet")
@@ -214,7 +214,9 @@ async def cb_cabinet(callback: CallbackQuery, state: FSMContext, session: AsyncS
     Сообщение редактируется, чтобы не плодить визуальный шум (§6.2).
     """
     text, markup = await _cabinet_entry(session, state, callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+    )
     await callback.answer()
 
 
@@ -242,6 +244,7 @@ async def msg_cabinet_email(
     await message.answer(
         texts.CABINET_ACCOUNT_CREATED.format(url=link),
         reply_markup=keyboards.back_to_menu(),
+        link_preview_options=keyboards.NO_LINK_PREVIEW,
     )
 
 

@@ -435,6 +435,42 @@ class TestSendReport:
         )
 
 
+class TestNoLinkPreview:
+    """Регресс: превью Telegram сжигает одноразовый токен — выключаем его.
+
+    Превью открывает ссылку до клика, `consume` списывает jti — врач попадает
+    на `link_expired`. Все отправки со ссылками дают
+    `keyboards.NO_LINK_PREVIEW` (как в support.py).
+    """
+
+    async def test_invite_disables_preview(
+        self, answer, with_settings, session, user
+    ) -> None:
+        with_settings(**cabinet_on())
+        state = make_state()
+        await state.set_state(doctor.DoctorAccess.email)
+        await call(
+            doctor.msg_doctor_email,
+            message=make_message("doc@example.org"),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW
+
+    async def test_report_link_disables_preview(
+        self, edit, cb_answer, with_settings, session, user
+    ) -> None:
+        with_settings(**cabinet_on())
+        await make_link(session)
+        await call(
+            doctor.cb_send_report,
+            callback=make_callback("menu:report"),
+            state=make_state(),
+            session=session,
+        )
+        assert edit.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW
+
+
 # ─────────────────────────── Подпись ссылки ───────────────────────────
 
 

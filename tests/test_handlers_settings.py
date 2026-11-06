@@ -707,6 +707,36 @@ class TestMeds:
         assert edit.call_args.args[0] != texts.MEDS_DELETED
 
 
+class TestDosageButtonFilter:
+    """Регресс: фильтр кнопок дозировки срабатывает многократно.
+
+    Раньше в `F.data.in_(...)` передавался генератор: он исчерпывался после
+    первого прохода, и следующее нажатие любой кнопки дозировки фильтр не
+    проходило — бот молчал, дозировку можно было дать только текстом.
+    Проверяется фильтр, зарегистрированный в роутере (та же инстанция
+    `FilterObject`, что обслуживает реальные callback'и).
+    """
+
+    @staticmethod
+    def _dose_filter():
+        for handler in settings.router.callback_query.handlers:
+            if handler.callback.__name__ == "cb_med_dose":
+                assert handler.filters, "у cb_med_dose не осталось фильтров"
+                return handler.filters[0]
+        raise AssertionError("cb_med_dose не зарегистрирован в роутере")
+
+    async def test_every_preset_matches_repeatedly(self) -> None:
+        flt = self._dose_filter()
+        for preset in keyboards.DOSAGE_PRESETS:
+            event = make_callback(f"med:dose:{preset}", make_message())
+            assert await flt.call(event) is True
+            assert await flt.call(event) is True  # повтор: генератор здесь уже «пуст»
+
+    async def test_foreign_callback_is_rejected(self) -> None:
+        flt = self._dose_filter()
+        assert await flt.call(make_callback("med:slot:morning", make_message())) is False
+
+
 class TestDeleteAccount:
     """Удаление аккаунта (§19): предупреждение, порядок «job'ы → данные», идемпотентность."""
 
