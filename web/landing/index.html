@@ -19,6 +19,10 @@
       },
     };
   </script>
+  <style>
+    /* Не прячем якоря под sticky-шапкой при прокрутке. */
+    html { scroll-padding-top: 5.5rem; }
+  </style>
 </head>
 <body class="bg-white text-slate-800 font-sans antialiased">
 
@@ -32,6 +36,7 @@
       <nav class="hidden md:flex items-center gap-7 text-sm font-medium text-slate-600">
         <a class="hover:text-blue-700 transition" href="#how">Как работает</a>
         <a class="hover:text-blue-700 transition" href="#trust">Почему нам доверяют</a>
+        <a class="hover:text-blue-700 transition" href="#docs">Руководство</a>
         <a class="hover:text-blue-700 transition" href="#faq">Вопросы</a>
         <a class="hover:text-blue-700 transition" href="#support">Поддержать</a>
       </nav>
@@ -276,6 +281,247 @@
       </div>
     </section>
 
+    <!-- Документация: руководство пользователя -->
+    <section class="py-20 bg-slate-50" id="docs">
+      <div class="max-w-3xl mx-auto px-4 sm:px-6 lg:px-8">
+
+        <div class="text-center">
+          <p class="inline-flex items-center gap-2 bg-blue-100/70 text-blue-800 text-sm font-medium px-4 py-1.5 rounded-full">
+            <span aria-hidden="true">📖</span> Документация
+          </p>
+          <h2 class="mt-5 text-3xl md:text-4xl font-bold text-slate-900">Подробное руководство</h2>
+          <p class="mt-3 text-slate-500 max-w-2xl mx-auto">
+            Всё о боте простым языком: от первого запуска до отчёта для врача.
+            Откройте нужный раздел — или пролистайте всё по порядку.
+          </p>
+        </div>
+
+        <!-- Оглавление -->
+        <nav class="mt-8 flex flex-wrap justify-center gap-2.5" aria-label="Оглавление руководства">
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-start">🚀 Начало работы</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-record">✍️ Запись давления</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-reminders">⏰ Напоминания</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-meds">💊 Лекарства</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-stats">📊 Дневник и статистика</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-cabinet">💻 Личный кабинет</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-doctor">🩺 Отчёт врачу</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-data">🔒 Ваши данные</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-settings">⚙️ Настройки</a>
+        </nav>
+
+        <!-- Блоки руководства -->
+        <div class="mt-10 space-y-4">
+
+          <!-- 1. Начало работы -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-start" open>
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">🚀</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Начало работы</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>Откройте бота в Telegram и нажмите «Старт». Регистрация не нужна — дальше всё кнопками.</p>
+              <p>При первом запуске бот задаст три коротких вопроса:</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Часовой пояс.</b> По нему считаются «сегодня» и приходят напоминания. Выберите из списка или напишите свой — например, Europe/Minsk.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Цель.</b> Какие значения считать хорошими — по умолчанию 130/80. Это ориентир для дневника, а не медицинская норма: норму определяет врач.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Когда напоминать.</b> Отметьте удобные слоты — утро, обед и вечер — и укажите время для каждого.</span></li>
+              </ul>
+              <p>Бот подтвердит: «Готово! Всё настроено» — и откроется главное меню: «Записать давление», «Дневник за сегодня», «Статистика», «Настройки», «О боте / Поддержать». Там же «Личный кабинет» и «Отправить отчет».</p>
+              <div class="flex gap-3 bg-blue-50 border border-blue-100 rounded-xl p-4">
+                <span class="text-lg leading-none" aria-hidden="true">💡</span>
+                <p class="text-sm text-slate-700">Пропустили вопрос? Не страшно — часовой пояс, цель и время напоминаний меняются в «Настройках» в любой момент.</p>
+              </div>
+            </div>
+          </details>
+
+          <!-- 2. Запись давления -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-record">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">✍️</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Запись давления</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>Запись занимает пару секунд: пара нажатий — и готово.</p>
+              <ol class="space-y-2 list-decimal pl-5">
+                <li>Нажмите <b class="text-slate-800">«Записать давление»</b> — в меню, в напоминании или в личном кабинете.</li>
+                <li>Выберите систолическое (верхнее) — кнопки от 100 до 200 с шагом 5. Нужного нет? Жмите <b class="text-slate-800">«Другое»</b> и вводите число.</li>
+                <li>Выберите диастолическое (нижнее) — от 60 до 120 с шагом 5, тоже есть «Другое».</li>
+                <li>Пульс — от 50 до 120 с шагом 5 или <b class="text-slate-800">«Пропустить»</b>.</li>
+              </ol>
+              <p>Бот подтвердит: «✅ 130/85, пульс 70. Записано.»</p>
+              <p>После записи — всё по желанию, без навязчивости:</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Добавить заметку»</b> — любая мысль до 500 символов: таблетка, погода, самочувствие.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Приняли лекарство?»</b> — «Да», «Нет» или «Пропустил».</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Как самочувствие?»</b> — «Норма», «Головная боль», «Слабость» или «Другое».</span></li>
+              </ul>
+              <p>Не хотите отвечать — просто пропустите, бот не будет переспрашивать. Если ответить «Да» на «Приняли лекарство?», бот напомнит повторить измерение через паузу (по умолчанию час) — так видно, помогло ли лекарство.</p>
+              <div class="flex gap-3 bg-blue-50 border border-blue-100 rounded-xl p-4">
+                <span class="text-lg leading-none" aria-hidden="true">💡</span>
+                <p class="text-sm text-slate-700">Если значения окажутся высокими, бот вежливо предложит обсудить их с врачом. Это не диагноз и не совет — только повод не откладывать заботу о себе.</p>
+              </div>
+            </div>
+          </details>
+
+          <!-- 3. Напоминания -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-reminders">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">⏰</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Напоминания</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>Напоминания приходят в выбранные слоты — утро, обед и вечер — в удобное вам время.</p>
+              <p>Внутри напоминания — сразу всё нужное:</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>«Пора измерить давление» — и, если в этом слоте есть лекарства, их список с дозировками.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Записать давление»</b> — открыть запись, не выходя из чата.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Принял всё ✓»</b> или <b class="text-slate-800">«Частично…»</b> — отметить приём лекарств (во втором случае выберите, что именно приняли).</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Через 30 мин»</b> — отложить: напоминание придёт позже, а не потеряется.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Пропускаю»</b> — сегодня этот слот больше не побеспокоит.</span></li>
+              </ul>
+              <p>Отдельное напоминание — повторный замер после лекарства. Если на вопрос «Приняли лекарство?» ответить «Да», бот напомнит измерить давление ещё раз через 30, 60 или 120 минут (по умолчанию 60). У повтора есть кнопки <b class="text-slate-800">«Записать сейчас»</b> и <b class="text-slate-800">«Больше не напоминать»</b>. Паузу и включение-выключение повтора можно настроить.</p>
+            </div>
+          </details>
+
+          <!-- 4. Лекарства -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-meds">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">💊</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Лекарства</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>Раздел <b class="text-slate-800">«Настройки» → «Мои лекарства»</b>. Добавление — три коротких шага:</p>
+              <ol class="space-y-2 list-decimal pl-5">
+                <li><b class="text-slate-800">Название.</b> Просто напишите его сообщением — например, «Лозартан» или «Амлодипин».</li>
+                <li><b class="text-slate-800">Дозировка.</b> Готовые кнопки 5/10/20/50/100 мг, <b class="text-slate-800">«Без дозировки»</b> — если она не нужна, — или <b class="text-slate-800">«Другое»</b>: число и единица (мг/мл/таб), например «25 мг».</li>
+                <li><b class="text-slate-800">Когда принимать.</b> Отметьте один или несколько приёмов: «Утро», «Обед», «Вечер» и «Кризис». Нажмите «Готово».</li>
+              </ol>
+              <p>Слот <b class="text-slate-800">«Кризис»</b> — для препаратов на экстренный случай: давление резко подскочило, нужно сбить.</p>
+              <div class="flex gap-3 bg-amber-50 border border-amber-100 rounded-xl p-4">
+                <span class="text-lg leading-none" aria-hidden="true">⚠️</span>
+                <p class="text-sm text-slate-700">У кризисных препаратов нет напоминаний, и в приверженность они не входят. Это SOS-средство, а не расписание — бот не будет звать вас принимать его «по плану».</p>
+              </div>
+              <p>Отмечайте приём прямо в напоминании — «Принял всё ✓» или «Частично…». В «Статистике» бот посчитает приверженность: «Лекарства: принято X из Y приёмов за период» — по утрам, обедам и вечерам.</p>
+            </div>
+          </details>
+
+          <!-- 5. Дневник и статистика -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-stats">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">📊</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Дневник и статистика</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Дневник за сегодня»</b> — все записи за день: время, давление, пульс, отметки о лекарствах, самочувствие и заметки.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Статистика»</b> — сводка за 7 или 30 дней: среднее давление, минимум и максимум, количество измерений и тренд (растёт, падает или стабильно). Отдельно — сравнение с вашей целью и приверженность приёму лекарств.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> — файл за 7 дней, 30 дней или всё время. Открывается в Excel: можно показать врачу, распечатать или приложить к письму. Отдельным файлом выгружаются и приёмы лекарств.</span></li>
+              </ul>
+            </div>
+          </details>
+
+          <!-- 6. Личный кабинет -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-cabinet">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">💻</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Личный кабинет</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>Личный кабинет — те же данные с большого экрана: удобно смотреть историю и графики.</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Вход:</b> «Личный кабинет» в меню бота или команда /cabinet. В первый раз бот попросит e-mail и создаст аккаунт.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Ссылка для входа</b> приходит в чат и действует 15 минут. Она одноразовая и только ваша — не пересылайте её.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Можно войти и по e-mail с паролем.</b> Забыли пароль? Запросите новую ссылку через бота — а пароль смените в настройках профиля.</span></li>
+              </ul>
+              <p>Внутри кабинета: история записей с фильтрами по дате, график давления, сводка и экспорт CSV, управление лекарствами и настройки напоминаний.</p>
+            </div>
+          </details>
+
+          <!-- 7. Отчёт для врача -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-doctor">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">🩺</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Отчёт для врача</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>Когда врач просит дневник — не нужно ничего собирать вручную.</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Нажмите <b class="text-slate-800">«Отправить отчет»</b> в меню бота. Бот соберёт ссылку на ваши данные — перешлите её доктору.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач увидит график, историю измерений и статистику — <b class="text-slate-800">только для чтения</b>. Изменить ваши записи он не может.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач может оставить комментарий или рекомендацию — вы увидите её в личном кабинете.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Доступ даётся только с вашего согласия и действует, пока вы сами его не отозвали. Отозвать — в «Настройках» → «Мой врач» → «Отозвать доступ».</span></li>
+              </ul>
+              <p>Там же можно добавить e-mail врача, чтобы он получал доступ без пересылки ссылок.</p>
+            </div>
+          </details>
+
+          <!-- 8. Ваши данные -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-data">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">🔒</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Ваши данные</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Записи хранятся на сервере проекта и не передаются третьим лицам.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Видите данные только вы — и ваш врач, но только если вы сами дали ему доступ.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Удалить аккаунт вместе со всеми записями, лекарствами и напоминаниями можно в любой момент: «Настройки» → «Удалить аккаунт», с подтверждением. Без остатка.</span></li>
+              </ul>
+            </div>
+          </details>
+
+          <!-- 9. Настройки -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-settings">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">⚙️</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Настройки и поддержка</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>В «Настройках» — всё, что можно подстроить под себя:</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Напоминания»</b> — слоты и время; «Без напоминаний», если они пока не нужны.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Целевые значения»</b> — ваш ориентир для дневника.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мои лекарства»</b> — список, дозировки и слоты приёма.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мой врач»</b> — доступ к данным и отчёт.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Часовой пояс»</b> — если переехали или ошиблись при настройке.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> и <b class="text-slate-800">«Удалить аккаунт»</b> — там же.</span></li>
+              </ul>
+              <p>Бот бесплатный, без рекламы и платных подписок. Если он помогает — можно <a class="text-blue-600 hover:underline font-medium" href="#support">поддержать проект</a>. Это не обязательно: все функции доступны без этого.</p>
+              <p>Что-то не работает или есть идея? Напишите автору — контакты в разделе «Поддержать» и внизу страницы.</p>
+            </div>
+          </details>
+
+        </div>
+      </div>
+    </section>
+
     <!-- Секция Поддержки -->
     <section id="support" class="py-20 bg-white">
         <div class="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -403,6 +649,7 @@
         </div>
         <nav class="flex flex-wrap gap-x-6 gap-y-2 text-sm">
           <a class="text-slate-300 hover:text-white hover:underline" href="privacy.html">Политика конфиденциальности</a>
+          <a class="text-slate-300 hover:text-white hover:underline" href="#docs">Руководство</a>
           <a class="text-slate-300 hover:text-white hover:underline" href="#support">Контакт автора</a>
         </nav>
       </div>
