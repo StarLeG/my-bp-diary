@@ -3,6 +3,9 @@
 Решения:
 - лекарство в двух слотах — две строки (`UNIQUE(user_id, name, slot)`); повторное
   добавление того же имени в тот же слот обновляет дозировку (идемпотентно);
+- лекарство целиком — группа строк с одним `(user_id, name)`: изменение и
+  удаление действуют по группе (§6.6); переживающие слоты при правке
+  обновляются на месте — `medication_logs` не теряются;
 - дозировка опциональна: пустая строка — «без дозировки»;
 - слот `crisis` — препарат на случай кризиса: в расписании напоминаний не
   участвует и в приверженность не входит (SCHEDULED_SLOTS), только лог приёма;
@@ -141,6 +144,144 @@ async def slot_medications(session: AsyncSession, user: User, slot: str) -> list
             )
         ).scalars()
     )
+
+
+class MedicationNameConflictError(Exception):
+    """Новое название занято другим лекарством пользователя (SPEC.md, §6.6)."""
+
+
+@dataclass(frozen=True)
+class MedicationGroup:
+    """Лекарство целиком: одна кнопка выбора в изменении/удалении (§6.6).
+
+    `id` — любой id строки группы (значение `callback_data`); слоты — в
+    порядке `SLOTS`.
+    """
+
+    id: int
+    name: str
+    dosage: str
+    slots: tuple[str, ...]
+
+
+def _sort_by_slots(rows: list[Medication]) -> list[Medication]:
+    """Строки лекарства в каноническом порядке слотов (`SLOTS`)."""
+    return sorted(rows, key=lambda row: SLOTS.index(row.slot))
+
+
+async def medications_by_name(
+    session: AsyncSession, user: User, name: str
+) -> list[Medication]:
+    """Строки одного лекарства (группа `user_id` + `name`) в порядке `SLOTS`."""
+    rows = (
+        await session.execute(
+            select(Medication).where(
+                Medication.user_id == user.id, Medication.name == name
+            )
+        )
+    ).scalars()
+    return _sort_by_slots(list(rows))
+
+
+async def list_medication_groups(
+    session: AsyncSession, user: User
+) -> list[MedicationGroup]:
+    """Лекарства пользователя по группам (по названию), слоты в порядке `SLOTS`.
+
+    Дозировка группы — дозировка первой строки в порядке слотов; если
+    дозировки строк различаются (можно создать повторным добавлением в другой
+    слот), правка унифицирует группу на одну дозировку.
+    """
+    rows = await list_medications(session, user)
+    by_name: dict[str, list[Medication]] = {}
+    for row in rows:
+        by_name.setdefault(row.name, []).append(row)
+    groups: list[MedicationGroup] = []
+    for name, group_rows in by_name.items():
+        group = _sort_by_slots(group_rows)
+        groups.append(
+            MedicationGroup(
+                id=group[0].id,
+                name=name,
+                dosage=group[0].dosage,
+                slots=tuple(row.slot for row in group),
+            )
+        )
+    return groups
+
+
+async def delete_medication_group(
+    session: AsyncSession, user: User, name: str
+) -> bool:
+    """Удалить лекарство целиком: все строки группы (`user_id`, `name`).
+
+    Логи приёмов удаляются каскадом — как у `delete_medication` (§6.6).
+    Возвращает True, если удалена хотя бы одна строка; чужое или неизвестное
+    имя — False (ничего не меняется).
+    """
+    rows = await medications_by_name(session, user, name)
+    if not rows:
+        return False
+    for row in rows:
+        await session.delete(row)
+    await session.flush()
+    return True
+
+
+async def update_medication(
+    session: AsyncSession,
+    user: User,
+    old_name: str,
+    new_name: str,
+    dosage: str,
+    slots: Iterable[str],
+) -> Optional[list[Medication]]:
+    """Пересобрать лекарство (группу строк) по новым значениям одной транзакцией.
+
+    Переживающие слоты обновляются на месте (id строк и история
+    `medication_logs` сохраняются); снятые слоты удаляются (их логи каскадом);
+    новые слоты — добавляются. Пустой набор слотов не проверяется — его
+    отсекает вызывающая стор (как в `add_medication`).
+
+    Возвращает итоговые строки группы или None, если группы уже нет (stale:
+    лекарство удалили, пока шла правка). Бросает
+    `MedicationNameConflictError`, если `new_name` занято другим лекарством
+    пользователя (§6.6).
+    """
+    rows = await medications_by_name(session, user, old_name)
+    if not rows:
+        return None
+    if new_name != old_name:
+        taken = (
+            await session.execute(
+                select(Medication.id)
+                .where(
+                    Medication.user_id == user.id, Medication.name == new_name
+                )
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+        if taken is not None:
+            raise MedicationNameConflictError(new_name)
+    target = [slot for slot in SLOTS if slot in set(slots)]
+    current = {row.slot: row for row in rows}
+    # Снятые слоты удаляются первыми — освобождают (user, name, slot) до
+    # переименования и вставок: переходных нарушений UNIQUE не бывает.
+    for slot, row in current.items():
+        if slot not in target:
+            await session.delete(row)
+    await session.flush()
+    for slot in target:
+        row = current.get(slot)
+        if row is None:
+            session.add(
+                Medication(user_id=user.id, name=new_name, dosage=dosage, slot=slot)
+            )
+        else:
+            row.name = new_name
+            row.dosage = dosage
+    await session.flush()
+    return await medications_by_name(session, user, new_name)
 
 
 async def _logged_ids_today(

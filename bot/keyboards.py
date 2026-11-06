@@ -25,7 +25,8 @@ CALLBACK_DATA_LIMIT = 64
 # stats: статистика
 # csv:   экспорт CSV
 # set:   настройки
-# med:   лекарства
+# med:   лекарства (add, edit, edit:{id}, del, del:{id}, dose:*, dose:same,
+#        slot:*, slots:done, name:same, cancel)
 # rem:   напоминания (кнопки слот-сообщений)
 # about: «О боте / Поддержать»
 # adm:   административная панель
@@ -403,28 +404,57 @@ def timezone_kb(callback_prefix: str = "set:tz") -> InlineKeyboardMarkup:
 # ─────────────────────────── Лекарства ───────────────────────────
 
 
-def medications_list_kb(
-    medications: Sequence[tuple[int, str, str]],
-) -> InlineKeyboardMarkup:
-    """Список лекарств: у каждого «Удалить», внизу «Добавить» и «Назад».
+def medications_list_kb(has_medications: bool = False) -> InlineKeyboardMarkup:
+    """Список лекарств: «Добавить», «Изменить», «Удалить» и «Назад» (§6.6).
 
-    `medications` — кортежи (id, название, дозировка).
+    У пустого списка (`has_medications=False`) — только «Добавить» и «Назад»:
+    изменять и удалять нечего.
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADD, callback_data="med:add"))
+    if has_medications:
+        builder.row(InlineKeyboardButton(text=texts.BTN_EDIT, callback_data="med:edit"))
+        builder.row(InlineKeyboardButton(text=texts.BTN_DELETE, callback_data="med:del"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def medications_pick_kb(
+    action: str, medications: Sequence[tuple[int, str, str]]
+) -> InlineKeyboardMarkup:
+    """Выбор лекарства для действия `action` (`med:edit` / `med:del`) (§6.6).
+
+    По кнопке на лекарство (группу строк по названию, §4.4); значение
+    callback_data — `id` любой строки группы. Внизу — «Назад» к списку.
     """
     builder = InlineKeyboardBuilder()
     for med_id, name, dosage in medications:
         builder.row(
             InlineKeyboardButton(
-                text=f"{texts.BTN_DELETE}: {texts.fmt_med_item(name, dosage)}",
-                callback_data=f"med:del:{med_id}",
+                text=texts.fmt_med_item(name, dosage),
+                callback_data=f"{action}:{med_id}",
             )
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_ADD, callback_data="med:add"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:meds"))
     return builder.as_markup()
 
 
-def dosage_kb() -> InlineKeyboardMarkup:
-    """Дозировка: 5/10/20/50/100 мг + «Без дозировки» / «Другое» (число + мг/мл/таб)."""
+def med_name_input_kb() -> InlineKeyboardMarkup:
+    """Шаг названия при правке: «Оставить как есть» / «Отмена» (§6.6)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_KEEP_AS_IS, callback_data="med:name:same")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
+    return builder.as_markup()
+
+
+def dosage_kb(*, keep: bool = False) -> InlineKeyboardMarkup:
+    """Дозировка: 5/10/20/50/100 мг + «Без дозировки» / «Другое» (число + мг/мл/таб).
+
+    При правке (`keep=True`) добавлен ряд «Оставить как есть» — текущая
+    дозировка уже в черновике (§6.6).
+    """
     builder = InlineKeyboardBuilder()
     builder.row(
         *[
@@ -442,18 +472,12 @@ def dosage_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=texts.BTN_NO_DOSAGE, callback_data="med:dose:none"),
         InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="med:dose:other"),
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
-    return builder.as_markup()
-
-
-def med_confirm_delete_kb(medication_id: int) -> InlineKeyboardMarkup:
-    """Подтверждение удаления лекарства: «Удалить» / «Отмена» (§6.6)."""
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.BTN_DELETE, callback_data=f"med:delok:{medication_id}"
+    if keep:
+        builder.row(
+            InlineKeyboardButton(
+                text=texts.BTN_KEEP_AS_IS, callback_data="med:dose:same"
+            )
         )
-    )
     builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
     return builder.as_markup()
 

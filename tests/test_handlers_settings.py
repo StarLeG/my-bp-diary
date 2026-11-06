@@ -14,7 +14,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, schemas, texts
 from bot.handlers import settings
-from bot.models import Medication, Reminder, User as UserModel
+from bot.models import Medication, MedicationLog, Reminder, User as UserModel
 
 TG_ID = 111_111
 
@@ -94,6 +94,36 @@ async def add_med(
     session.add(row)
     await session.commit()
     return row
+
+
+async def add_med_group(
+    session: AsyncSession,
+    user: UserModel,
+    name: str = "Лозартан",
+    dosage: str = "50 мг",
+    slots: tuple[str, ...] = ("morning",),
+) -> list[Medication]:
+    """Лекарство целиком: строка на каждый слот (группа (user_id, name), §4.4)."""
+    return [
+        await add_med(session, user, name=name, dosage=dosage, slot=slot)
+        for slot in slots
+    ]
+
+
+async def add_log(
+    session: AsyncSession, user: UserModel, medication: Medication, slot: str
+) -> MedicationLog:
+    """Лог приёма (для проверки каскада medication_logs при правке/удалении)."""
+    log = MedicationLog(
+        user_id=user.id,
+        medication_id=medication.id,
+        timestamp=utcnow(),
+        status="taken",
+        slot=slot,
+    )
+    session.add(log)
+    await session.commit()
+    return log
 
 
 async def add_reminder(
@@ -482,19 +512,17 @@ class TestMeds:
     async def test_list_empty(self, session, edit, cb_answer) -> None:
         await call(settings.cb_meds, callback=make_callback("set:meds", make_message()), session=session)
         assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb([])
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(False)
 
     async def test_list_shows_item(self, session, user, edit, cb_answer) -> None:
-        row = await add_med(session, user, name="Лозартан", dosage="50 мг", slot="evening")
+        await add_med(session, user, name="Лозартан", dosage="50 мг", slot="evening")
         await call(settings.cb_meds, callback=make_callback("set:meds", make_message()), session=session)
         text = edit.call_args.args[0]
         assert texts.MEDS_LIST_HEADER in text
         assert texts.MEDS_ITEM.format(
             med=texts.fmt_med_item("Лозартан", "50 мг"), slots="Вечер"
         ) in text
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(
-            [(row.id, "Лозартан", "50 мг")]
-        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(True)
 
     async def test_add_prompts_name(self, session, edit, cb_answer, state) -> None:
         await call(settings.cb_med_add, callback=make_callback("med:add", make_message()), state=state)
@@ -503,7 +531,9 @@ class TestMeds:
 
     async def test_name_then_dosage(self, session, answer, state) -> None:
         await state.set_state(settings.SettingsInput.med_name)
-        await call(settings.msg_med_name, message=make_message("  Лозартан "), state=state)
+        await call(
+            settings.msg_med_name, message=make_message("  Лозартан "), state=state, session=session
+        )
         assert answer.call_args.args[0] == texts.MEDS_ADD_DOSAGE_PROMPT
         assert answer.call_args.kwargs["reply_markup"] == keyboards.dosage_kb()
         data = await state.get_data()
@@ -512,7 +542,7 @@ class TestMeds:
     @pytest.mark.parametrize("raw", ["", "   ", "x" * 101])
     async def test_name_invalid(self, session, answer, state, raw: str) -> None:
         await state.set_state(settings.SettingsInput.med_name)
-        await call(settings.msg_med_name, message=make_message(raw), state=state)
+        await call(settings.msg_med_name, message=make_message(raw), state=state, session=session)
         assert await state.get_state() == settings.SettingsInput.med_name.state
 
     async def test_dose_preset_shows_slots(self, session, edit, cb_answer, state) -> None:
@@ -704,7 +734,7 @@ class TestMeds:
             session=session,
         )
         assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb([])
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(False)
 
     async def test_cancel_returns_to_list(self, session, user, edit, cb_answer, state) -> None:
         await state.set_state(settings.SettingsInput.med_name)
@@ -718,77 +748,567 @@ class TestMeds:
         assert edit.call_args.args[0].startswith(texts.MEDS_LIST_HEADER)
         assert await state.get_state() is None
 
-    async def test_delete_asks_confirmation(
-        self, session, user, edit, cb_answer
-    ) -> None:
-        row = await add_med(session, user, name="Лозартан", dosage="50 мг")
-        await call(
-            settings.cb_med_delete,
-            callback=make_callback(f"med:del:{row.id}", make_message()),
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.MEDS_CONFIRM_DELETE.format(
-            med=texts.fmt_med_item("Лозартан", "50 мг")
-        )
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.med_confirm_delete_kb(row.id)
+    # ── Удаление (§6.6): выбор из списка → сразу, без подтверждения ──
 
-    async def test_delete_foreign_shows_list(self, session, user, edit, cb_answer) -> None:
-        other = UserModel(telegram_id=222_222)
-        session.add(other)
-        await session.commit()
-        foreign = await add_med(session, other)
+    async def test_del_menu_shows_pick_list(self, session, user, edit, cb_answer, state) -> None:
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
         await call(
-            settings.cb_med_delete,
-            callback=make_callback(f"med:del:{foreign.id}", make_message()),
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
-
-    async def test_delete_garbage_shows_list(self, session, edit, cb_answer) -> None:
-        await call(
-            settings.cb_med_delete,
-            callback=make_callback("med:del:abc", make_message()),
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
-
-    async def test_delete_confirm_removes(self, session, user, edit, cb_answer, state) -> None:
-        row = await add_med(session, user)
-        await call(
-            settings.cb_med_delete_confirm,
-            callback=make_callback(f"med:delok:{row.id}", make_message()),
+            settings.cb_med_del_menu,
+            callback=make_callback("med:del", make_message()),
             state=state,
             session=session,
         )
-        assert edit.call_args.args[0] == texts.MEDS_DELETED
-        assert await meds_of(session, user.id) == []
+        assert edit.call_args.args[0] == texts.MEDS_DEL_PICK
+        # Одна кнопка на лекарство (группу строк), «Назад» — к списку.
+        markup = edit.call_args.kwargs["reply_markup"]
+        data = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        assert data == [f"med:del:{rows[0].id}", "set:meds"]
 
-    async def test_delete_confirm_foreign_keeps_row(
+    async def test_del_menu_empty_soft_fallback(self, session, edit, cb_answer, state) -> None:
+        """Устаревшая кнопка «Удалить» — лекарств уже нет, мягко к списку."""
+        await call(
+            settings.cb_med_del_menu,
+            callback=make_callback("med:del", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(False)
+
+    async def test_del_pick_removes_whole_group(
         self, session, user, edit, cb_answer, state
     ) -> None:
+        """Удаление снимает все слоты лекарства (группу строк, §6.6)."""
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
+        await call(
+            settings.cb_med_del_pick,
+            callback=make_callback(f"med:del:{rows[1].id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert await meds_of(session, user.id) == []
+
+    async def test_del_pick_removes_logs(self, session, user, edit, cb_answer, state) -> None:
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
+        await add_log(session, user, rows[0], "morning")
+        await add_log(session, user, rows[1], "evening")
+        await call(
+            settings.cb_med_del_pick,
+            callback=make_callback(f"med:del:{rows[0].id}", make_message()),
+            state=state,
+            session=session,
+        )
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert logs == []
+
+    async def test_del_pick_toast_and_list(self, session, user, edit, cb_answer, state) -> None:
+        """Ответ — тост «Лекарство удалено» и обновлённый список (§6.6)."""
+        rows = await add_med_group(session, user, slots=("morning",))
+        await call(
+            settings.cb_med_del_pick,
+            callback=make_callback(f"med:del:{rows[0].id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(False)
+        assert cb_answer.call_args.args[0] == texts.MEDS_DELETED
+
+    async def test_del_pick_foreign_shows_list(self, session, user, edit, cb_answer, state) -> None:
         other = UserModel(telegram_id=222_222)
         session.add(other)
         await session.commit()
         foreign = await add_med(session, other)
         await call(
-            settings.cb_med_delete_confirm,
-            callback=make_callback(f"med:delok:{foreign.id}", make_message()),
+            settings.cb_med_del_pick,
+            callback=make_callback(f"med:del:{foreign.id}", make_message()),
             state=state,
             session=session,
         )
-        assert edit.call_args.args[0] != texts.MEDS_DELETED
-        assert len(await meds_of(session, other.id)) == 1
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+        assert len(await meds_of(session, other.id)) == 1  # чужое не удалено
 
-    async def test_delete_confirm_garbage(
+    async def test_del_pick_garbage_shows_list(self, session, edit, cb_answer, state) -> None:
+        await call(
+            settings.cb_med_del_pick,
+            callback=make_callback("med:del:abc", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+
+    async def test_del_pick_stale_shows_list(self, session, user, edit, cb_answer, state) -> None:
+        """Уже удалённое лекарство (двойное нажатие) — идемпотентно, мягко к списку."""
+        row = await add_med(session, user)
+        await session.delete(row)
+        await session.commit()
+        await call(
+            settings.cb_med_del_pick,
+            callback=make_callback(f"med:del:{row.id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+        assert cb_answer.call_args.args == ()  # без тоста «удалено» — нечего удалять
+
+    # ── Изменение (§6.6): выбор из списка → те же шаги с текущими значениями ──
+
+    async def test_edit_menu_shows_pick_list(self, session, user, edit, cb_answer, state) -> None:
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
+        await call(
+            settings.cb_med_edit_menu,
+            callback=make_callback("med:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_PICK
+        markup = edit.call_args.kwargs["reply_markup"]
+        data = [btn.callback_data for row in markup.inline_keyboard for btn in row]
+        assert data == [f"med:edit:{rows[0].id}", "set:meds"]
+
+    async def test_edit_menu_empty_soft_fallback(self, session, edit, cb_answer, state) -> None:
+        await call(
+            settings.cb_med_edit_menu,
+            callback=make_callback("med:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+
+    async def test_edit_pick_prompts_name_with_current(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Черновик правки предзаполняется текущими значениями (§6.6)."""
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
+        await call(
+            settings.cb_med_edit_pick,
+            callback=make_callback(f"med:edit:{rows[1].id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_NAME_PROMPT.format(name="Лозартан")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.med_name_input_kb()
+        assert await state.get_state() == settings.SettingsInput.med_name.state
+        data = await state.get_data()
+        assert data[settings.M_EDIT_NAME] == "Лозартан"
+        assert data[settings.M_NAME] == "Лозартан"
+        assert data[settings.M_DOSAGE] == "50 мг"
+        assert data[settings.M_SLOTS] == ["morning", "evening"]  # порядок SLOTS
+
+    async def test_edit_pick_foreign_shows_list(self, session, user, edit, cb_answer, state) -> None:
+        other = UserModel(telegram_id=222_222)
+        session.add(other)
+        await session.commit()
+        foreign = await add_med(session, other)
+        await call(
+            settings.cb_med_edit_pick,
+            callback=make_callback(f"med:edit:{foreign.id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+        assert await state.get_data() == {}
+
+    async def test_edit_pick_garbage_shows_list(self, session, edit, cb_answer, state) -> None:
+        await call(
+            settings.cb_med_edit_pick,
+            callback=make_callback("med:edit:abc", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+
+    async def test_edit_pick_stale_shows_list(self, session, user, edit, cb_answer, state) -> None:
+        row = await add_med(session, user)
+        await session.delete(row)
+        await session.commit()
+        await call(
+            settings.cb_med_edit_pick,
+            callback=make_callback(f"med:edit:{row.id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+
+    async def test_edit_keep_name_skips_to_dosage(
+        self, session, edit, cb_answer, state
+    ) -> None:
+        """«Оставить как есть» на шаге названия → шаг дозировки с текущей (§6.6)."""
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.cb_med_name_keep,
+            callback=make_callback("med:name:same", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_DOSAGE_PROMPT.format(current="50 мг")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.dosage_kb(keep=True)
+        assert await state.get_state() == settings.SettingsInput.med_dosage.state
+        assert (await state.get_data())[settings.M_NAME] == "Лозартан"
+
+    async def test_edit_keep_name_shows_no_dosage_label(
+        self, session, edit, cb_answer, state
+    ) -> None:
+        """Без дозировки в подсказке — «Без дозировки» (§6.6)."""
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.cb_med_name_keep,
+            callback=make_callback("med:name:same", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_DOSAGE_PROMPT.format(
+            current=texts.BTN_NO_DOSAGE
+        )
+
+    async def test_edit_keep_name_without_draft_soft_list(
         self, session, edit, cb_answer, state
     ) -> None:
         await call(
-            settings.cb_med_delete_confirm,
-            callback=make_callback("med:delok:abc", make_message()),
+            settings.cb_med_name_keep,
+            callback=make_callback("med:name:same", make_message()),
             state=state,
             session=session,
         )
-        assert edit.call_args.args[0] != texts.MEDS_DELETED
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+
+    async def test_edit_same_name_text_skips_collision(
+        self, session, user, answer, state
+    ) -> None:
+        """То же название при правке — занятое-собственное не конфликт (§6.6)."""
+        await add_med_group(session, user, slots=("morning",))
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.msg_med_name, message=make_message("Лозартан"), state=state, session=session
+        )
+        assert answer.call_args.args[0] == texts.MEDS_EDIT_DOSAGE_PROMPT.format(current="50 мг")
+        assert (await state.get_data())[settings.M_NAME] == "Лозартан"
+
+    async def test_edit_new_name_free_prompts_dosage(
+        self, session, user, answer, state
+    ) -> None:
+        """Свободное новое название принимается; слоты не перезаполняются."""
+        await add_med_group(session, user, slots=("morning",))
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.msg_med_name, message=make_message("Лозап"), state=state, session=session
+        )
+        assert answer.call_args.args[0] == texts.MEDS_EDIT_DOSAGE_PROMPT.format(current="50 мг")
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.dosage_kb(keep=True)
+        data = await state.get_data()
+        assert data[settings.M_NAME] == "Лозап"
+        assert data[settings.M_SLOTS] == ["morning"]
+
+    async def test_edit_new_name_collision_prompts_again(
+        self, session, user, answer, state
+    ) -> None:
+        """Занятое название — «введите другое», остаёмся на шаге названия (§6.6)."""
+        await add_med_group(session, user, name="Лозартан", slots=("morning",))
+        await add_med_group(session, user, name="Амлодипин", dosage="5 мг", slots=("morning",))
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.msg_med_name, message=make_message("Амлодипин"), state=state, session=session
+        )
+        assert answer.call_args.args[0] == texts.MEDS_EDIT_NAME_TAKEN
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.med_name_input_kb()
+        assert await state.get_state() == settings.SettingsInput.med_name.state
+
+    async def test_edit_name_invalid_keeps_keep_button(
+        self, session, answer, state
+    ) -> None:
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(**{settings.M_EDIT_NAME: "Лозартан"})
+        await call(
+            settings.msg_med_name, message=make_message("x" * 101), state=state, session=session
+        )
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.med_name_input_kb()
+        assert await state.get_state() == settings.SettingsInput.med_name.state
+
+    async def test_edit_dose_keep_skips_to_slots(
+        self, session, edit, cb_answer, state
+    ) -> None:
+        """«Оставить как есть» на шаге дозировки → слоты с текущим выбором (§6.6)."""
+        await state.set_state(settings.SettingsInput.med_dosage)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning", "evening"],
+            }
+        )
+        await call(
+            settings.cb_med_dose_keep,
+            callback=make_callback("med:dose:same", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_SLOTS_PROMPT.format(
+            slots="Утро, Вечер"
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.slots_multiselect_kb(
+            ["morning", "evening"]
+        )
+        assert await state.get_state() is None
+
+    async def test_edit_dose_keep_without_draft_soft_list(
+        self, session, edit, cb_answer, state
+    ) -> None:
+        await call(
+            settings.cb_med_dose_keep,
+            callback=make_callback("med:dose:same", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+
+    async def test_edit_slots_prompt_shows_current(
+        self, session, edit, cb_answer, state
+    ) -> None:
+        """Шаг слотов при правке показывает «Сейчас: …» (§6.6)."""
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["evening"],
+            }
+        )
+        await call(
+            settings.cb_med_slot,
+            callback=make_callback("med:slot:morning", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_SLOTS_PROMPT.format(
+            slots="Утро, Вечер"
+        )
+
+    async def test_edit_done_updates_in_place(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Переживающие слоты обновляются на месте: id строк сохраняются (§6.6)."""
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
+        ids_before = {row.id for row in rows}
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозап",
+                settings.M_DOSAGE: "100 мг",
+                settings.M_SLOTS: ["morning", "evening"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_DONE
+        result = await meds_of(session, user.id)
+        assert {row.id for row in result} == ids_before
+        assert {(row.name, row.dosage) for row in result} == {("Лозап", "100 мг")}
+        assert await state.get_state() is None
+
+    async def test_edit_done_removes_slot_keeps_surviving_logs(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Снятый слот удаляется с логами; логи переживающего слота целы (§6.6)."""
+        rows = await add_med_group(session, user, slots=("morning", "evening"))
+        await add_log(session, user, rows[0], "morning")
+        await add_log(session, user, rows[1], "evening")
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_DONE
+        result = await meds_of(session, user.id)
+        assert [row.slot for row in result] == ["morning"]
+        assert result[0].id == rows[0].id
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 1
+        assert logs[0].medication_id == rows[0].id
+
+    async def test_edit_done_adds_slot(self, session, user, edit, cb_answer, state) -> None:
+        rows = await add_med_group(session, user, slots=("morning",))
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning", "crisis"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_DONE
+        by_slot = {row.slot: row for row in await meds_of(session, user.id)}
+        assert set(by_slot) == {"morning", "crisis"}
+        assert by_slot["morning"].id == rows[0].id  # прежняя строка нетронута
+
+    async def test_edit_done_crisis_only(self, session, user, edit, cb_answer, state) -> None:
+        """Только «Кризис» после правки — предупреждение без напоминаний (§6.7)."""
+        await add_med_group(session, user, slots=("morning",))
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["crisis"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_EDIT_DONE_CRISIS
+
+    async def test_edit_done_no_slots_prompts(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        await add_med_group(session, user, slots=("morning",))
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: [],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert cb_answer.call_args.args[0] == texts.MEDS_ADD_NO_SLOTS
+        edit.assert_not_awaited()
+        assert len(await meds_of(session, user.id)) == 1  # группа не тронута
+
+    async def test_edit_done_stale_group_soft_list(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Группу удалили, пока шла правка — мягко к списку (§6.6)."""
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Нет такого",
+                settings.M_NAME: "Нет такого",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_LIST_EMPTY
+        assert await state.get_state() is None
+
+    async def test_edit_done_name_conflict_race(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Гонка: имя заняли после шага названия — тост, остаёмся на слотах (§6.6)."""
+        await add_med_group(session, user, name="Лозартан", slots=("morning",))
+        await add_med_group(session, user, name="Амлодипин", dosage="5 мг", slots=("morning",))
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Амлодипин",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert cb_answer.call_args.args[0] == texts.MEDS_EDIT_NAME_TAKEN
+        edit.assert_not_awaited()
+        assert (await state.get_data())[settings.M_EDIT_NAME] == "Лозартан"  # черновик цел
+        rows = await meds_of(session, user.id)
+        assert {row.name for row in rows} == {"Лозартан", "Амлодипин"}  # ничего не изменено
+
+    async def test_cancel_from_edit_returns_to_list(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        await state.set_state(settings.SettingsInput.med_name)
+        await state.update_data(
+            **{
+                settings.M_EDIT_NAME: "Лозартан",
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "50 мг",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await add_med(session, user)
+        await call(
+            settings.cb_med_cancel,
+            callback=make_callback("med:cancel", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0].startswith(texts.MEDS_LIST_HEADER)
+        assert await state.get_state() is None
+        assert await state.get_data() == {}
 
 
 class TestDosageButtonFilter:

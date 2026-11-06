@@ -2,14 +2,15 @@
 
 Inline-меню: каждая опция редактирует сообщение (`edit_message_text`), ответы
 на свободный ввод — новыми сообщениями. Слоты вкл/выкл и время идут через
-`RemindersService` (строки `reminders` — источник истины, §6.7). Добавление
-лекарства — FSM-цепочка из трёх шагов (название → дозировка → слоты).
+`RemindersService` (строки `reminders` — источник истины, §6.7). Добавление и
+изменение лекарства — FSM-цепочка из трёх шагов (название → дозировка → слоты);
+изменение и удаление действуют по группе строк лекарства (§6.6).
 Экспорт CSV переиспользует экран выбора периода (кнопки `csv:*` обрабатывают
 хендлеры статистики).
 """
 from __future__ import annotations
 
-from typing import Optional, Sequence
+from typing import Mapping, Optional, Sequence
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -39,10 +40,13 @@ class SettingsInput(StatesGroup):
     med_dosage = State()
 
 
-#: Ключи FSM-data: шаги добавления лекарства.
+#: Ключи FSM-data: шаги добавления и изменения лекарства.
 M_NAME = "med_name"
 M_DOSAGE = "med_dosage"
 M_SLOTS = "med_slots"
+#: Исходное название группы при правке: по наличию ключа определяется режим
+#: правки (канон `m_edit_id`, §8), по значению — группа строк (§6.6).
+M_EDIT_NAME = "med_edit_name"
 
 #: Ключи FSM-data: черновики остальных вводов.
 T_SLOT = "slot"
@@ -95,7 +99,7 @@ async def _meds_screen(session: AsyncSession, user) -> tuple[str, InlineKeyboard
     """Список лекарств: строка на каждый слот (§4.4: слот = строка БД)."""
     rows = await medications_service.list_medications(session, user)
     if not rows:
-        return texts.MEDS_LIST_EMPTY, keyboards.medications_list_kb([])
+        return texts.MEDS_LIST_EMPTY, keyboards.medications_list_kb()
     lines = [
         texts.MEDS_ITEM.format(
             med=texts.fmt_med_item(row.name, row.dosage),
@@ -104,8 +108,51 @@ async def _meds_screen(session: AsyncSession, user) -> tuple[str, InlineKeyboard
         for row in rows
     ]
     text = "\n".join([texts.MEDS_LIST_HEADER, *lines])
-    items = [(row.id, row.name, row.dosage) for row in rows]
-    return text, keyboards.medications_list_kb(items)
+    return text, keyboards.medications_list_kb(True)
+
+
+def _med_pick_screen(
+    action: str, groups: Sequence[medications_service.MedicationGroup]
+) -> tuple[str, InlineKeyboardMarkup]:
+    """Экран выбора лекарства для «Изменить» / «Удалить» (§6.6)."""
+    items = [(group.id, group.name, group.dosage) for group in groups]
+    prompt = texts.MEDS_EDIT_PICK if action == "med:edit" else texts.MEDS_DEL_PICK
+    return prompt, keyboards.medications_pick_kb(action, items)
+
+
+def _dosage_screen(data: Mapping) -> tuple[str, InlineKeyboardMarkup]:
+    """Шаг дозировки: при правке — текущее значение и «Оставить как есть» (§6.6)."""
+    if M_EDIT_NAME in data:
+        current = data.get(M_DOSAGE) or texts.BTN_NO_DOSAGE
+        return (
+            texts.MEDS_EDIT_DOSAGE_PROMPT.format(current=current),
+            keyboards.dosage_kb(keep=True),
+        )
+    return texts.MEDS_ADD_DOSAGE_PROMPT, keyboards.dosage_kb()
+
+
+def _slots_screen(data: Mapping) -> tuple[str, InlineKeyboardMarkup]:
+    """Шаг слотов: при правке — с текущим выбором («Сейчас: …», §6.6)."""
+    selected = data.get(M_SLOTS, [])
+    if M_EDIT_NAME not in data:
+        return texts.MEDS_ADD_SLOTS_PROMPT, keyboards.slots_multiselect_kb(selected)
+    chosen = [s for s in keyboards.MED_SLOT_ORDER if s in selected]
+    current = ", ".join(texts.SLOT_LABELS[s] for s in chosen) or "—"
+    return (
+        texts.MEDS_EDIT_SLOTS_PROMPT.format(slots=current),
+        keyboards.slots_multiselect_kb(selected),
+    )
+
+
+async def _soft_to_list(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Мягкий откат к списку: устаревшие или чужие кнопки, без лишних сообщений."""
+    await state.clear()
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    text, markup = await _meds_screen(session, user)
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
 
 
 async def _saved_target(message, session, user, sys_v: int, dia_v: int, *, via_message: bool) -> None:
@@ -465,15 +512,53 @@ async def cb_med_cancel(callback: CallbackQuery, state: FSMContext, session: Asy
 
 
 @router.message(SettingsInput.med_name)
-async def msg_med_name(message: Message, state: FSMContext) -> None:
+async def msg_med_name(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Название: свободный ввод; при правке — и «Оставить как есть» (§6.6)."""
+    data = await state.get_data()
+    is_edit = M_EDIT_NAME in data
+    step_markup = (
+        keyboards.med_name_input_kb()
+        if is_edit
+        else keyboards.input_cancel_kb("med:cancel")
+    )
     try:
         name = schemas.validate_medication_name(message.text or "")
     except ValueError as exc:
-        await message.answer(str(exc), reply_markup=keyboards.input_cancel_kb("med:cancel"))
+        await message.answer(str(exc), reply_markup=step_markup)
         return
-    await state.update_data(**{M_NAME: name, M_SLOTS: []})
+    if is_edit and name != data.get(M_EDIT_NAME):
+        user = await measurements_service.get_or_create_user(
+            session, message.from_user.id
+        )
+        if await medications_service.medications_by_name(session, user, name):
+            await message.answer(texts.MEDS_EDIT_NAME_TAKEN, reply_markup=step_markup)
+            return
+    if is_edit:
+        await state.update_data(**{M_NAME: name})  # слоты уже предзаполнены
+    else:
+        await state.update_data(**{M_NAME: name, M_SLOTS: []})
     await state.set_state(SettingsInput.med_dosage)
-    await message.answer(texts.MEDS_ADD_DOSAGE_PROMPT, reply_markup=keyboards.dosage_kb())
+    prompt, markup = _dosage_screen(await state.get_data())
+    await message.answer(prompt, reply_markup=markup)
+
+
+@router.callback_query(F.data == "med:name:same")
+async def cb_med_name_keep(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Оставить как есть» на шаге названия — без свободного ввода (§6.6)."""
+    data = await state.get_data()
+    edit_name = data.get(M_EDIT_NAME)
+    if not edit_name:  # устаревшие кнопки без черновика правки
+        await _soft_to_list(callback, state, session)
+        return
+    await state.update_data(**{M_NAME: edit_name})
+    await state.set_state(SettingsInput.med_dosage)
+    prompt, markup = _dosage_screen(await state.get_data())
+    await callback.message.edit_text(prompt, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
 
 
 @router.callback_query(F.data == "med:dose:other")
@@ -492,10 +577,8 @@ async def cb_med_dose_none(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(**{M_DOSAGE: ""})
     await state.set_state(None)  # дальше — только кнопки слотов
     data = await state.get_data()
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MEDS_ADD_SLOTS_PROMPT,
-        reply_markup=keyboards.slots_multiselect_kb(data.get(M_SLOTS, [])),
-    )
+    prompt, markup = _slots_screen(data)
+    await callback.message.edit_text(prompt, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
 
@@ -505,11 +588,24 @@ async def cb_med_dose(callback: CallbackQuery, state: FSMContext) -> None:
     await state.update_data(**{M_DOSAGE: dosage})
     await state.set_state(None)  # дальше — только кнопки слотов
     data = await state.get_data()
-    text, markup = (
-        texts.MEDS_ADD_SLOTS_PROMPT,
-        keyboards.slots_multiselect_kb(data.get(M_SLOTS, [])),
-    )
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    prompt, markup = _slots_screen(data)
+    await callback.message.edit_text(prompt, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+@router.callback_query(F.data == "med:dose:same")
+async def cb_med_dose_keep(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Оставить как есть» на шаге дозировки — дозировка прежняя (§6.6)."""
+    data = await state.get_data()
+    if not data.get(M_EDIT_NAME):  # устаревшие кнопки без черновика правки
+        await _soft_to_list(callback, state, session)
+        return
+    await state.set_state(None)  # дальше — только кнопки слотов
+    data = await state.get_data()
+    prompt, markup = _slots_screen(data)
+    await callback.message.edit_text(prompt, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
 
@@ -523,10 +619,8 @@ async def msg_med_dosage(message: Message, state: FSMContext) -> None:
     await state.update_data(**{M_DOSAGE: dosage})
     await state.set_state(None)  # дальше — только кнопки слотов
     data = await state.get_data()
-    await message.answer(
-        texts.MEDS_ADD_SLOTS_PROMPT,
-        reply_markup=keyboards.slots_multiselect_kb(data.get(M_SLOTS, [])),
-    )
+    prompt, markup = _slots_screen(data)
+    await message.answer(prompt, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("med:slot:"))
@@ -543,9 +637,8 @@ async def cb_med_slot(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         selected.append(slot)
     await state.update_data(**{M_SLOTS: selected})
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MEDS_ADD_SLOTS_PROMPT, reply_markup=keyboards.slots_multiselect_kb(selected)
-    )
+    prompt, markup = _slots_screen({**data, M_SLOTS: selected})
+    await callback.message.edit_text(prompt, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
 
@@ -556,30 +649,50 @@ async def cb_med_slots_done(
     """«Готово» — сохранить лекарство по выбранным слотам (§6.6)."""
     data = await state.get_data()
     name = data.get(M_NAME)
-    if not name:  # устаревшие кнопки без черновика — мягко к списку
-        await state.clear()
-        user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-        text, markup = await _meds_screen(session, user)
-        await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
-        await callback.answer()
+    edit_name = data.get(M_EDIT_NAME)
+    if not name and not edit_name:  # устаревшие кнопки без черновика — мягко к списку
+        await _soft_to_list(callback, state, session)
         return
     slots = [s for s in keyboards.MED_SLOT_ORDER if s in data.get(M_SLOTS, [])]
     if not slots:
         await callback.answer(texts.MEDS_ADD_NO_SLOTS)
         return
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-    await medications_service.add_medication(
-        session, user, name, data.get(M_DOSAGE, ""), slots
-    )
+    if edit_name:
+        try:
+            updated = await medications_service.update_medication(
+                session,
+                user,
+                edit_name,
+                name or edit_name,
+                data.get(M_DOSAGE, ""),
+                slots,
+            )
+        except medications_service.MedicationNameConflictError:
+            # Гонка: имя заняли, пока шла правка — остаёмся на экране слотов.
+            await callback.answer(texts.MEDS_EDIT_NAME_TAKEN)
+            return
+        if updated is None:  # группу удалили, пока шла правка
+            await _soft_to_list(callback, state, session)
+            return
+        # Только кризис → напоминаний не будет (§6.7).
+        done = (
+            texts.MEDS_EDIT_DONE
+            if any(s in medications_service.SCHEDULED_SLOTS for s in slots)
+            else texts.MEDS_EDIT_DONE_CRISIS
+        )
+    else:
+        await medications_service.add_medication(
+            session, user, name, data.get(M_DOSAGE, ""), slots
+        )
+        done = (
+            texts.MEDS_ADD_DONE
+            if any(s in medications_service.SCHEDULED_SLOTS for s in slots)
+            else texts.MEDS_ADD_DONE_CRISIS
+        )
     await session.commit()
     await state.clear()
     _, markup = await _meds_screen(session, user)
-    # Только кризис → напоминаний не будет (§6.7).
-    done = (
-        texts.MEDS_ADD_DONE
-        if any(s in medications_service.SCHEDULED_SLOTS for s in slots)
-        else texts.MEDS_ADD_DONE_CRISIS
-    )
     await callback.message.edit_text(done, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
@@ -599,41 +712,84 @@ async def _find_own_medication(
     ).scalar_one_or_none()
 
 
-@router.callback_query(F.data.startswith("med:del:"))
-async def cb_med_delete(callback: CallbackQuery, session: AsyncSession) -> None:
-    """«Удалить» — подтверждение с именем препарата (§6.6)."""
+@router.callback_query(F.data == "med:edit")
+async def cb_med_edit_menu(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Изменить» — выбор лекарства из списка (§6.6)."""
+    await state.clear()
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    groups = await medications_service.list_medication_groups(session, user)
+    if not groups:  # устаревшая кнопка — лекарств уже нет
+        text, markup = await _meds_screen(session, user)
+    else:
+        text, markup = _med_pick_screen("med:edit", groups)
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("med:edit:"))
+async def cb_med_edit_pick(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Выбор лекарства для правки: черновик + шаг названия (§6.6)."""
     value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     medication = await _find_own_medication(session, user, value)
-    if medication is None:
+    if medication is None:  # чужое, мусор или уже удалено — мягко к списку
+        await _soft_to_list(callback, state, session)
+        return
+    group = await medications_service.medications_by_name(session, user, medication.name)
+    # Черновик правки предзаполняется текущими значениями (канон `m_edit_id`, §8).
+    await state.clear()
+    await state.update_data(
+        **{
+            M_EDIT_NAME: medication.name,
+            M_NAME: medication.name,
+            M_DOSAGE: medication.dosage,
+            M_SLOTS: [row.slot for row in group],
+        }
+    )
+    await state.set_state(SettingsInput.med_name)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.MEDS_EDIT_NAME_PROMPT.format(name=medication.name),
+        reply_markup=keyboards.med_name_input_kb(),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "med:del")
+async def cb_med_del_menu(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Удалить» — выбор лекарства из списка (§6.6)."""
+    await state.clear()
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    groups = await medications_service.list_medication_groups(session, user)
+    if not groups:  # устаревшая кнопка — лекарств уже нет
+        text, markup = await _meds_screen(session, user)
+    else:
+        text, markup = _med_pick_screen("med:del", groups)
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("med:del:"))
+async def cb_med_del_pick(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Выбор лекарства для удаления: сразу, без подтверждения (§6.6)."""
+    value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
+    await state.clear()
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    medication = await _find_own_medication(session, user, value)
+    if medication is None:  # чужое, мусор или уже удалено
         text, markup = await _meds_screen(session, user)
         await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
         await callback.answer()
         return
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MEDS_CONFIRM_DELETE.format(
-            med=texts.fmt_med_item(medication.name, medication.dosage)
-        ),
-        reply_markup=keyboards.med_confirm_delete_kb(medication.id),
-    )
-    await callback.answer()
-
-
-@router.callback_query(F.data.startswith("med:delok:"))
-async def cb_med_delete_confirm(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
-) -> None:
-    value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
-    await state.clear()
-    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-    deleted = (
-        await medications_service.delete_medication(session, user, int(value))
-        if value.isdigit()
-        else False
-    )
+    await medications_service.delete_medication_group(session, user, medication.name)
     await session.commit()
     text, markup = await _meds_screen(session, user)
-    if deleted:
-        text = texts.MEDS_DELETED
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
-    await callback.answer()
+    await callback.answer(texts.MEDS_DELETED)  # тост: список уже обновлён (§6.6)

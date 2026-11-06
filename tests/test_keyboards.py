@@ -64,9 +64,13 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("slot_time_kb", keyboards.slot_time_kb("morning")),
         ("remeasure_delay_kb", keyboards.remeasure_delay_kb()),
         ("timezone_kb", keyboards.timezone_kb()),
-        ("medications_list_kb", keyboards.medications_list_kb([med])),
-        ("med_confirm_delete_kb", keyboards.med_confirm_delete_kb(7)),
+        ("medications_list_kb", keyboards.medications_list_kb(True)),
+        ("medications_list_kb_empty", keyboards.medications_list_kb()),
+        ("medications_pick_kb_edit", keyboards.medications_pick_kb("med:edit", [med])),
+        ("medications_pick_kb_del", keyboards.medications_pick_kb("med:del", [med])),
+        ("med_name_input_kb", keyboards.med_name_input_kb()),
         ("dosage_kb", keyboards.dosage_kb()),
+        ("dosage_kb_keep", keyboards.dosage_kb(keep=True)),
         ("slots_multiselect_kb", keyboards.slots_multiselect_kb({"morning"})),
         ("slot_message_kb", keyboards.slot_message_kb("morning", 5, True)),
         ("slot_message_kb_no_meds", keyboards.slot_message_kb("morning", 5, False)),
@@ -363,29 +367,70 @@ class TestSettingsKeyboards:
 
 
 class TestMedicationKeyboards:
-    def test_list_with_delete(self) -> None:
-        meds = [(1, "Лозартан", "50 мг"), (2, "Амлодипин", "5 мг")]
-        markup = keyboards.medications_list_kb(meds)
+    def test_list_actions(self) -> None:
+        """При заполненном списке — три действия и «Назад» (§6.6)."""
+        markup = keyboards.medications_list_kb(True)
         data = {button.callback_data for button in callback_buttons(markup)}
-        assert data == {"med:del:1", "med:del:2", "med:add", "set:back"}
+        assert data == {"med:add", "med:edit", "med:del", "set:back"}
 
-    def test_list_without_dosage_has_no_gap(self) -> None:
-        """Без дозировки — «Удалить: Лозартан», без лишнего пробела."""
-        markup = keyboards.medications_list_kb([(1, "Лозартан", "")])
+    def test_list_empty_actions(self) -> None:
+        """Пустой список — только «Добавить» и «Назад» (§6.6)."""
+        markup = keyboards.medications_list_kb(False)
+        data = {button.callback_data for button in callback_buttons(markup)}
+        assert data == {"med:add", "set:back"}
+
+    def test_list_action_button_texts(self) -> None:
         texts_by_data = {
-            button.callback_data: button.text for button in callback_buttons(markup)
+            button.callback_data: button.text
+            for button in callback_buttons(keyboards.medications_list_kb(True))
         }
-        assert texts_by_data["med:del:1"] == f"{texts.BTN_DELETE}: Лозартан"
+        assert texts_by_data["med:edit"] == texts.BTN_EDIT
+        assert texts_by_data["med:del"] == texts.BTN_DELETE
 
-    def test_confirm_delete_actions(self) -> None:
-        markup = keyboards.med_confirm_delete_kb(42)
+    def test_pick_edit_actions(self) -> None:
+        meds = [(1, "Лозартан", "50 мг"), (2, "Амлодипин", "")]
+        markup = keyboards.medications_pick_kb("med:edit", meds)
         texts_by_data = {
             button.callback_data: button.text for button in callback_buttons(markup)
         }
         assert texts_by_data == {
-            "med:delok:42": texts.BTN_DELETE,
+            "med:edit:1": "Лозартан 50 мг",
+            "med:edit:2": "Амлодипин",  # без дозировки — без лишнего пробела
+            "set:meds": texts.BTN_BACK,
+        }
+
+    def test_pick_del_actions(self) -> None:
+        markup = keyboards.medications_pick_kb("med:del", [(1, "Лозартан", "50 мг")])
+        texts_by_data = {
+            button.callback_data: button.text for button in callback_buttons(markup)
+        }
+        assert texts_by_data == {
+            "med:del:1": "Лозартан 50 мг",
+            "set:meds": texts.BTN_BACK,
+        }
+
+    def test_name_keep_actions(self) -> None:
+        texts_by_data = {
+            button.callback_data: button.text
+            for button in callback_buttons(keyboards.med_name_input_kb())
+        }
+        assert texts_by_data == {
+            "med:name:same": texts.BTN_KEEP_AS_IS,
             "med:cancel": texts.BTN_CANCEL,
         }
+
+    def test_dosage_keep_button(self) -> None:
+        """«Оставить как есть» — только при правке (§6.6)."""
+        plain = {
+            button.callback_data for button in callback_buttons(keyboards.dosage_kb())
+        }
+        keep = {
+            button.callback_data: button.text
+            for button in callback_buttons(keyboards.dosage_kb(keep=True))
+        }
+        assert "med:dose:same" not in plain
+        assert keep["med:dose:same"] == texts.BTN_KEEP_AS_IS
+        assert plain <= set(keep)
 
     def test_dosage_presets(self) -> None:
         markup = keyboards.dosage_kb()

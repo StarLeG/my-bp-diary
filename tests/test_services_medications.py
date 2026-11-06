@@ -371,3 +371,248 @@ class TestLogsExport:
             aware(2026, 11, 1, 8, 5),
             aware(2026, 11, 5, 8, 5),
         ]
+
+
+class TestMedicationGroups:
+    async def test_medications_by_name_groups_rows(self, session: AsyncSession, user: User) -> None:
+        """Группа (user_id, name) — строки во всех слотах, порядок SLOTS (§4.4)."""
+        await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("evening", "crisis", "morning")
+        )
+        await session.commit()
+        rows = await service.medications_by_name(session, user, "Лозартан")
+        assert [row.slot for row in rows] == ["morning", "evening", "crisis"]
+
+    async def test_medications_by_name_unknown(self, session: AsyncSession, user: User) -> None:
+        assert await service.medications_by_name(session, user, "Нет такого") == []
+
+    async def test_list_groups_by_name(self, session: AsyncSession, user: User) -> None:
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning", "evening"))
+        await service.add_medication(session, user, "Каптоприл", "25 мг", ("crisis",))
+        await session.commit()
+        groups = await service.list_medication_groups(session, user)
+        assert [group.name for group in groups] == ["Каптоприл", "Лозартан"]
+        by_name = {group.name: group for group in groups}
+        assert by_name["Лозартан"].slots == ("morning", "evening")
+        assert by_name["Каптоприл"].slots == ("crisis",)
+        # id кнопки — id первой строки группы в порядке слотов.
+        rows = await service.medications_by_name(session, user, "Лозартан")
+        assert by_name["Лозартан"].id == rows[0].id
+        assert by_name["Лозартан"].dosage == "50 мг"
+
+    async def test_list_groups_mixed_dosage_takes_first(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Смешанные дозировки (артефакт add-flow) → берётся первая по слотам."""
+        await service.add_medication(session, user, "Лозартан", "100 мг", ("evening",))
+        await service.add_medication(session, user, "Лозартан", "25 мг", ("morning",))
+        await session.commit()
+        groups = await service.list_medication_groups(session, user)
+        assert len(groups) == 1
+        assert groups[0].dosage == "25 мг"  # morning раньше evening в SLOTS
+
+    async def test_delete_group_removes_all_rows_with_logs(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await service.add_medication(session, user, "Каптоприл", "25 мг", ("crisis",))
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "taken"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await service.log_slot_intake(
+            session, user, "evening", {meds[1].id: "taken"}, timestamp=aware(2026, 11, 4, 21, 5)
+        )
+        await session.commit()
+        assert await service.delete_medication_group(session, user, "Лозартан") is True
+        await session.commit()
+        names = [m.name for m in await service.list_medications(session, user)]
+        assert names == ["Каптоприл"]
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert logs == []  # каскадом сняты обе группы логов
+
+    async def test_delete_group_unknown_and_foreign_returns_false(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        await session.commit()
+        assert await service.delete_medication_group(session, user, "Нет такого") is False
+        assert await service.delete_medication_group(session, other, "Лозартан") is False
+        assert len(await service.list_medications(session, user)) == 1  # ничего не удалено
+
+
+class TestUpdateMedication:
+    async def test_rename_keeps_row_ids_and_logs(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Инвариант §6.6: правка не теряет medication_logs, id строк сохраняются."""
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "taken"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        ids_before = {m.id for m in meds}
+        updated = await service.update_medication(
+            session, user, "Лозартан", "Лозап", "50 мг", ["morning", "evening"]
+        )
+        await session.commit()
+        assert updated is not None
+        assert {row.id for row in updated} == ids_before  # UPDATE на месте
+        assert all(row.name == "Лозап" for row in updated)
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 1
+        assert logs[0].medication_id in ids_before
+
+    async def test_update_dosage_for_whole_group(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning", "evening"))
+        await session.commit()
+        updated = await service.update_medication(
+            session, user, "Лозартан", "Лозартан", "100 мг", ["morning", "evening"]
+        )
+        await session.commit()
+        assert {row.dosage for row in updated or []} == {"100 мг"}
+        assert len(await service.list_medications(session, user)) == 2
+
+    async def test_removed_slot_cascades_only_its_logs(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Снятый слот удаляется с логами каскадом; логи переживающего целы (§6.6)."""
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "taken"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await service.log_slot_intake(
+            session, user, "evening", {meds[1].id: "taken"}, timestamp=aware(2026, 11, 4, 21, 5)
+        )
+        await session.commit()
+        updated = await service.update_medication(
+            session, user, "Лозартан", "Лозартан", "50 мг", ["morning"]
+        )
+        await session.commit()
+        assert updated is not None and len(updated) == 1
+        assert updated[0].slot == "morning" and updated[0].id == meds[0].id
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 1
+        assert logs[0].medication_id == meds[0].id  # лог пережившего слота цел
+
+    async def test_added_slot_inserts_row(self, session: AsyncSession, user: User) -> None:
+        meds = await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        await session.commit()
+        updated = await service.update_medication(
+            session, user, "Лозартан", "Лозартан", "50 мг", ["morning", "crisis"]
+        )
+        await session.commit()
+        assert updated is not None
+        assert [row.slot for row in updated] == ["morning", "crisis"]
+        assert updated[0].id == meds[0].id  # прежняя строка нетронута
+        assert updated[1].id != meds[0].id
+
+    async def test_rename_and_rebuild_slots_combined(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "noon", "evening")
+        )
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "noon", {meds[1].id: "taken"}, timestamp=aware(2026, 11, 4, 13, 5)
+        )
+        await session.commit()
+        updated = await service.update_medication(
+            session, user, "Лозартан", "Лозап", "25 мг", ["noon", "crisis"]
+        )
+        await session.commit()
+        assert updated is not None
+        assert [row.slot for row in updated] == ["noon", "crisis"]
+        assert all(row.name == "Лозап" and row.dosage == "25 мг" for row in updated)
+        assert updated[0].id == meds[1].id  # переживающий слот обновлён на месте
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 1 and logs[0].medication_id == meds[1].id
+
+    async def test_name_conflict_overlapping_slot_rejected(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Коллизия имени = отказ до мутаций: БД не изменена (§6.6)."""
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await service.add_medication(session, user, "Амлодипин", "5 мг", ("morning",))
+        await session.commit()
+        with pytest.raises(service.MedicationNameConflictError):
+            await service.update_medication(
+                session, user, "Лозартан", "Амлодипин", "50 мг", ["morning", "evening"]
+            )
+        # Откат не нужен: конфликт бросается до мутаций (§6.6).
+        rows = await service.list_medications(session, user)
+        assert {(m.name, m.slot) for m in rows} == {
+            ("Лозартан", "morning"),
+            ("Амлодипин", "morning"),
+        }
+
+    async def test_name_conflict_non_overlapping_slot_rejected(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Коллизия отсекается по имени — даже если слоты не пересекаются."""
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await service.add_medication(session, user, "Амлодипин", "5 мг", ("evening",))
+        await session.commit()
+        with pytest.raises(service.MedicationNameConflictError):
+            await service.update_medication(
+                session, user, "Лозартан", "Амлодипин", "50 мг", ["morning"]
+            )
+        names = {m.name for m in await service.list_medications(session, user)}
+        assert names == {"Лозартан", "Амлодипин"}
+
+    async def test_stale_group_returns_none(self, session: AsyncSession, user: User) -> None:
+        """Лекарство удалили, пока шла правка → None, ничего не создано."""
+        assert (
+            await service.update_medication(
+                session, user, "Нет такого", "Нет такого", "50 мг", ["morning"]
+            )
+            is None
+        )
+        await session.commit()
+        assert await service.list_medications(session, user) == []
+
+    async def test_isolated_between_users(self, session: AsyncSession, user: User) -> None:
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.commit()
+        assert (
+            await service.update_medication(
+                session, other, "Лозартан", "Лозап", "50 мг", ["morning"]
+            )
+            is None
+        )
+        rows = await service.medications_by_name(session, user, "Лозартан")
+        assert len(rows) == 1  # чужая правка ничего не тронула
+
+    async def test_idempotent_no_change_save(self, session: AsyncSession, user: User) -> None:
+        """Сохранение без изменений — идемпотентно: тот же состав, те же id."""
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        await session.commit()
+        ids_before = {m.id for m in meds}
+        updated = await service.update_medication(
+            session, user, "Лозартан", "Лозартан", "50 мг", ["morning", "evening"]
+        )
+        await session.commit()
+        assert updated is not None
+        assert {row.id for row in updated} == ids_before
+        assert len(await service.list_medications(session, user)) == 2

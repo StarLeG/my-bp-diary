@@ -152,6 +152,40 @@ class TestCanonicalTexts:
     def test_med_add_name_prompt_example(self) -> None:
         assert "Например: Лозартан, Амлодипин" in texts.MEDS_ADD_NAME_PROMPT
 
+    def test_med_edit_done_canonical(self) -> None:
+        # SPEC.md, §6.6 — финал правки дословно.
+        assert texts.MEDS_EDIT_DONE == (
+            "Лекарство обновлено. Оно будет появляться в напоминаниях в выбранные слоты"
+        )
+
+    def test_med_edit_done_crisis_canonical(self) -> None:
+        assert texts.MEDS_EDIT_DONE_CRISIS == (
+            "Лекарство обновлено. Напоминаний не будет — выбран только приём «Кризис»"
+        )
+
+    def test_med_deleted_toast_canonical(self) -> None:
+        # SPEC.md, §6.6 — тост удаления, без подтверждения.
+        assert texts.MEDS_DELETED == "Лекарство удалено"
+        assert not hasattr(texts, "MEDS_CONFIRM_DELETE")
+
+    def test_med_edit_prompts_canonical(self) -> None:
+        # SPEC.md, §6.6 — подсказки шагов правки с текущими значениями.
+        assert texts.MEDS_EDIT_NAME_PROMPT.format(name="Лозартан") == (
+            "Название лекарства (до 100 символов).\nСейчас: Лозартан"
+        )
+        assert texts.MEDS_EDIT_DOSAGE_PROMPT.format(current="50 мг") == (
+            "Дозировка?\nСейчас: 50 мг"
+        )
+        assert texts.MEDS_EDIT_SLOTS_PROMPT.format(slots="Утро, Вечер") == (
+            "Когда принимать? Можно выбрать несколько.\nСейчас: Утро, Вечер"
+        )
+        assert texts.MEDS_EDIT_NAME_TAKEN == (
+            "Лекарство с таким названием уже есть — введите другое."
+        )
+        assert texts.MEDS_EDIT_PICK == "Какое лекарство изменить?"
+        assert texts.MEDS_DEL_PICK == "Какое лекарство удалить?"
+        assert texts.BTN_KEEP_AS_IS == "Оставить как есть"
+
     def test_high_pressure_warning_is_polite(self) -> None:
         assert texts.HIGH_PRESSURE_WARNING == (
             "Эти значения стоит обсудить с врачом на ближайшем приёме."
