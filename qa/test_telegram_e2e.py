@@ -53,6 +53,56 @@ class TestTelegramE2E:
         assert row is not None
         assert (row["systolic"], row["diastolic"], row["pulse"]) == (130, 85, 70)
 
+    def test_edit_last_measurement(self, dialog, db, tg_me, ensure_onboarded) -> None:
+        """§6.3: «✏️ Изменить» после сохранения правит последнюю запись (UPDATE)."""
+        ensure_onboarded()
+        # Старые записи не конфликтуют с новой по дедупу за минуту (§6.3).
+        db.backdate_measurements(tg_me.id)
+        before = db.measurement_count(tg_me.id)
+
+        dialog.send("/start")
+        dialog.wait_screen(texts.MAIN_MENU)
+        dialog.press("menu:measure", contains=texts.ASK_SYSTOLIC)
+        dialog.press("m:sys:135", contains=texts.ASK_DIASTOLIC)
+        dialog.press("m:dia:85", contains=texts.ASK_PULSE)
+        dialog.press("m:pulse:70", contains=texts.fmt_saved(135, 85, 70))
+        row = db.last_measurement(tg_me.id)
+        assert row is not None
+        saved_ts = row["timestamp"]
+
+        dialog.press("m:edit", contains=texts.ASK_SYSTOLIC)
+        dialog.press("m:sys:140", contains=texts.ASK_DIASTOLIC)
+        dialog.press("m:dia:90", contains=texts.ASK_PULSE)
+        dialog.press("m:pulse:75", contains=texts.fmt_updated(140, 90, 75))
+
+        # Правка — UPDATE: записей не прибавилось, время записи прежнее.
+        assert db.measurement_count(tg_me.id) == before + 1
+        row = db.last_measurement(tg_me.id)
+        assert row is not None
+        assert (row["systolic"], row["diastolic"], row["pulse"]) == (140, 90, 75)
+        assert row["timestamp"] == saved_ts, "время записи изменилось при правке"
+
+    def test_edit_from_diary_skips_pulse(self, dialog, db, tg_me, ensure_onboarded) -> None:
+        """§6.3–6.4: «Изменить последнюю» из дневника; «Пропустить» очищает пульс."""
+        ensure_onboarded()
+        if db.measurement_count(tg_me.id) == 0:
+            db.add_measurement(tg_me.id, 135, 85, 72)
+        before = db.measurement_count(tg_me.id)
+
+        dialog.send("/start")
+        dialog.wait_screen(texts.MAIN_MENU)
+        dialog.press("menu:diary")
+        # Кнопка «✏️ Изменить последнюю» есть в непустом дневнике (§6.4).
+        dialog.press("m:edit", contains=texts.ASK_SYSTOLIC)
+        dialog.press("m:sys:140", contains=texts.ASK_DIASTOLIC)
+        dialog.press("m:dia:90", contains=texts.ASK_PULSE)
+        dialog.press("m:pulse:skip", contains=texts.fmt_updated(140, 90, None))
+
+        assert db.measurement_count(tg_me.id) == before
+        row = db.last_measurement(tg_me.id)
+        assert row is not None
+        assert (row["systolic"], row["diastolic"], row["pulse"]) == (140, 90, None)
+
     def test_reminder_fires(self, dialog, db, tg_me, ensure_onboarded) -> None:
         """§22, п.3: ускоренная проверка — напоминание приходит через минуту."""
         ensure_onboarded()
