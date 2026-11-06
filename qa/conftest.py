@@ -32,9 +32,9 @@ import urllib.request
 from typing import Callable, Iterator, Optional
 
 import pytest
-from playwright.sync_api import Browser, Page, sync_playwright
-from telethon import TelegramClient
-from telethon.sessions import StringSession
+
+# Импорты playwright/telethon — внутри фикстур (лениво): юнит-окружению
+# тяжёлые QA-зависимости не нужны, а аннотации типов отложены (PEP 563).
 
 #: Авто-sleep на flood wait у Telethon «проглатывается» молча — делаем видимым.
 logging.getLogger("telethon").setLevel(logging.WARNING)
@@ -475,6 +475,9 @@ def tg_loop() -> Iterator[TgLoop]:
 @pytest.fixture(scope="session")
 def tg_client(tg_loop: TgLoop) -> Iterator[TelegramClient]:
     """Юзербот Telethon: авторизация по TELEGRAM_TEST_PHONE (§3, §22)."""
+    from telethon import TelegramClient
+    from telethon.sessions import StringSession
+
     env = _required_env("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_TEST_PHONE")
     api_id = int(env["TELEGRAM_API_ID"])  # type: ignore[index]
     api_hash = env["TELEGRAM_API_HASH"]  # type: ignore[index]
@@ -532,6 +535,8 @@ def cabinet_url() -> str:
 
 @pytest.fixture(scope="session")
 def browser() -> Iterator[Browser]:
+    from playwright.sync_api import sync_playwright
+
     with sync_playwright() as playwright:
         yield playwright.chromium.launch(headless=True)
 

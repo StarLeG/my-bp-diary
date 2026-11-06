@@ -26,6 +26,7 @@ dependencies = [
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
+    "locust>=2.47.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
