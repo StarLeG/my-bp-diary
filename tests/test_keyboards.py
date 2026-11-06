@@ -186,7 +186,26 @@ class TestMeasurementKeyboards:
 
     def test_saved_kb_actions(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.saved_kb())}
-        assert data == {"m:note", "m:med", "m:feeling", "menu:back"}
+        assert data == {"m:edit", "m:note", "m:med", "m:feeling", "menu:back"}
+
+    def test_saved_kb_edit_is_first_row(self) -> None:
+        first_row = keyboards.saved_kb().inline_keyboard[0]
+        assert [button.callback_data for button in first_row] == ["m:edit"]
+        assert first_row[0].text == texts.BTN_EDIT
+
+    def test_diary_kb_edit_button(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.diary_kb())}
+        texts_by_data = {
+            button.callback_data: button.text
+            for button in callback_buttons(keyboards.diary_kb())
+        }
+        assert "m:edit" in data
+        assert texts_by_data["m:edit"] == texts.BTN_EDIT_LAST
+        empty = {
+            button.callback_data
+            for button in callback_buttons(keyboards.diary_kb(is_empty=True))
+        }
+        assert "m:edit" not in empty
 
     def test_medication_taken_kb_semantics(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.medication_taken_kb())}

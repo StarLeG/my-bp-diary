@@ -155,8 +155,9 @@ def pulse_kb() -> InlineKeyboardMarkup:
 
 
 def saved_kb() -> InlineKeyboardMarkup:
-    """Кнопки после сохранения измерения (опциональные шаги)."""
+    """Кнопки после сохранения измерения: правка последней записи + опциональные шаги."""
     builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_EDIT, callback_data="m:edit"))
     builder.row(InlineKeyboardButton(text=texts.BTN_ADD_NOTE, callback_data="m:note"))
     builder.row(InlineKeyboardButton(text=texts.BTN_TOOK_MED, callback_data="m:med"))
     builder.row(InlineKeyboardButton(text=texts.BTN_FEELING, callback_data="m:feeling"))
@@ -230,10 +231,13 @@ def input_cancel_kb(callback: str = "m:cancel") -> InlineKeyboardMarkup:
 
 
 def diary_kb(is_empty: bool = False) -> InlineKeyboardMarkup:
-    """Дневник за сегодня: при пустом списке — «Записать давление», всегда «Назад»."""
+    """Дневник за сегодня: при пустом списке — «Записать давление»,
+    при непустом — «Изменить последнюю» (§6.3), всегда «Назад»."""
     builder = InlineKeyboardBuilder()
     if is_empty:
         builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
+    else:
+        builder.row(InlineKeyboardButton(text=texts.BTN_EDIT_LAST, callback_data="m:edit"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
 

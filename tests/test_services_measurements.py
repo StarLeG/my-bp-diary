@@ -232,6 +232,135 @@ class TestOptionalSteps:
         assert await service.set_feeling(session, user, 999, "normal") is None
 
 
+class TestGetLatestMeasurement:
+    async def test_empty_returns_none(self, session: AsyncSession, user: User) -> None:
+        assert await service.get_latest_measurement(session, user) is None
+
+    async def test_single_row(self, session: AsyncSession, user: User) -> None:
+        saved = await service.save_measurement(
+            session, user, 135, 85, timestamp=aware(2026, 11, 4, 8, 30)
+        )
+        latest = await service.get_latest_measurement(session, user)
+        assert latest is not None
+        assert latest.id == saved.id
+
+    async def test_newest_by_timestamp(self, session: AsyncSession, user: User) -> None:
+        await service.save_measurement(
+            session, user, 135, 85, timestamp=aware(2026, 11, 4, 8, 30)
+        )
+        newest = await service.save_measurement(
+            session, user, 140, 90, timestamp=aware(2026, 11, 4, 21, 15)
+        )
+        latest = await service.get_latest_measurement(session, user)
+        assert latest is not None
+        assert latest.id == newest.id
+
+    async def test_equal_timestamp_falls_back_to_id(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        # Уникальности по timestamp нет: две строки одного момента — берётся большая по id.
+        stamp = aware(2026, 11, 4, 8, 30)
+        first = Measurement(
+            user_id=user.id, timestamp=stamp, systolic=135, diastolic=85
+        )
+        second = Measurement(
+            user_id=user.id, timestamp=stamp, systolic=140, diastolic=90
+        )
+        session.add_all([first, second])
+        await session.flush()
+        latest = await service.get_latest_measurement(session, user)
+        assert latest is not None
+        assert latest.id == second.id
+
+    async def test_foreign_rows_not_selected(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        mine = await service.save_measurement(
+            session, user, 135, 85, timestamp=aware(2026, 11, 4, 8, 30)
+        )
+        await service.save_measurement(
+            session, other, 200, 120, timestamp=aware(2026, 11, 4, 22, 0)
+        )
+        latest = await service.get_latest_measurement(session, user)
+        assert latest is not None
+        assert latest.id == mine.id
+
+
+class TestUpdateMeasurementValues:
+    async def _saved(self, session: AsyncSession, user: User) -> Measurement:
+        saved = await service.save_measurement(
+            session, user, 135, 85, 72, timestamp=aware(2026, 11, 4, 8, 30)
+        )
+        await session.commit()
+        return saved
+
+    async def test_updates_values_keeps_timestamp(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        saved = await self._saved(session, user)
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 140, 90, 70
+        )
+        await session.commit()
+        assert updated is not None
+        assert (updated.systolic, updated.diastolic, updated.pulse) == (140, 90, 70)
+        assert updated.timestamp == saved.timestamp  # время записи не меняется
+
+    async def test_keeps_optional_fields(self, session: AsyncSession, user: User) -> None:
+        saved = await self._saved(session, user)
+        await service.add_note(session, user, saved.id, "после кофе")
+        await service.set_medication_taken(session, user, saved.id, True)
+        await service.set_feeling(session, user, saved.id, "headache")
+        await session.commit()
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 140, 90, 70
+        )
+        await session.commit()
+        assert updated is not None
+        assert updated.note == "после кофе"
+        assert updated.medication_taken is True
+        assert updated.feeling == "headache"
+
+    async def test_skip_clears_pulse(self, session: AsyncSession, user: User) -> None:
+        saved = await self._saved(session, user)  # запись с пульсом 72
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 140, 90, None
+        )
+        await session.commit()
+        assert updated is not None
+        assert updated.pulse is None  # «Пропустить» — полная перезапись
+
+    async def test_unknown_id_returns_none(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        assert (
+            await service.update_measurement_values(session, user, 999, 140, 90, 70)
+            is None
+        )
+
+    async def test_foreign_row_returns_none_and_keeps_it(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        saved = await self._saved(session, user)
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        result = await service.update_measurement_values(
+            session, other, saved.id, 200, 120, 60
+        )
+        await session.commit()
+        assert result is None
+        row = (
+            await session.execute(
+                select(Measurement).where(Measurement.id == saved.id)
+            )
+        ).scalar_one()
+        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)
+
+
 class TestQueries:
     async def _add(
         self,

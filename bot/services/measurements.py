@@ -218,6 +218,48 @@ async def get_measurement(
     ).scalar_one_or_none()
 
 
+async def get_latest_measurement(
+    session: AsyncSession, user: User
+) -> Optional[Measurement]:
+    """Последняя запись пользователя (SPEC.md, §6.3): по timestamp, при равном — по id.
+
+    Записей нет — None. Выборка строго по user_id (§7.1).
+    """
+    return (
+        await session.execute(
+            select(Measurement)
+            .where(Measurement.user_id == user.id)
+            .order_by(Measurement.timestamp.desc(), Measurement.id.desc())
+            .limit(1)
+        )
+    ).scalar_one_or_none()
+
+
+async def update_measurement_values(
+    session: AsyncSession,
+    user: User,
+    measurement_id: int,
+    systolic: int,
+    diastolic: int,
+    pulse: Optional[int],
+) -> Optional[Measurement]:
+    """Обновить значения записи правки (по id, с проверкой владельца; §6.3).
+
+    Чужая/удалённая запись выглядит как отсутствующая (None).
+    `timestamp` не меняется — дедуп за минуту не применяется; `pulse`
+    записывается как есть (None — «Пропустить», полная перезапись).
+    Валидация диапазонов — на уровне схем/хендлеров (§9), CHECK БД — вторым эшелоном.
+    """
+    measurement = await get_measurement(session, user, measurement_id)
+    if measurement is None:
+        return None
+    measurement.systolic = systolic
+    measurement.diastolic = diastolic
+    measurement.pulse = pulse
+    await session.flush()
+    return measurement
+
+
 async def add_note(
     session: AsyncSession, user: User, measurement_id: int, note: str
 ) -> Optional[Measurement]:

@@ -144,6 +144,65 @@ class TestParallelMeasurements:
         assert await count(session_factory, Measurement) == 1
 
 
+class TestParallelEditSave:
+    """Параллельная правка одной записи: UPDATE идемпотентен, смеси нет (§7.2)."""
+
+    async def test_parallel_updates_are_idempotent(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Два конкурентных сохранения одинаковых значений — одна строка, значения те."""
+        async with session_factory() as session:
+            saved = await measurements_service.save_measurement(session, user, 135, 85, 72)
+            await session.commit()
+            measurement_id = saved.id
+
+        async def edit(systolic: int, diastolic: int, pulse: int) -> bool:
+            async with session_factory() as session:
+                result = await measurements_service.update_measurement_values(
+                    session, user, measurement_id, systolic, diastolic, pulse
+                )
+                await session.commit()
+                return result is not None
+
+        results = await asyncio.gather(edit(140, 90, 70), edit(140, 90, 70))
+        assert results == [True, True]
+        assert await count(session_factory, Measurement) == 1
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    select(Measurement).where(Measurement.id == measurement_id)
+                )
+            ).scalar_one()
+        assert (row.systolic, row.diastolic, row.pulse) == (140, 90, 70)
+
+    async def test_parallel_updates_do_not_mix(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Конкурентные правки разными значениями — финальная тройка ровно одна из двух."""
+        async with session_factory() as session:
+            saved = await measurements_service.save_measurement(session, user, 135, 85, 72)
+            await session.commit()
+            measurement_id = saved.id
+
+        async def edit(systolic: int, diastolic: int, pulse: int) -> bool:
+            async with session_factory() as session:
+                result = await measurements_service.update_measurement_values(
+                    session, user, measurement_id, systolic, diastolic, pulse
+                )
+                await session.commit()
+                return result is not None
+
+        results = await asyncio.gather(edit(100, 60, 55), edit(200, 120, 80))
+        assert results == [True, True]
+        async with session_factory() as session:
+            row = (
+                await session.execute(
+                    select(Measurement).where(Measurement.id == measurement_id)
+                )
+            ).scalar_one()
+        assert (row.systolic, row.diastolic, row.pulse) in {(100, 60, 55), (200, 120, 80)}
+
+
 class TestDoubleTap:
     """Двойной тап в debounce-окне: второе измерение не создаётся."""
 

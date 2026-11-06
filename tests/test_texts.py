@@ -20,6 +20,12 @@ class TestFormatting:
     def test_fmt_saved_with_pulse(self) -> None:
         assert texts.fmt_saved(135, 85, 72) == "✅ 135/85, пульс 72. Записано."
 
+    def test_fmt_updated_without_pulse(self) -> None:
+        assert texts.fmt_updated(135, 85) == "✅ 135/85. Обновлено."
+
+    def test_fmt_updated_with_pulse(self) -> None:
+        assert texts.fmt_updated(135, 85, 72) == "✅ 135/85, пульс 72. Обновлено."
+
     def test_fmt_measurement_short(self) -> None:
         assert texts.fmt_measurement_short(135, 85) == "135/85"
         assert texts.fmt_measurement_short(135, 85, 72) == "135/85, пульс 72"
@@ -154,6 +160,13 @@ class TestCanonicalTexts:
     def test_debounce_and_duplicate_texts(self) -> None:
         assert texts.DEBOUNCE_NOTICE == "Уже записываю…"
         assert texts.DUPLICATE_MEASUREMENT == "Это давление уже записано"
+
+    def test_edit_buttons_canonical(self) -> None:
+        # SPEC.md, §6.3 — кнопки правки последней записи дословно.
+        assert texts.BTN_EDIT == "✏️ Изменить"
+        assert texts.BTN_EDIT_LAST == "✏️ Изменить последнюю"
+        assert texts.MEASUREMENT_UPDATED == "✅ {measurement}. Обновлено."
+        assert texts.MEASUREMENT_UPDATED_PULSE == "✅ {measurement}, пульс {pulse}. Обновлено."
 
     def test_csv_too_many_text(self) -> None:
         assert texts.CSV_TOO_MANY == "Слишком много записей, выберите 7 или 30 дней"

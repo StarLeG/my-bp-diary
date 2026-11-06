@@ -283,6 +283,7 @@ class TestNumericButtons:
 
     async def test_pulse_other_prompts(self, edit, cb_answer) -> None:
         state = make_state()
+        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
         await call(
             measure.cb_pulse,
             callback=make_callback("m:pulse:other", make_message()),
@@ -294,6 +295,7 @@ class TestNumericButtons:
 
     async def test_pulse_invalid_value(self, edit, cb_answer) -> None:
         state = make_state()
+        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
         await call(
             measure.cb_pulse,
             callback=make_callback("m:pulse:10", make_message()),
@@ -391,6 +393,454 @@ class TestSave:
         assert await state.get_data() == {}
         rows = (await session.execute(select(MeasurementModel))).scalars().all()
         assert len(rows) == 1
+
+
+# ─────────────────────────── Правка последней записи ───────────────────────────
+
+
+class TestEditEntry:
+    async def test_no_measurements_shows_notice(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        cb_answer.assert_awaited_once_with(texts.NOT_YOUR_RECORD)
+        edit.assert_not_awaited()
+        assert await state.get_data() == {}
+
+    async def test_opens_systolic_fixes_target(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.ASK_SYSTOLIC
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.systolic_kb()
+        cb_answer.assert_awaited_once()
+        assert await state.get_data() == {
+            measure.M_EDIT_ID: measurement_id,
+            measure.M_ID: measurement_id,
+        }
+
+    async def test_resets_old_draft_and_state(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        await state.set_state(measure.MeasureInput.note_input)  # огрызок старого ввода
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        assert await state.get_state() is None
+        assert await state.get_data() == {
+            measure.M_EDIT_ID: measurement_id,
+            measure.M_ID: measurement_id,
+        }
+
+    async def test_resolves_latest_by_timestamp(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        await measurements_service.save_measurement(
+            session,
+            user,
+            135,
+            85,
+            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
+        )
+        newest = await measurements_service.save_measurement(
+            session, user, 140, 90, timestamp=measurements_service.utcnow()
+        )
+        await session.commit()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.M_EDIT_ID] == newest.id
+
+    async def test_foreign_newer_not_selected(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        mine = await measurements_service.save_measurement(
+            session,
+            user,
+            135,
+            85,
+            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
+        )
+        other = UserModel(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        await measurements_service.save_measurement(
+            session, other, 200, 120, timestamp=measurements_service.utcnow()
+        )
+        await session.commit()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", make_message()),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.M_EDIT_ID] == mine.id
+
+
+class TestEditSave:
+    async def test_button_flow_updates_record(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        saved_ts = (await reload_measurement(session, measurement_id)).timestamp
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:70", message),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
+        row = await reload_measurement(session, measurement_id)
+        assert (row.systolic, row.diastolic, row.pulse) == (140, 90, 70)
+        assert row.timestamp == saved_ts  # время записи не меняется
+        assert (await state.get_data())[measure.M_ID] == measurement_id
+
+    async def test_free_input_systolic_in_edit(
+        self, session, edit, cb_answer, answer
+    ) -> None:
+        """«Другое» при правке: свободный ввод систолического переиспользуется."""
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:other", message), state=state
+        )
+        assert edit.call_args.args[0] == texts.PROMPT_SYSTOLIC_OTHER
+        await call(measure.msg_systolic, message=make_message("150"), state=state)
+        assert answer.call_args.args[0] == texts.ASK_DIASTOLIC
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:70", message),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_updated(150, 90, 70)
+        row = await reload_measurement(session, measurement_id)
+        assert (row.systolic, row.diastolic, row.pulse) == (150, 90, 70)
+
+    async def test_skip_clears_pulse(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)  # запись с пульсом 72
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:skip", message),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, None)
+        row = await reload_measurement(session, measurement_id)
+        assert row.pulse is None  # «Пропустить» — полная перезапись
+
+    async def test_edit_same_minute_is_not_duplicate(
+        self, session, edit, cb_answer
+    ) -> None:
+        """Правка записи текущей минуты — UPDATE, дубль-проверка не применяется."""
+        state = make_state()
+        measurement_id = await save_draft(session, state)  # timestamp — текущая минута
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:70", message),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
+        assert texts.DUPLICATE_MEASUREMENT not in edit.call_args.args[0]
+        row = await reload_measurement(session, measurement_id)
+        assert (row.systolic, row.diastolic, row.pulse) == (140, 90, 70)
+        rows = (await session.execute(select(MeasurementModel))).scalars().all()
+        assert len(rows) == 1
+
+    @pytest.mark.parametrize(
+        ("sys_v", "dia_v", "warning"),
+        [(185, 85, True), (140, 112, True), (179, 109, False)],
+    )
+    async def test_high_pressure_warning(
+        self, session, answer, sys_v: int, dia_v: int, warning: bool
+    ) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        await state.set_data(
+            {
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
+                measure.M_SYS: sys_v,
+                measure.M_DIA: dia_v,
+                measure.M_PULSE: None,
+            }
+        )
+        await measure._save(make_message(), state, session, TG_ID, via_message=True)
+        text = answer.call_args.args[0]
+        assert text.startswith(texts.fmt_updated(sys_v, dia_v, None))
+        assert (texts.HIGH_PRESSURE_WARNING in text) is warning
+
+    async def test_record_deleted_between_entry_and_save(
+        self, session, edit, cb_answer
+    ) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        row = await reload_measurement(session, measurement_id)
+        await session.delete(row)
+        await session.commit()
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:70", message),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.NOT_YOUR_RECORD
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        assert await state.get_data() == {}
+
+    async def test_cancel_discards_edit(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        await state.set_data(
+            {
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
+                measure.M_SYS: 140,
+                measure.M_DIA: 90,
+            }
+        )
+        await call(
+            measure.cb_measure_cancel,
+            callback=make_callback("m:cancel", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
+        assert await state.get_data() == {}
+        row = await reload_measurement(session, measurement_id)
+        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)  # не изменена
+
+    async def test_begin_mid_edit_saves_new_record(
+        self, session, edit, cb_answer
+    ) -> None:
+        state = make_state()
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        old = await measurements_service.save_measurement(
+            session,
+            user,
+            135,
+            85,
+            72,
+            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
+        )
+        await session.commit()
+        await state.set_data(
+            {
+                measure.M_EDIT_ID: old.id,
+                measure.M_ID: old.id,
+                measure.M_SYS: 140,
+            }
+        )
+        message = make_message()
+        await call(
+            measure.cb_measure_begin,
+            callback=make_callback("menu:measure", message),
+            state=state,
+        )
+        assert await state.get_data() == {}  # правка отменена
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:110", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:70", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:60", message),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_saved(110, 70, 60)  # новая запись
+        rows = (
+            await session.execute(select(MeasurementModel).order_by(MeasurementModel.id))
+        ).scalars().all()
+        assert len(rows) == 2
+        assert (rows[0].systolic, rows[0].diastolic, rows[0].pulse) == (135, 85, 72)
+        assert (rows[1].systolic, rows[1].diastolic, rows[1].pulse) == (110, 70, 60)
+
+    async def test_note_after_edit_attaches_to_edited_record(
+        self, session, edit, cb_answer, answer
+    ) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:70", message),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_note, callback=make_callback("m:note", message), state=state
+        )
+        await call(
+            measure.msg_note,
+            message=make_message("после кофе"),
+            state=state,
+            session=session,
+        )
+        row = await reload_measurement(session, measurement_id)
+        assert (row.systolic, row.diastolic, row.pulse, row.note) == (140, 90, 70, "после кофе")
+
+    async def test_hub_shows_updated_after_edit(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        measurement_id = await save_draft(session, state)
+        await state.set_data(
+            {
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
+                measure.M_SYS: 140,
+                measure.M_DIA: 90,
+                measure.M_PULSE: 70,
+            }
+        )
+        await call(
+            measure.cb_med_no_skip,
+            callback=make_callback("m:med:no", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
+
+    async def test_reedit_targets_same_record(self, session, edit, cb_answer) -> None:
+        """Пока запись остаётся последней, повторное «✏️ Изменить» правит её же."""
+        state = make_state()
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        await measurements_service.save_measurement(
+            session,
+            user,
+            120,
+            80,
+            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
+        )
+        target = await measurements_service.save_measurement(
+            session,
+            user,
+            135,
+            85,
+            timestamp=measurements_service.utcnow() - timedelta(minutes=2),
+        )
+        await session.commit()
+        message = make_message()
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.M_EDIT_ID] == target.id
+        await call(
+            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
+        )
+        await call(
+            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
+        )
+        await call(
+            measure.cb_pulse,
+            callback=make_callback("m:pulse:70", message),
+            state=state,
+            session=session,
+        )
+        # Повторный вход: «последняя» резолвится заново — та же запись.
+        await call(
+            measure.cb_edit_begin,
+            callback=make_callback("m:edit", message),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.M_EDIT_ID] == target.id
 
 
 # ─────────────────────────── Заметка ───────────────────────────
@@ -714,6 +1164,8 @@ class TestStaleButtons:
             ("m:feeling", measure.cb_feeling),
             ("m:feeling:normal", measure.cb_feeling_set),
             ("m:feeling:other", measure.cb_feeling_other),
+            ("m:pulse:50", measure.cb_pulse),
+            ("m:pulse:other", measure.cb_pulse),
         ],
     )
     async def test_without_draft_shows_menu(
@@ -731,6 +1183,18 @@ class TestStaleButtons:
         assert edit.call_args.args[0] == texts.MAIN_MENU
         assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
         cb_answer.assert_awaited_once()
+
+    async def test_save_without_draft_shows_menu(self, session, answer) -> None:
+        """Устаревший `msg_pulse` без черновика не даёт KeyError — главное меню."""
+        state = make_state()
+        await call(
+            measure.msg_pulse,
+            message=make_message("66"),
+            state=state,
+            session=session,
+        )
+        assert answer.call_args.args[0] == texts.MAIN_MENU
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.main_menu()
 
 
 # ─────────────────────────── Полный флоу ───────────────────────────

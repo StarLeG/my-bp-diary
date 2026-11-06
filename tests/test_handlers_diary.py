@@ -129,3 +129,27 @@ class TestDiary:
         line = edit.call_args.args[0].splitlines()[0]
         assert "135/85" in line
         assert "пульс" not in line
+
+    async def test_edit_button_in_non_empty_diary(
+        self, session, user, edit, cb_answer
+    ) -> None:
+        await add_row(session, user)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
+        markup = edit.call_args.kwargs["reply_markup"]
+        data_by_text = {
+            button.text: button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+        }
+        assert data_by_text[texts.BTN_EDIT_LAST] == "m:edit"
+
+    async def test_no_edit_button_in_empty_diary(self, session, edit, cb_answer) -> None:
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
+        markup = edit.call_args.kwargs["reply_markup"]
+        data = {
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+        assert "m:edit" not in data

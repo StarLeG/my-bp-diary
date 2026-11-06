@@ -6,9 +6,12 @@
 лекарство?», самочувствие. «Да» планирует повторный замер
 (`RemindersService.ensure_remeasure`) с кнопкой «Не надо»; после первой «Да»
 без настроенных лекарств — мягкая подсказка «Напоминать, какие лекарства?»
-(один раз). Кнопки редактируют текущее сообщение; ответы на свободный ввод —
+(один раз). Кнопка «✏️ Изменить» (`m:edit`) правит последнюю запись: те же
+шаги кнопок, финальное сохранение — UPDATE по `M_EDIT_ID` (время записи не
+меняется). Кнопки редактируют текущее сообщение; ответы на свободный ввод —
 новыми сообщениями. Черновик живёт в FSM (`MeasureInput`), id сохранённой
-записи — в data (м. M_ID): чужие id через callback_data сюда не попадают.
+записи — в data (м. M_ID), id правки — в M_EDIT_ID: чужие id через
+callback_data сюда не попадают.
 """
 from __future__ import annotations
 
@@ -37,6 +40,8 @@ M_SYS = "m_sys"
 M_DIA = "m_dia"
 M_PULSE = "m_pulse"
 M_ID = "m_id"
+#: Id редактируемой записи («последняя» фиксируется в момент входа в правку, §6.3).
+M_EDIT_ID = "m_edit_id"
 
 
 class MeasureInput(StatesGroup):
@@ -63,8 +68,11 @@ async def _send(
 
 
 async def _hub(message: Message, data: dict[str, Any], *, via_message: bool = False) -> None:
-    """Вернуть «✅ Записано» с кнопками опциональных шагов (повторное открытие)."""
-    text = texts.fmt_saved(data[M_SYS], data[M_DIA], data.get(M_PULSE))
+    """Вернуть «✅ Записано/Обновлено» с кнопками опциональных шагов (повторное открытие)."""
+    if data.get(M_EDIT_ID) is not None:
+        text = texts.fmt_updated(data[M_SYS], data[M_DIA], data.get(M_PULSE))
+    else:
+        text = texts.fmt_saved(data[M_SYS], data[M_DIA], data.get(M_PULSE))
     await _send(message, text, keyboards.saved_kb(), via_message=via_message)
 
 
@@ -108,6 +116,31 @@ async def cb_measure_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     await state.clear()
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:edit")
+async def cb_edit_begin(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    """«✏️ Изменить» — правка последней записи (§6.3, §8).
+
+    «Последняя» резолвится на сервере (id в callback_data не передаётся).
+    Прошлый черновик сбрасывается; цель правки фиксируется (M_EDIT_ID).
+    """
+    tg_id = callback.from_user.id
+    user = await measurements_service.get_or_create_user(session, tg_id)
+    measurement = await measurements_service.get_latest_measurement(session, user)
+    if measurement is None:
+        await callback.answer(texts.NOT_YOUR_RECORD)
+        return
+    await state.clear()
+    await state.update_data(**{M_EDIT_ID: measurement.id, M_ID: measurement.id})
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.ASK_SYSTOLIC, reply_markup=keyboards.systolic_kb()
     )
     await callback.answer()
 
@@ -188,6 +221,10 @@ async def cb_pulse(
     session: AsyncSession,
 ) -> None:
     value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
+    data = await state.get_data()
+    if M_SYS not in data or M_DIA not in data:
+        await _to_menu(callback)  # устаревшие кнопки без черновика
+        return
     if value == "other":
         await state.set_state(MeasureInput.pulse_other)
         await callback.message.edit_text(  # type: ignore[union-attr]
@@ -228,27 +265,49 @@ async def _save(
     *,
     via_message: bool = False,
 ) -> None:
-    """Сохранить черновик; ответ — «✅ Записано» (+ строка ≥180/110) с кнопками.
+    """Сохранить черновик: INSERT новой записи или UPDATE правки (§6.3).
 
     Сначала commit записи, FSM обновляется после (§7.2: ничего человеческого
-    внутри транзакции); дубль за минуту — «Это давление уже записано».
+    внутри транзакции); дубль за минуту — «Это давление уже записано» (только
+    для новой записи); правка — UPDATE без дедупа и без смены времени записи.
     """
     data = await state.get_data()
-    sys_v, dia_v, pulse = data[M_SYS], data[M_DIA], data.get(M_PULSE)
-    user = await measurements_service.get_or_create_user(session, telegram_id)
-    try:
-        measurement = await measurements_service.save_measurement(
-            session, user, sys_v, dia_v, pulse
-        )
-    except measurements_service.DuplicateMeasurementError:
-        await state.clear()
-        await _send(
-            message, texts.DUPLICATE_MEASUREMENT, keyboards.back_to_menu(), via_message=via_message
+    if M_SYS not in data or M_DIA not in data:
+        await _send(  # устаревшие кнопки без черновика — в главное меню
+            message, texts.MAIN_MENU, keyboards.main_menu(), via_message=via_message
         )
         return
+    sys_v, dia_v, pulse = data[M_SYS], data[M_DIA], data.get(M_PULSE)
+    user = await measurements_service.get_or_create_user(session, telegram_id)
+    edit_id = data.get(M_EDIT_ID)
+    if edit_id is None:
+        try:
+            measurement = await measurements_service.save_measurement(
+                session, user, sys_v, dia_v, pulse
+            )
+        except measurements_service.DuplicateMeasurementError:
+            await state.clear()
+            await _send(
+                message,
+                texts.DUPLICATE_MEASUREMENT,
+                keyboards.back_to_menu(),
+                via_message=via_message,
+            )
+            return
+        text = texts.fmt_saved(sys_v, dia_v, pulse)
+    else:
+        measurement = await measurements_service.update_measurement_values(
+            session, user, edit_id, sys_v, dia_v, pulse
+        )
+        if measurement is None:  # запись исчезла между входом в правку и сохранением
+            await state.clear()
+            await _send(
+                message, texts.NOT_YOUR_RECORD, keyboards.back_to_menu(), via_message=via_message
+            )
+            return
+        text = texts.fmt_updated(sys_v, dia_v, pulse)
     await session.commit()
     await state.update_data(**{M_ID: measurement.id})
-    text = texts.fmt_saved(sys_v, dia_v, pulse)
     if sys_v >= HIGH_SYSTOLIC or dia_v >= HIGH_DIASTOLIC:
         text = f"{text}\n{texts.HIGH_PRESSURE_WARNING}"
     await _send(message, text, keyboards.saved_kb(), via_message=via_message)

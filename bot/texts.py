@@ -38,6 +38,8 @@ BTN_NO_REMINDERS = "Без напоминаний"
 BTN_ADD_NOTE = "Добавить заметку"
 BTN_TOOK_MED = "Приняли лекарство?"
 BTN_FEELING = "Самочувствие"
+BTN_EDIT = "✏️ Изменить"
+BTN_EDIT_LAST = "✏️ Изменить последнюю"
 
 BTN_MED_YES = "Да"
 BTN_MED_NO = "Нет"
@@ -120,6 +122,8 @@ PROMPT_FEELING_OTHER = "Коротко опишите самочувствие �
 
 MEASUREMENT_SAVED = "✅ {measurement}. Записано."
 MEASUREMENT_SAVED_PULSE = "✅ {measurement}, пульс {pulse}. Записано."
+MEASUREMENT_UPDATED = "✅ {measurement}. Обновлено."
+MEASUREMENT_UPDATED_PULSE = "✅ {measurement}, пульс {pulse}. Обновлено."
 HIGH_PRESSURE_WARNING = "Эти значения стоит обсудить с врачом на ближайшем приёме."
 NOTE_SAVED = "Заметка сохранена"
 
@@ -157,6 +161,15 @@ def fmt_saved(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str
     if pulse is None:
         return MEASUREMENT_SAVED.format(measurement=fmt_measurement_short(systolic, diastolic))
     return MEASUREMENT_SAVED_PULSE.format(
+        measurement=fmt_measurement_short(systolic, diastolic), pulse=pulse
+    )
+
+
+def fmt_updated(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
+    """Сообщение об обновлённой записи правки (SPEC.md, раздел 6.3)."""
+    if pulse is None:
+        return MEASUREMENT_UPDATED.format(measurement=fmt_measurement_short(systolic, diastolic))
+    return MEASUREMENT_UPDATED_PULSE.format(
         measurement=fmt_measurement_short(systolic, diastolic), pulse=pulse
     )
 
