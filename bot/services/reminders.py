@@ -22,6 +22,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
@@ -54,6 +55,26 @@ SNOOZE_MINUTES = 30
 
 #: Отправка готового сообщения: (telegram_id, текст, клавиатура).
 Sender = Callable[[int, str, Optional[object]], Awaitable[None]]
+
+_remeasure_lock: Optional[asyncio.Lock] = None
+_remeasure_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _current_remeasure_lock() -> asyncio.Lock:
+    """Лок создания повторов замера текущего event loop (SPEC.md, раздел 7.2).
+
+    Проверка «повтор уже есть» и вставка должны быть атомарны. Для повтора,
+    не привязанного к записи (`measurement_id IS NULL`), UNIQUE по
+    `measurement_id` не действует (NULL не равны NULL), и без лока двойное
+    «Принял всё ✓» создаёт два повтора. В проде event loop один; в тестах
+    лок пересоздаётся при смене loop.
+    """
+    global _remeasure_lock, _remeasure_lock_loop
+    loop = asyncio.get_running_loop()
+    if _remeasure_lock is None or _remeasure_lock_loop is not loop:
+        _remeasure_lock = asyncio.Lock()
+        _remeasure_lock_loop = loop
+    return _remeasure_lock
 
 
 def next_slot_occurrence(local_time: str, tz_name: str, now: datetime) -> datetime:
@@ -174,36 +195,39 @@ class RemindersService:
         `measurement_id=None` — повтор не привязан к записи (отметка «Принял всё
         ✓» в слоте): активным считается один такой повтор на пользователя.
         Возвращает False, если подходящий активный повтор уже есть (двойное
-        «Приняли лекарство?» → «Да» второй job не плодит).
+        «Приняли лекарство?» → «Да» второй job не плодит). Проверка и вставка
+        идут под локом (`_current_remeasure_lock`): конкурентный проигравший
+        получает `False`, а не второй повтор.
         """
         now = datetime.now(timezone.utc)
-        async with self._session_factory() as session:
-            query = select(Reminder).where(Reminder.type == TYPE_REMEASURE)
-            if measurement_id is None:
-                query = query.where(
-                    Reminder.user_id == user_id, Reminder.measurement_id.is_(None)
+        async with _current_remeasure_lock():
+            async with self._session_factory() as session:
+                query = select(Reminder).where(Reminder.type == TYPE_REMEASURE)
+                if measurement_id is None:
+                    query = query.where(
+                        Reminder.user_id == user_id, Reminder.measurement_id.is_(None)
+                    )
+                else:
+                    query = query.where(Reminder.measurement_id == measurement_id)
+                existing = (await session.execute(query)).scalar_one_or_none()
+                if existing is not None:
+                    return False
+                reminder = Reminder(
+                    user_id=user_id,
+                    type=TYPE_REMEASURE,
+                    local_time=None,
+                    next_trigger_time=now + timedelta(minutes=delay_minutes),
+                    enabled=True,
+                    measurement_id=measurement_id,
                 )
-            else:
-                query = query.where(Reminder.measurement_id == measurement_id)
-            existing = (await session.execute(query)).scalar_one_or_none()
-            if existing is not None:
-                return False
-            reminder = Reminder(
-                user_id=user_id,
-                type=TYPE_REMEASURE,
-                local_time=None,
-                next_trigger_time=now + timedelta(minutes=delay_minutes),
-                enabled=True,
-                measurement_id=measurement_id,
-            )
-            session.add(reminder)
-            try:
-                await session.commit()
-            except IntegrityError:
-                await session.rollback()
-                return False  # конкурентно уже создали повтор (UNIQUE по measurement_id)
-            reminder_id = reminder.id
-            run_date = reminder.next_trigger_time
+                session.add(reminder)
+                try:
+                    await session.commit()
+                except IntegrityError:
+                    await session.rollback()
+                    return False  # конкурентно уже создали повтор (UNIQUE по measurement_id)
+                reminder_id = reminder.id
+                run_date = reminder.next_trigger_time
         self._add_job(reminder_id, run_date, MODE_REMEASURE)
         return True
 

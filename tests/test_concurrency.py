@@ -201,6 +201,78 @@ class TestMedsIntakeIdempotency:
         assert second.already_logged is True
         assert await count(session_factory, MedicationLog) == 1
 
+    async def test_parallel_take_all_logs_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Пять конкурентных «Принял всё ✓» — ровно один набор логов.
+
+        Одновременные вызовы `log_slot_intake` в собственных сессиях (как
+        серия тапов по кнопке под нагрузкой): дубли не создаются, метка
+        достаётся только победителю, остальные получают `already_logged=True`.
+        """
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            await session.commit()
+        decisions = {meds[0].id: "taken"}
+
+        async def tap() -> tuple[bool, list[str]]:
+            async with session_factory() as session:
+                result = await medications_service.log_slot_intake(
+                    session, user, "morning", decisions
+                )
+                await session.commit()
+            return result.already_logged, result.taken
+
+        results = await asyncio.gather(*(tap() for _ in range(5)))
+        assert sorted(flag for flag, _ in results) == [False] + [True] * 4
+        assert sum(len(labels) for _, labels in results) == 1  # метка — победителю
+        assert await count(session_factory, MedicationLog) == 1
+
+    async def test_insert_conflict_take_all_logs_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Гонка «Принял всё ✓» с конкурентной вставкой: дубль не создаётся (§7.2).
+
+        Гонка воспроизводится детерминированно: лекарство уже закоммичено,
+        строка-конкурент вставлена, но не закоммичена — проверка «уже
+        отмечено» её ещё не видит, а вставка после коммита конкурента не
+        должна создавать вторую запись.
+        """
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            await session.commit()
+        async with session_factory() as session:
+            session.add(
+                MedicationLog(
+                    user_id=user.id,
+                    medication_id=meds[0].id,
+                    timestamp=datetime.now(timezone.utc),
+                    status="taken",
+                    slot="morning",
+                )
+            )
+            await session.flush()  # строка есть в индексе, но транзакция открыта
+
+            async def tap() -> tuple[bool, list[str]]:
+                async with session_factory() as own:
+                    result = await medications_service.log_slot_intake(
+                        own, user, "morning", {meds[0].id: "taken"}
+                    )
+                    await own.commit()
+                return result.already_logged, result.taken
+
+            task = asyncio.create_task(tap())
+            await asyncio.sleep(0.2)  # сервис успевает пройти проверку и встать на вставку
+            await session.commit()
+            already_logged, labels = await task
+            assert already_logged is True
+            assert labels == []
+        assert await count(session_factory, MedicationLog) == 1
+
     async def test_repeat_yes_creates_one_remeasure(
         self, session_factory, user: DbUser, svc: RemindersService
     ) -> None:
@@ -222,6 +294,22 @@ class TestMedsIntakeIdempotency:
         results = await asyncio.gather(
             svc.ensure_remeasure(user.id, measurement.id, 60),
             svc.ensure_remeasure(user.id, measurement.id, 60),
+        )
+        assert sorted(results) == [False, True]
+        assert await count(session_factory, Reminder) == 1
+
+    async def test_parallel_yes_without_measurement_creates_one_remeasure(
+        self, session_factory, user: DbUser, svc: RemindersService
+    ) -> None:
+        """Конкурентная двойная «Да» без привязки к записи — один повтор.
+
+        У повтора с `measurement_id IS NULL` UNIQUE по `measurement_id` не
+        действует (NULL не равны NULL) — сериализация локом не даёт
+        создать второй повтор замера (§7.2).
+        """
+        results = await asyncio.gather(
+            svc.ensure_remeasure(user.id, None, 60),
+            svc.ensure_remeasure(user.id, None, 60),
         )
         assert sorted(results) == [False, True]
         assert await count(session_factory, Reminder) == 1

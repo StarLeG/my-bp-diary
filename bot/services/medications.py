@@ -14,12 +14,13 @@
 """
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
 from typing import Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import exists, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -32,6 +33,25 @@ SLOTS = ("morning", "noon", "evening", "crisis")
 #: Слоты с расписанием (утро/обед/вечер) — только они участвуют в приверженности:
 #: кризисный препарат принимают по факту, планировать его нельзя (§6.7).
 SCHEDULED_SLOTS = ("morning", "noon", "evening")
+
+_intake_lock: Optional[asyncio.Lock] = None
+_intake_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _current_intake_lock() -> asyncio.Lock:
+    """Лок отметок приёма текущего event loop (SPEC.md, раздел 7.2).
+
+    Проверка «уже отмечено» и вставка должны быть атомарны относительно
+    других отметок: двойное нажатие «Принял всё ✓» создаёт ровно один
+    набор записей. В проде event loop один; в тестах лок пересоздаётся
+    при смене loop (не путать с «bound to a different event loop»).
+    """
+    global _intake_lock, _intake_lock_loop
+    loop = asyncio.get_running_loop()
+    if _intake_lock is None or _intake_lock_loop is not loop:
+        _intake_lock = asyncio.Lock()
+        _intake_lock_loop = loop
+    return _intake_lock
 
 
 @dataclass
@@ -153,6 +173,9 @@ async def log_slot_intake(
     `decisions` — {id лекарства: 'taken' | 'skipped' | 'partial'}.
     Уже отмеченные за сегодня в этом слоте лекарства повторно не логируются:
     двойное нажатие «Принял всё ✓» создаёт ровно один набор записей.
+    Проверка «уже отмечено» и вставка атомарны: под локом
+    (`_current_intake_lock`) и запросом `INSERT … WHERE NOT EXISTS` —
+    конкурентный проигравший получает `rowcount=0` и дубль не создаёт.
     """
     moment = timestamp or utcnow()
     if moment.tzinfo is None:
@@ -161,31 +184,46 @@ async def log_slot_intake(
     medications = await slot_medications(session, user, slot)
     by_id = {medication.id: medication for medication in medications}
     local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
-    logged_today = await _logged_ids_today(session, user, slot, local_day)
+    day_start, day_end = day_bounds_utc(user.timezone, local_day)
     result = SlotIntakeResult()
     new_logs = 0
-    for med_id, status in decisions.items():
-        medication = by_id.get(med_id)
-        if medication is None:
-            continue  # чужое или удалённое лекарство — тихо игнорируем
-        label = texts.fmt_med_item(medication.name, medication.dosage)
-        if med_id in logged_today:
-            continue
-        session.add(
-            MedicationLog(
-                user_id=user.id,
-                medication_id=med_id,
-                timestamp=moment,
-                status=status,
-                slot=slot,
+    async with _current_intake_lock():
+        logged_today = await _logged_ids_today(session, user, slot, local_day)
+        for med_id, status in decisions.items():
+            medication = by_id.get(med_id)
+            if medication is None:
+                continue  # чужое или удалённое лекарство — тихо игнорируем
+            if med_id in logged_today:
+                continue
+            duplicate = exists(
+                select(literal(1)).where(
+                    MedicationLog.user_id == user.id,
+                    MedicationLog.medication_id == med_id,
+                    MedicationLog.slot == slot,
+                    MedicationLog.timestamp >= day_start,
+                    MedicationLog.timestamp < day_end,
+                )
             )
-        )
-        new_logs += 1
-        if status == "taken":
-            result.taken.append(label)
-        else:
-            result.skipped.append(label)
-    await session.flush()
+            stmt = insert(MedicationLog).from_select(
+                ["user_id", "medication_id", "timestamp", "status", "slot"],
+                select(
+                    literal(user.id),
+                    literal(med_id),
+                    literal(moment),
+                    literal(status),
+                    literal(slot),
+                ).where(~duplicate),
+            )
+            inserted = await session.execute(stmt)
+            if inserted.rowcount == 0:
+                continue  # конкурентно уже отметили — дубль не создаём
+            label = texts.fmt_med_item(medication.name, medication.dosage)
+            new_logs += 1
+            if status == "taken":
+                result.taken.append(label)
+            else:
+                result.skipped.append(label)
+        await session.flush()
     result.already_logged = new_logs == 0
     return result
 
