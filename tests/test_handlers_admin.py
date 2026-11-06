@@ -498,6 +498,9 @@ class TestSearch:
         await call(admin_handlers.cb_admin_search, callback=callback, state=state)
         assert await state.get_state() == AdminStates.search.state
         assert edit.call_args.args[0] == texts.ADMIN_SEARCH_PROMPT
+        # «Отмена» ведёт в меню админки: старый вариант («adm:search») переоткрывал
+        # тот же экран и получал от Telegram «message is not modified».
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb("adm:back")
 
     async def test_search_username_unsupported(
         self, state, answer, admin, as_admin
@@ -509,6 +512,7 @@ class TestSearch:
             admin=admin,
         )
         assert answer.call_args.args[0] == texts.ADMIN_SEARCH_USERNAME_UNSUPPORTED
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb("adm:back")
         admin.find_user.assert_not_awaited()
 
     async def test_search_bad_input(
@@ -521,6 +525,7 @@ class TestSearch:
             admin=admin,
         )
         assert answer.call_args.args[0] == texts.ADMIN_SEARCH_BAD_INPUT
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb("adm:back")
 
     async def test_search_not_found(
         self, state, answer, admin, as_admin
@@ -534,6 +539,7 @@ class TestSearch:
         )
         admin.find_user.assert_awaited_once_with(999_999)
         assert answer.call_args.args[0] == texts.ADMIN_SEARCH_NOT_FOUND
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb("adm:back")
 
     async def test_search_card_shows_aggregates_only(
         self, state, answer, admin, as_admin

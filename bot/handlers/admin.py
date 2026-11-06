@@ -358,7 +358,7 @@ async def cb_admin_search(callback: CallbackQuery, state: FSMContext) -> None:
     await _show(
         callback.message,
         texts.ADMIN_SEARCH_PROMPT,
-        keyboards.input_cancel_kb("adm:search"),
+        keyboards.input_cancel_kb("adm:back"),
     )  # type: ignore[arg-type]
     await callback.answer()
 
@@ -372,13 +372,13 @@ async def msg_admin_search(
     if raw.startswith("@"):
         await message.answer(
             texts.ADMIN_SEARCH_USERNAME_UNSUPPORTED,
-            reply_markup=keyboards.input_cancel_kb("adm:search"),
+            reply_markup=keyboards.input_cancel_kb("adm:back"),
         )
         return
     if not raw.lstrip("-").isdigit():
         await message.answer(
             texts.ADMIN_SEARCH_BAD_INPUT,
-            reply_markup=keyboards.input_cancel_kb("adm:search"),
+            reply_markup=keyboards.input_cancel_kb("adm:back"),
         )
         return
     telegram_id = int(raw)
@@ -386,7 +386,7 @@ async def msg_admin_search(
     if card is None:
         await message.answer(
             texts.ADMIN_SEARCH_NOT_FOUND,
-            reply_markup=keyboards.input_cancel_kb("adm:search"),
+            reply_markup=keyboards.input_cancel_kb("adm:back"),
         )
         return
     logger.info("Админка: %s искал пользователя %s", message.from_user.id, telegram_id)  # type: ignore[union-attr]
