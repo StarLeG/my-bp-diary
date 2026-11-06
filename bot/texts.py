@@ -32,6 +32,7 @@ BTN_CANCEL = "Отмена"
 BTN_SKIP = "Пропустить"
 BTN_DONE = "Готово"
 BTN_OTHER = "Другое"
+BTN_NO_DOSAGE = "Без дозировки"
 BTN_NO_REMINDERS = "Без напоминаний"
 
 BTN_ADD_NOTE = "Добавить заметку"
@@ -253,21 +254,24 @@ CSV_FILE_CAPTION = "Дневник давления за период"
 
 MEDS_LIST_HEADER = "Мои лекарства"
 MEDS_LIST_EMPTY = "Лекарств пока нет. Добавьте — и бот напомнит, какие принимать."
-MEDS_ITEM = "• {name} {dosage} — {slots}"
+MEDS_ITEM = "• {med} — {slots}"
 MEDS_ADD_NAME_PROMPT = "Название лекарства (до 100 символов).\nНапример: Лозартан, Амлодипин"
 MEDS_ADD_DOSAGE_PROMPT = "Дозировка?"
 MEDS_ADD_DOSAGE_OTHER_PROMPT = "Введите дозировку: число и единицу (мг/мл/таб), например 25 мг"
 MEDS_ADD_SLOTS_PROMPT = "Когда принимать? Можно выбрать несколько."
 MEDS_ADD_DONE = "Лекарство добавлено. Оно будет появляться в напоминаниях в выбранные слоты"
-MEDS_ADD_NO_SLOTS = "Выберите хотя бы один приём — утро, обед или вечер."
+MEDS_ADD_DONE_CRISIS = (
+    "Лекарство добавлено. Напоминаний не будет — выбран только приём «Кризис»"
+)
+MEDS_ADD_NO_SLOTS = "Выберите хотя бы один приём — утро, обед, вечер или кризис."
 MEDS_DELETED = "Лекарство удалено"
-MEDS_CONFIRM_DELETE = "Удалить «{name} {dosage}»?"
+MEDS_CONFIRM_DELETE = "Удалить «{med}»?"
 MEDS_ASK_PROMPT = "Напоминать, какие лекарства принимать?"
 MEDS_ASK_DISMISSED = "Хорошо. Добавить лекарства можно позже в настройках."
 
 # ─────────────────────────── Напоминания (слоты) ───────────────────────────
 
-SLOT_LABELS = {"morning": "Утро", "noon": "Обед", "evening": "Вечер"}
+SLOT_LABELS = {"morning": "Утро", "noon": "Обед", "evening": "Вечер", "crisis": "Кризис"}
 SLOT_EMOJI = {"morning": "☀️", "noon": "🌤", "evening": "🌙"}
 MEDS_LINE_PREFIX = "💊 Лекарства: "
 
@@ -289,8 +293,8 @@ def fmt_slot_message(slot: str, medications: Sequence[str]) -> str:
 
 
 def fmt_med_item(name: str, dosage: str) -> str:
-    """Лекарство в перечне: «Лозартан 50 мг»."""
-    return f"{name} {dosage}"
+    """Лекарство в перечне: «Лозартан 50 мг»; без дозировки — просто «Лозартан»."""
+    return f"{name} {dosage}".strip()
 
 
 def fmt_meds_summary(taken: Sequence[str], skipped: Sequence[str]) -> str:

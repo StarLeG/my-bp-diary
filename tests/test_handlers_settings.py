@@ -490,7 +490,7 @@ class TestMeds:
         text = edit.call_args.args[0]
         assert texts.MEDS_LIST_HEADER in text
         assert texts.MEDS_ITEM.format(
-            name="Лозартан", dosage="50 мг", slots="Вечер"
+            med=texts.fmt_med_item("Лозартан", "50 мг"), slots="Вечер"
         ) in text
         assert edit.call_args.kwargs["reply_markup"] == keyboards.medications_list_kb(
             [(row.id, "Лозартан", "50 мг")]
@@ -551,6 +551,20 @@ class TestMeds:
         await call(settings.msg_med_dosage, message=make_message(raw), state=state)
         assert await state.get_state() == settings.SettingsInput.med_dosage.state
 
+    async def test_dose_none_shows_slots(self, session, edit, cb_answer, state) -> None:
+        """«Без дозировки» — пустая дозировка, дальше выбор слотов."""
+        await state.set_state(settings.SettingsInput.med_dosage)
+        await state.update_data(**{settings.M_NAME: "Лозартан"})
+        await call(
+            settings.cb_med_dose_none,
+            callback=make_callback("med:dose:none", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_ADD_SLOTS_PROMPT
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.slots_multiselect_kb([])
+        data = await state.get_data()
+        assert data[settings.M_DOSAGE] == ""
+
     async def test_slot_toggle(self, session, edit, cb_answer, state) -> None:
         await call(
             settings.cb_med_slot,
@@ -576,6 +590,17 @@ class TestMeds:
             state=state,
         )
         edit.assert_not_awaited()
+
+    async def test_slot_crisis_toggles(self, session, edit, cb_answer, state) -> None:
+        """«Кризис» — такой же переключаемый слот (§6.6)."""
+        await call(
+            settings.cb_med_slot,
+            callback=make_callback("med:slot:crisis", make_message()),
+            state=state,
+        )
+        markup = edit.call_args.kwargs["reply_markup"]
+        labels = [btn.text for row in markup.inline_keyboard for btn in row]
+        assert "✓ Кризис" in labels
 
     async def test_done_without_slots_prompts(
         self, session, user, edit, cb_answer, state
@@ -611,6 +636,65 @@ class TestMeds:
         }
         assert await state.get_state() is None
 
+    async def test_done_saves_without_dosage(self, session, user, edit, cb_answer, state) -> None:
+        """«Без дозировки» — строка сохраняется с пустой дозировкой (§4.4)."""
+        await state.update_data(
+            **{
+                settings.M_NAME: "Лозартан",
+                settings.M_DOSAGE: "",
+                settings.M_SLOTS: ["morning"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_ADD_DONE
+        rows = await meds_of(session, user.id)
+        assert {(r.name, r.dosage, r.slot) for r in rows} == {("Лозартан", "", "morning")}
+
+    async def test_done_crisis_only_warns_no_reminders(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Только «Кризис» — сохраняется, но напоминаний не будет (§6.7)."""
+        await state.update_data(
+            **{
+                settings.M_NAME: "Каптоприл",
+                settings.M_DOSAGE: "25 мг",
+                settings.M_SLOTS: ["crisis"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_ADD_DONE_CRISIS
+        rows = await meds_of(session, user.id)
+        assert {(r.name, r.dosage, r.slot) for r in rows} == {("Каптоприл", "25 мг", "crisis")}
+
+    async def test_done_crisis_with_slot_uses_normal_done(
+        self, session, user, edit, cb_answer, state
+    ) -> None:
+        """Кризис + расписание слот — обычный текст: напоминания будут (§6.7)."""
+        await state.update_data(
+            **{
+                settings.M_NAME: "Каптоприл",
+                settings.M_DOSAGE: "25 мг",
+                settings.M_SLOTS: ["crisis", "morning"],
+            }
+        )
+        await call(
+            settings.cb_med_slots_done,
+            callback=make_callback("med:slots:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MEDS_ADD_DONE
+
     async def test_done_stale_buttons(self, session, user, edit, cb_answer, state) -> None:
         """«Готово» без черновика (устаревшие кнопки) — мягко к списку."""
         await call(
@@ -644,7 +728,7 @@ class TestMeds:
             session=session,
         )
         assert edit.call_args.args[0] == texts.MEDS_CONFIRM_DELETE.format(
-            name="Лозартан", dosage="50 мг"
+            med=texts.fmt_med_item("Лозартан", "50 мг")
         )
         assert edit.call_args.kwargs["reply_markup"] == keyboards.med_confirm_delete_kb(row.id)
 

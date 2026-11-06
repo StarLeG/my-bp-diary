@@ -924,6 +924,70 @@ class TestDashboardRoutes:
         assert response.status_code == 303
         assert "error=medication" in response.headers["location"]
 
+    def test_medication_without_dosage_and_crisis_slot(self, app_client, settings) -> None:
+        """Дозировка опциональна, слот «Кризис» доступен — и при добавлении, и при правке."""
+        client, user_id = app_client
+        _register(client)
+        response = client.post(
+            "/medications",
+            data={
+                "csrf_token": _csrf(client),
+                "name": "Каптоприл",
+                "dosage": "",
+                "slot_crisis": "1",
+            },
+        )
+        assert response.status_code == 303
+        rows = self._sql(
+            settings,
+            "SELECT id, name, dosage, slot FROM medications WHERE user_id = ?",
+            (user_id,),
+        )
+        assert rows[0][1:] == ("Каптоприл", "", "crisis")
+        med_id = rows[0][0]
+
+        response = client.post(
+            f"/medications/{med_id}",
+            data={
+                "csrf_token": _csrf(client),
+                "name": "Каптоприл",
+                "dosage": "",
+                "slot": "crisis",
+            },
+        )
+        assert response.status_code == 303
+        rows = self._sql(
+            settings, "SELECT dosage, slot FROM medications WHERE id = ?", (med_id,)
+        )
+        assert rows == [("", "crisis")]
+
+    def test_medication_update_bad_slot_is_rejected(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        client.post(
+            "/medications",
+            data={
+                "csrf_token": _csrf(client),
+                "name": "Лозартан",
+                "dosage": "50 мг",
+                "slot_morning": "1",
+            },
+        )
+        med_id = self._sql(
+            settings, "SELECT id FROM medications WHERE user_id = ?", (user_id,)
+        )[0][0]
+        response = client.post(
+            f"/medications/{med_id}",
+            data={
+                "csrf_token": _csrf(client),
+                "name": "Лозартан",
+                "dosage": "50 мг",
+                "slot": "night",
+            },
+        )
+        assert response.status_code == 303
+        assert "error=medication" in response.headers["location"]
+
     def test_settings_create_and_disable_slot(self, app_client, settings) -> None:
         client, user_id = app_client
         _register(client)

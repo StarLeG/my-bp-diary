@@ -98,7 +98,8 @@ async def _meds_screen(session: AsyncSession, user) -> tuple[str, InlineKeyboard
         return texts.MEDS_LIST_EMPTY, keyboards.medications_list_kb([])
     lines = [
         texts.MEDS_ITEM.format(
-            name=row.name, dosage=row.dosage, slots=texts.SLOT_LABELS[row.slot]
+            med=texts.fmt_med_item(row.name, row.dosage),
+            slots=texts.SLOT_LABELS[row.slot],
         )
         for row in rows
     ]
@@ -485,6 +486,19 @@ async def cb_med_dose_other(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "med:dose:none")
+async def cb_med_dose_none(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Без дозировки» — пустая дозировка, дальше выбор слотов."""
+    await state.update_data(**{M_DOSAGE: ""})
+    await state.set_state(None)  # дальше — только кнопки слотов
+    data = await state.get_data()
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.MEDS_ADD_SLOTS_PROMPT,
+        reply_markup=keyboards.slots_multiselect_kb(data.get(M_SLOTS, [])),
+    )
+    await callback.answer()
+
+
 @router.callback_query(F.data.in_(keyboards.DOSAGE_CALLBACKS))
 async def cb_med_dose(callback: CallbackQuery, state: FSMContext) -> None:
     dosage = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
@@ -519,7 +533,7 @@ async def msg_med_dosage(message: Message, state: FSMContext) -> None:
 async def cb_med_slot(callback: CallbackQuery, state: FSMContext) -> None:
     """Мультивыбор слотов: повторное нажатие снимает отметку (§6.6)."""
     slot = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
-    if slot not in keyboards.SLOT_ORDER:
+    if slot not in keyboards.MED_SLOT_ORDER:
         await callback.answer()
         return
     data = await state.get_data()
@@ -549,7 +563,7 @@ async def cb_med_slots_done(
         await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
         await callback.answer()
         return
-    slots = [s for s in keyboards.SLOT_ORDER if s in data.get(M_SLOTS, [])]
+    slots = [s for s in keyboards.MED_SLOT_ORDER if s in data.get(M_SLOTS, [])]
     if not slots:
         await callback.answer(texts.MEDS_ADD_NO_SLOTS)
         return
@@ -560,7 +574,13 @@ async def cb_med_slots_done(
     await session.commit()
     await state.clear()
     _, markup = await _meds_screen(session, user)
-    await callback.message.edit_text(texts.MEDS_ADD_DONE, reply_markup=markup)  # type: ignore[union-attr]
+    # Только кризис → напоминаний не будет (§6.7).
+    done = (
+        texts.MEDS_ADD_DONE
+        if any(s in medications_service.SCHEDULED_SLOTS for s in slots)
+        else texts.MEDS_ADD_DONE_CRISIS
+    )
+    await callback.message.edit_text(done, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
 
@@ -591,7 +611,9 @@ async def cb_med_delete(callback: CallbackQuery, session: AsyncSession) -> None:
         await callback.answer()
         return
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MEDS_CONFIRM_DELETE.format(name=medication.name, dosage=medication.dosage),
+        texts.MEDS_CONFIRM_DELETE.format(
+            med=texts.fmt_med_item(medication.name, medication.dosage)
+        ),
         reply_markup=keyboards.med_confirm_delete_kb(medication.id),
     )
     await callback.answer()

@@ -15,6 +15,7 @@ from typing import TypeVar
 
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
+from sqlalchemy.schema import CreateTable
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -28,6 +29,11 @@ logger = logging.getLogger(__name__)
 RETRY_ATTEMPTS = 3
 #: Базовая задержка перед повтором (экспоненциально растёт).
 RETRY_BASE_DELAY = 0.05
+
+#: Поколение схемы БД (`PRAGMA user_version`); сравнивается при восстановлении
+#: бэкапов (backup.verify_compatibility: копия не должна быть новее схемы).
+#: 2 — дозировка лекарства опциональна, слот приёма `crisis` (§4.4).
+SCHEMA_VERSION = 2
 
 T = TypeVar("T")
 
@@ -69,11 +75,65 @@ def create_session_factory(engine: AsyncEngine) -> async_sessionmaker[AsyncSessi
 
 
 async def init_db(engine: AsyncEngine) -> None:
-    """Создать таблицы по моделям (идемпотентно)."""
+    """Создать таблицы по моделям и обновить схему существующих БД (идемпотентно).
+
+    `create_all` не трогает уже существующие таблицы, поэтому старые БД
+    обновляются миграциями (сейчас — `_migrate_medications`). В конце
+    поднимается `PRAGMA user_version` до `SCHEMA_VERSION`.
+    """
     from bot.models import Base
 
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+    await _migrate_medications(engine)
+    async with engine.connect() as conn:
+        current = int((await conn.exec_driver_sql("PRAGMA user_version")).scalar() or 0)
+        if current < SCHEMA_VERSION:
+            await conn.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")
+            await conn.commit()
+
+
+async def _migrate_medications(engine: AsyncEngine) -> None:
+    """Пересобрать `medications` под новые CHECK (дозировка опциональна, слот `crisis`).
+
+    SQLite не умеет изменять CHECK у существующей таблицы — официальный приём:
+    создать таблицу с новой схемой, перенести строки, удалить старую и
+    переименовать. Пересборка нужна только старым БД: новые создаются сразу
+    правильными (`create_all`), повторный запуск ничего не меняет. DDL берётся
+    из модели и не дублируется руками.
+
+    `PRAGMA foreign_keys=OFF` обязателен: иначе `DROP TABLE medications`
+    каскадно удалит `medication_logs` (`ON DELETE CASCADE`).
+    """
+    from bot.models import Medication
+
+    async with engine.connect() as conn:
+        row = (
+            await conn.exec_driver_sql(
+                "SELECT sql FROM sqlite_master WHERE type='table' AND name='medications'"
+            )
+        ).first()
+        if row is None or "crisis" in (row[0] or ""):
+            return  # таблицы ещё нет или схема уже новая
+        ddl = str(CreateTable(Medication.__table__).compile(dialect=engine.dialect))
+        ddl = ddl.replace("CREATE TABLE medications", "CREATE TABLE medications_migrate", 1)
+        columns = ", ".join(column.name for column in Medication.__table__.columns)
+        try:
+            await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            await conn.exec_driver_sql("DROP TABLE IF EXISTS medications_migrate")
+            await conn.exec_driver_sql("BEGIN")  # пересборка — одной транзакцией
+            await conn.exec_driver_sql(ddl)
+            await conn.exec_driver_sql(
+                f"INSERT INTO medications_migrate ({columns}) SELECT {columns} FROM medications"
+            )
+            await conn.exec_driver_sql("DROP TABLE medications")
+            await conn.exec_driver_sql(
+                "ALTER TABLE medications_migrate RENAME TO medications"
+            )
+            await conn.commit()
+            logger.info("Схема medications обновлена (дозировка опциональна, слот crisis)")
+        finally:
+            await conn.exec_driver_sql("PRAGMA foreign_keys=ON")  # вернуть в пул
 
 
 @asynccontextmanager

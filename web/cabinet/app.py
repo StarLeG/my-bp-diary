@@ -543,6 +543,7 @@ def create_app(
                 "user": user,
                 "user_zone": ZoneInfo(user.timezone),
                 "slot_order": SLOT_ORDER,
+                "med_slot_order": medications_service.SLOTS,
                 "slot_labels": texts.SLOT_LABELS,
                 "feeling_labels": texts.FEELING_LABELS,
                 "medication_labels": MEDICATION_TAKEN_LABELS,
@@ -623,8 +624,9 @@ def create_app(
         user = await load_user(db, web_user)
         name = str(form.get("name", "")).strip()
         dosage = str(form.get("dosage", "")).strip()
-        slots = [slot for slot in SLOT_ORDER if form.get(f"slot_{slot}")]
-        if not (1 <= len(name) <= 100) or not (1 <= len(dosage) <= 50):
+        slots = [slot for slot in medications_service.SLOTS if form.get(f"slot_{slot}")]
+        # Дозировка опциональна: пустая строка — «без дозировки» (§4.4).
+        if not (1 <= len(name) <= 100) or len(dosage) > 50:
             return RedirectResponse(url="/?error=medication", status_code=303)
         if not slots:
             return RedirectResponse(url="/?error=medication", status_code=303)
@@ -655,7 +657,12 @@ def create_app(
         name = str(form.get("name", "")).strip()
         dosage = str(form.get("dosage", "")).strip()
         slot = str(form.get("slot", ""))
-        if not (1 <= len(name) <= 100) or not (1 <= len(dosage) <= 50) or slot not in SLOT_ORDER:
+        # Дозировка опциональна: пустая строка — «без дозировки» (§4.4).
+        if (
+            not (1 <= len(name) <= 100)
+            or len(dosage) > 50
+            or slot not in medications_service.SLOTS
+        ):
             return RedirectResponse(url="/?error=medication#medications", status_code=303)
         try:
             medication.name = name

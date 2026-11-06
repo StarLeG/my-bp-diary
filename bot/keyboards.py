@@ -67,6 +67,10 @@ REMEASURE_VARIANTS = {
 
 #: Слоты и предлагаемое время (SPEC.md, раздел 6.1).
 SLOT_ORDER = ("morning", "noon", "evening")
+
+#: Слоты приёма лекарств: слоты давления + препарат на случай кризиса.
+#: Кризис — только для лекарств (напоминания и онбординг живут в SLOT_ORDER).
+MED_SLOT_ORDER = ("morning", "noon", "evening", "crisis")
 SLOT_TIME_PRESETS = {
     "morning": ("07:00", "08:00", "09:00"),
     "noon": ("12:00", "13:00", "14:00"),
@@ -406,7 +410,8 @@ def medications_list_kb(
     for med_id, name, dosage in medications:
         builder.row(
             InlineKeyboardButton(
-                text=f"{texts.BTN_DELETE}: {name} {dosage}", callback_data=f"med:del:{med_id}"
+                text=f"{texts.BTN_DELETE}: {texts.fmt_med_item(name, dosage)}",
+                callback_data=f"med:del:{med_id}",
             )
         )
     builder.row(InlineKeyboardButton(text=texts.BTN_ADD, callback_data="med:add"))
@@ -415,7 +420,7 @@ def medications_list_kb(
 
 
 def dosage_kb() -> InlineKeyboardMarkup:
-    """Дозировка: 5/10/20/50/100 мг + «Другое» (число + мг/мл/таб)."""
+    """Дозировка: 5/10/20/50/100 мг + «Без дозировки» / «Другое» (число + мг/мл/таб)."""
     builder = InlineKeyboardBuilder()
     builder.row(
         *[
@@ -429,7 +434,10 @@ def dosage_kb() -> InlineKeyboardMarkup:
             for d in DOSAGE_PRESETS[3:]
         ]
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="med:dose:other"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_NO_DOSAGE, callback_data="med:dose:none"),
+        InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="med:dose:other"),
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
     return builder.as_markup()
 
@@ -449,10 +457,13 @@ def med_confirm_delete_kb(medication_id: int) -> InlineKeyboardMarkup:
 def slots_multiselect_kb(
     selected: Iterable[str], done_callback: str = "med:slots:done", toggle_prefix: str = "med:slot"
 ) -> InlineKeyboardMarkup:
-    """Мультивыбор слотов: ✓ у отмеченных + «Готово»."""
+    """Мультивыбор слотов приёма: ✓ у отмеченных + «Готово».
+
+    Слоты — `MED_SLOT_ORDER` (включая «Кризис»): это клавиатура лекарств.
+    """
     chosen = set(selected)
     builder = InlineKeyboardBuilder()
-    for slot in SLOT_ORDER:
+    for slot in MED_SLOT_ORDER:
         mark = "✓ " if slot in chosen else ""
         builder.row(
             InlineKeyboardButton(

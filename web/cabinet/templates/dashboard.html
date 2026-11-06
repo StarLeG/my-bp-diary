@@ -59,7 +59,7 @@
           <dt>Лекарства</dt>
           <dd>
             {% if medications %}
-              {% for med in medications %}{{ med.name }} ({{ med.dosage }}, {{ slot_labels[med.slot] }}){% if not loop.last %}, {% endif %}{% endfor %}
+              {% for med in medications %}{{ med.name }} ({{ med.dosage + ", " if med.dosage else "" }}{{ slot_labels[med.slot] }}){% if not loop.last %}, {% endif %}{% endfor %}
             {% else %}
               не добавлены
             {% endif %}
@@ -206,10 +206,10 @@
               {% for med in medications %}
                 <tr>
                   <td><input form="med-edit-{{ med.id }}" type="text" name="name" value="{{ med.name }}" maxlength="100" required></td>
-                  <td><input form="med-edit-{{ med.id }}" type="text" name="dosage" value="{{ med.dosage }}" maxlength="50" required></td>
+                  <td><input form="med-edit-{{ med.id }}" type="text" name="dosage" value="{{ med.dosage }}" maxlength="50" placeholder="Без дозировки"></td>
                   <td>
                     <select form="med-edit-{{ med.id }}" name="slot">
-                      {% for slot in slot_order %}
+                      {% for slot in med_slot_order %}
                         <option value="{{ slot }}" {% if med.slot == slot %}selected{% endif %}>{{ slot_labels[slot] }}</option>
                       {% endfor %}
                     </select>
@@ -242,12 +242,12 @@
           <input type="text" name="name" maxlength="100" required placeholder="Например: Лозартан">
         </label>
         <label>
-          Дозировка
-          <input type="text" name="dosage" maxlength="50" required placeholder="Например: 50 мг">
+          Дозировка (необязательно)
+          <input type="text" name="dosage" maxlength="50" placeholder="Например: 50 мг">
         </label>
         <fieldset class="checks">
           <legend>Когда принимать</legend>
-          {% for slot in slot_order %}
+          {% for slot in med_slot_order %}
             <label class="check">
               <input type="checkbox" name="slot_{{ slot }}" value="1"> {{ slot_labels[slot] }}
             </label>

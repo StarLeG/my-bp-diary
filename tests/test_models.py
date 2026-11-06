@@ -355,6 +355,11 @@ class TestMedication:
         session.add(self._med(user.id, slot=slot))
         await _flush_fails(session)
 
+    async def test_slot_crisis_ok(self, session: AsyncSession, user: User) -> None:
+        """Слот «Кризис» — препарат на случай кризиса (§4.4)."""
+        session.add(self._med(user.id, slot="crisis"))
+        await session.commit()
+
     @pytest.mark.parametrize("name", ["", "x" * 101])
     async def test_name_length_invalid(self, session: AsyncSession, user: User, name: str) -> None:
         session.add(self._med(user.id, name=name))
@@ -364,10 +369,15 @@ class TestMedication:
         session.add(self._med(user.id, name="x" * 100))
         await session.commit()
 
-    @pytest.mark.parametrize("dosage", ["", "x" * 51])
+    @pytest.mark.parametrize("dosage", ["x" * 51])
     async def test_dosage_length_invalid(self, session: AsyncSession, user: User, dosage: str) -> None:
         session.add(Medication(user_id=user.id, name="Амлодипин", dosage=dosage, slot="morning"))
         await _flush_fails(session)
+
+    async def test_dosage_empty_ok(self, session: AsyncSession, user: User) -> None:
+        """Дозировка опциональна: пустая строка — «без дозировки» (§4.4)."""
+        session.add(Medication(user_id=user.id, name="Амлодипин", dosage="", slot="morning"))
+        await session.commit()
 
     async def test_dosage_length_boundary_ok(self, session: AsyncSession, user: User) -> None:
         session.add(Medication(user_id=user.id, name="Амлодипин", dosage="x" * 50, slot="morning"))

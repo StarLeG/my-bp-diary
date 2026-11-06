@@ -31,6 +31,19 @@ class TestAddMedication:
         assert {m.slot for m in meds} == {"morning", "evening"}
         assert all(m.name == "Лозартан" and m.dosage == "50 мг" for m in meds)
 
+    async def test_empty_dosage_stored(self, session: AsyncSession, user: User) -> None:
+        """«Без дозировки» — пустая строка сохраняется как есть (§4.4)."""
+        meds = await service.add_medication(session, user, "Лозартан", "", ("morning",))
+        await session.commit()
+        assert meds[0].dosage == ""
+
+    async def test_crisis_slot_stored(self, session: AsyncSession, user: User) -> None:
+        """Слот «Кризис» — препарат SOS, строка создаётся как обычно (§4.4)."""
+        meds = await service.add_medication(session, user, "Каптоприл", "25 мг", ("crisis",))
+        await session.commit()
+        assert len(meds) == 1
+        assert meds[0].slot == "crisis"
+
     async def test_same_name_slot_updates_dosage(self, session: AsyncSession, user: User) -> None:
         await _add_med(session, user)
         await session.commit()
@@ -290,6 +303,34 @@ class TestAdherence:
         )
         assert taken == 0
         assert planned == 1
+
+    async def test_crisis_excluded_from_plan(self, session: AsyncSession, user: User) -> None:
+        """Кризисный препарат не в плане и не в «принято» (§6.7)."""
+        crisis = await service.add_medication(session, user, "Каптоприл", "25 мг", ("crisis",))
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        await service.log_slot_intake(
+            session,
+            user,
+            "crisis",
+            {crisis[0].id: "taken"},
+            timestamp=aware(2026, 11, 4, 15, 5),
+        )
+        await session.commit()
+        taken, planned = await service.adherence(
+            session, user, date(2026, 11, 4), date(2026, 11, 4)
+        )
+        # Приём кризиса не принят в зачёт: 0 taken / 1 planned (только утро).
+        assert (taken, planned) == (0, 1)
+
+    async def test_crisis_only_not_planned(self, session: AsyncSession, user: User) -> None:
+        """Только кризисные препараты — план пуст, приверженность не считается."""
+        await service.add_medication(session, user, "Каптоприл", "25 мг", ("crisis",))
+        await session.commit()
+        taken, planned = await service.adherence(
+            session, user, date(2026, 11, 1), date(2026, 11, 7)
+        )
+        assert (taken, planned) == (0, 0)
 
     async def test_no_medications(self, session: AsyncSession, user: User) -> None:
         taken, planned = await service.adherence(

@@ -3,6 +3,9 @@
 Решения:
 - лекарство в двух слотах — две строки (`UNIQUE(user_id, name, slot)`); повторное
   добавление того же имени в тот же слот обновляет дозировку (идемпотентно);
+- дозировка опциональна: пустая строка — «без дозировки»;
+- слот `crisis` — препарат на случай кризиса: в расписании напоминаний не
+  участвует и в приверженность не входит (SCHEDULED_SLOTS), только лог приёма;
 - «Принял всё ✓» / «Частично…» / «Пропускаю» пишут по одной записи
   `medication_logs` на лекарство одной транзакцией; повторное действие за те же
   локальные сутки и слот новые логи не создаёт (двойное нажатие безопасно);
@@ -19,11 +22,16 @@ from zoneinfo import ZoneInfo
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot import texts
 from bot.models import Medication, MedicationLog, User
 from bot.services.measurements import day_bounds_utc, utcnow
 
-#: Слоты приёма лекарств совпадают со слотами давления (SPEC.md, раздел 4.4).
-SLOTS = ("morning", "noon", "evening")
+#: Все слоты приёма лекарств: слоты давления + препарат на случай кризиса.
+SLOTS = ("morning", "noon", "evening", "crisis")
+
+#: Слоты с расписанием (утро/обед/вечер) — только они участвуют в приверженности:
+#: кризисный препарат принимают по факту, планировать его нельзя (§6.7).
+SCHEDULED_SLOTS = ("morning", "noon", "evening")
 
 
 @dataclass
@@ -160,7 +168,7 @@ async def log_slot_intake(
         medication = by_id.get(med_id)
         if medication is None:
             continue  # чужое или удалённое лекарство — тихо игнорируем
-        label = f"{medication.name} {medication.dosage}"
+        label = texts.fmt_med_item(medication.name, medication.dosage)
         if med_id in logged_today:
             continue
         session.add(
@@ -188,15 +196,21 @@ async def planned_intakes(
     """Число запланированных приёмов за период по текущему расписанию.
 
     Каждая строка `medications` — один приём в день в своём слоте:
-    приёмов = строк × дней. Расписание считается текущим (MVP без истории
-    изменений списка лекарств).
+    приёмов = строк × дней. Считаются только расписание слоты
+    (`SCHEDULED_SLOTS`): кризисные препараты в план не входят. Расписание
+    считается текущим (MVP без истории изменений списка лекарств).
     """
     days = (end_day - start_day).days + 1
     if days <= 0:
         return 0
     total = (
         await session.execute(
-            select(func.count()).select_from(Medication).where(Medication.user_id == user.id)
+            select(func.count())
+            .select_from(Medication)
+            .where(
+                Medication.user_id == user.id,
+                Medication.slot.in_(SCHEDULED_SLOTS),
+            )
         )
     ).scalar_one()
     return int(total) * days
@@ -205,7 +219,11 @@ async def planned_intakes(
 async def adherence(
     session: AsyncSession, user: User, start_day: date, end_day: date
 ) -> tuple[int, int]:
-    """Приверженность за период: (принято taken, всего запланировано)."""
+    """Приверженность за период: (принято taken, всего запланировано).
+
+    Считаются только расписание слоты: приёмы кризисных препаратов и в
+    числитель, и в знаменатель не входят (§6.7).
+    """
     start, _ = day_bounds_utc(user.timezone, start_day)
     _, end = day_bounds_utc(user.timezone, end_day)
     taken = (
@@ -215,6 +233,7 @@ async def adherence(
             .where(
                 MedicationLog.user_id == user.id,
                 MedicationLog.status == "taken",
+                MedicationLog.slot.in_(SCHEDULED_SLOTS),
                 MedicationLog.timestamp >= start,
                 MedicationLog.timestamp < end,
             )

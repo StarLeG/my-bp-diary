@@ -179,6 +179,9 @@ class Medication(Base):
     """Лекарство пользователя, привязанное к слоту (SPEC.md, раздел 4.4).
 
     Одно лекарство в двух слотах — две строки (UNIQUE по имени и слоту).
+    Дозировка опциональна: пустая строка — «без дозировки». Слот `crisis` —
+    препарат на случай кризиса: напоминаний нет и в приверженности не
+    участвует (§6.7).
     """
 
     __tablename__ = "medications"
@@ -197,11 +200,11 @@ class Medication(Base):
     __table_args__ = (
         UniqueConstraint("user_id", "name", "slot", name="uq_medications_user_name_slot"),
         CheckConstraint(
-            "slot IN ('morning', 'noon', 'evening')", name="ck_medications_slot"
+            "slot IN ('morning', 'noon', 'evening', 'crisis')", name="ck_medications_slot"
         ),
         CheckConstraint("length(name) BETWEEN 1 AND 100", name="ck_medications_name_length"),
         CheckConstraint(
-            "length(dosage) BETWEEN 1 AND 50", name="ck_medications_dosage_length"
+            "length(dosage) BETWEEN 0 AND 50", name="ck_medications_dosage_length"
         ),
     )
 

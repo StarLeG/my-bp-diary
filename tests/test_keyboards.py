@@ -350,6 +350,14 @@ class TestMedicationKeyboards:
         data = {button.callback_data for button in callback_buttons(markup)}
         assert data == {"med:del:1", "med:del:2", "med:add", "set:back"}
 
+    def test_list_without_dosage_has_no_gap(self) -> None:
+        """Без дозировки — «Удалить: Лозартан», без лишнего пробела."""
+        markup = keyboards.medications_list_kb([(1, "Лозартан", "")])
+        texts_by_data = {
+            button.callback_data: button.text for button in callback_buttons(markup)
+        }
+        assert texts_by_data["med:del:1"] == f"{texts.BTN_DELETE}: Лозартан"
+
     def test_confirm_delete_actions(self) -> None:
         markup = keyboards.med_confirm_delete_kb(42)
         texts_by_data = {
@@ -369,7 +377,8 @@ class TestMedicationKeyboards:
         }
         for dosage in keyboards.DOSAGE_PRESETS:
             assert texts_by_data[f"med:dose:{dosage}"] == dosage
-        assert "med:dose:other" in texts_by_data
+        assert texts_by_data["med:dose:none"] == texts.BTN_NO_DOSAGE
+        assert texts_by_data["med:dose:other"] == texts.BTN_OTHER
         assert "med:cancel" in texts_by_data
 
     def test_slots_multiselect_marks_selected(self) -> None:
@@ -382,6 +391,7 @@ class TestMedicationKeyboards:
         assert texts_by_data["med:slot:morning"] == "✓ Утро"
         assert texts_by_data["med:slot:noon"] == "Обед"
         assert texts_by_data["med:slot:evening"] == "✓ Вечер"
+        assert texts_by_data["med:slot:crisis"] == "Кризис"
         assert "med:slots:done" in texts_by_data
 
 

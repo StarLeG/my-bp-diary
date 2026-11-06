@@ -56,6 +56,10 @@ class TestFormatting:
     def test_fmt_med_item(self) -> None:
         assert texts.fmt_med_item("Лозартан", "50 мг") == "Лозартан 50 мг"
 
+    def test_fmt_med_item_without_dosage(self) -> None:
+        """Без дозировки — просто название, без лишнего пробела."""
+        assert texts.fmt_med_item("Лозартан", "") == "Лозартан"
+
     def test_fmt_meds_summary(self) -> None:
         summary = texts.fmt_meds_summary(["Лозартан 50 мг"], ["Амлодипин 5 мг"])
         assert summary == "принято: Лозартан 50 мг; пропущено: Амлодипин 5 мг"
@@ -131,6 +135,13 @@ class TestCanonicalTexts:
         assert texts.MEDS_ADD_DONE == (
             "Лекарство добавлено. Оно будет появляться в напоминаниях в выбранные слоты"
         )
+
+    def test_med_add_done_crisis_canonical(self) -> None:
+        """Только кризис — напоминаний не будет (§6.7)."""
+        assert texts.MEDS_ADD_DONE_CRISIS == (
+            "Лекарство добавлено. Напоминаний не будет — выбран только приём «Кризис»"
+        )
+        assert texts.SLOT_LABELS["crisis"] == "Кризис"
 
     def test_med_add_name_prompt_example(self) -> None:
         assert "Например: Лозартан, Амлодипин" in texts.MEDS_ADD_NAME_PROMPT
