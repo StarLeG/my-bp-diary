@@ -1,0 +1,20 @@
+# Автоматически подхватывается docker compose (дополняет docker-compose.yml).
+#
+# Сеть Nginx Proxy Manager: кабинет подключается к сети NPM и становится
+# доступен прокси по имени контейнера (bp-diary-cabinet:8000). В отличие от
+# `docker network connect`, переживает пересоздание контейнеров — работает
+# и после `./restart.sh`, и после `./deploy.sh`.
+#
+# Файл специфичен для серверов с NPM в Docker (сеть nginx-proxy-manager_default).
+# На серверах без Nginx Proxy Manager удалите или переименуйте его.
+services:
+  cabinet:
+    networks:
+      default:
+      npm:
+
+networks:
+  default:
+  npm:
+    external: true
+    name: nginx-proxy-manager_default
