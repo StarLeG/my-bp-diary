@@ -8,6 +8,7 @@
   --color-primary-dark: #0f5ba3;
   --color-danger: #c0392b;
   --color-ok: #1e7d4f;
+  --color-warn: #d9a400;
   --color-border: #d9e2ec;
   --radius: 12px;
   --shadow: 0 2px 8px rgba(31, 41, 51, 0.08);
@@ -281,7 +282,9 @@ td.actions {
 
 /* График */
 .chart-wrap {
-  margin: 16px 0;
+  position: relative;
+  height: 220px;
+  margin: 0;
   max-width: 100%;
 }
 
@@ -330,4 +333,201 @@ td.actions {
   padding: 24px 0 40px;
   color: var(--color-muted);
   font-size: 0.9rem;
+}
+
+/* ── Графики сводки: три панели (SPEC.md, §16.2) ── */
+.chart-grid {
+  display: grid;
+  gap: 16px;
+  grid-template-columns: minmax(0, 1fr);
+  margin: 16px 0;
+}
+
+.chart-panel {
+  min-width: 0;
+  background: var(--color-bg);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px;
+}
+
+.chart-title {
+  margin: 0 0 8px;
+  font-size: 0.95rem;
+  color: var(--color-muted);
+}
+
+.zone-legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 8px 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: 0.78rem;
+  color: var(--color-muted);
+}
+
+.zone-legend li {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.zone-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  border-radius: 3px;
+  border: 1px solid var(--color-border);
+}
+
+/* Лекарства в «Личной карточке» — на всю ширину ряда, группы по слотам */
+.facts-wide {
+  grid-column: 1 / -1;
+}
+
+.med-groups {
+  display: grid;
+  gap: 10px 16px;
+  grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+  margin: 4px 0 0;
+}
+
+.med-group-title {
+  display: block;
+  color: var(--color-muted);
+  font-size: 0.85rem;
+}
+
+.med-list {
+  margin: 2px 0 0;
+  padding-left: 18px;
+  font-weight: 600;
+}
+
+.med-list li {
+  margin: 2px 0;
+}
+
+/* ── Адаптивность: 480 / 768 / 1024 / 1280 (mobile-first) ── */
+@media (max-width: 767px) {
+  .card {
+    padding: 16px;
+  }
+
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+  }
+
+  .nav {
+    font-size: 1.05rem;
+    gap: 12px 18px;
+  }
+
+  /* История записей — карточками, без горизонтального скролла */
+  .stacked-table thead {
+    display: none;
+  }
+
+  .stacked-table,
+  .stacked-table tbody,
+  .stacked-table tr,
+  .stacked-table td {
+    display: block;
+  }
+
+  .stacked-table tr {
+    border: 1px solid var(--color-border);
+    border-radius: var(--radius);
+    margin-bottom: 12px;
+    padding: 8px 12px;
+    background: var(--color-surface);
+  }
+
+  .stacked-table td {
+    display: flex;
+    gap: 10px;
+    justify-content: space-between;
+    border: none;
+    padding: 4px 0;
+    text-align: right;
+    overflow-wrap: anywhere;
+  }
+
+  .stacked-table td::before {
+    content: attr(data-label);
+    color: var(--color-muted);
+    font-size: 0.85rem;
+    text-align: left;
+    flex-shrink: 0;
+  }
+}
+
+@media (max-width: 479px) {
+  body {
+    font-size: 0.95rem;
+  }
+
+  .filter-row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .filter-row .btn {
+    width: 100%;
+  }
+
+  .row {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 12px;
+  }
+
+  .row .btn {
+    width: 100%;
+    text-align: center;
+  }
+}
+
+@media (min-width: 768px) {
+  .chart-grid {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+  }
+
+  .chart-panel--pulse {
+    grid-column: 1 / -1;
+  }
+
+  .chart-wrap {
+    height: 260px;
+  }
+
+  .card {
+    padding: 24px;
+  }
+}
+
+@media (min-width: 1024px) {
+  .chart-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+  }
+
+  .chart-panel--pulse {
+    grid-column: auto;
+  }
+
+  .chart-wrap {
+    height: 280px;
+  }
+}
+
+@media (min-width: 1280px) {
+  .container {
+    max-width: 1200px;
+  }
 }

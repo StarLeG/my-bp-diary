@@ -1,0 +1,25 @@
+{# Три панели графиков сводки с легендой зон (SPEC.md, раздел 16.2).
+   Ожидает chart_zones (web/cabinet/chart_zones.py); id "bp-chart" — на панели
+   САД, ровно один на страницу (E2E-локатор qa/test_web_e2e.py). #}
+<div class="chart-grid">
+  <div class="chart-panel">
+    <h3 class="chart-title">Систолическое</h3>
+    <div class="chart-wrap"><canvas id="bp-chart"></canvas></div>
+  </div>
+  <div class="chart-panel">
+    <h3 class="chart-title">Диастолическое</h3>
+    <div class="chart-wrap"><canvas id="bp-chart-dia"></canvas></div>
+  </div>
+  <div class="chart-panel chart-panel--pulse">
+    <h3 class="chart-title">Пульс</h3>
+    <div class="chart-wrap"><canvas id="bp-chart-pulse"></canvas></div>
+  </div>
+</div>
+<ul class="zone-legend">
+  {% for band in chart_zones.systolic %}
+    <li><span class="zone-swatch" style="background: {{ band.fill }}"></span>САД: {{ band.label }}</li>
+  {% endfor %}
+  {% for band in chart_zones.diastolic %}
+    <li><span class="zone-swatch" style="background: {{ band.fill }}"></span>ДАД: {{ band.label }}</li>
+  {% endfor %}
+</ul>

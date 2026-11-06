@@ -38,6 +38,7 @@ from bot.services import stats
 from bot.services.measurements import measurements_for_period
 from bot.services.reminders import next_slot_occurrence
 from web.cabinet import auth, doctor_auth
+from web.cabinet.chart_zones import CHART_ZONES
 
 #: Имя сессионной cookie (SPEC.md, раздел 16.2: HTTP-only, 7 дней).
 SESSION_COOKIE = "cabinet_session"
@@ -553,6 +554,7 @@ def create_app(
                 "reminders": {r.type: r for r in reminders},
                 "doctor_notes": doctor_notes,
                 "chart": _chart_payload(measurements, user.timezone),
+                "chart_zones": CHART_ZONES,
                 "days": days,
                 "date_from": date_from,
                 "date_to": date_to,
@@ -962,6 +964,7 @@ def create_app(
                 "summary": summary,
                 "notes": notes,
                 "chart": _chart_payload(measurements, user.timezone),
+                "chart_zones": CHART_ZONES,
                 "days": days,
                 "date_from": date_from,
                 "date_to": date_to,

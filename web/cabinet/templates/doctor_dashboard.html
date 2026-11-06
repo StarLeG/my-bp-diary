@@ -149,9 +149,7 @@
             {% endif %}
           </dl>
 
-          <div class="chart-wrap">
-            <canvas id="bp-chart" height="110"></canvas>
-          </div>
+          {% include "partials/bp_charts.html" %}
         {% endif %}
 
         <div class="row">
@@ -172,7 +170,7 @@
           <p>За этот период записей нет.</p>
         {% else %}
           <div class="table-scroll">
-            <table>
+            <table class="stacked-table">
               <thead>
                 <tr>
                   <th>Дата</th>
@@ -188,14 +186,14 @@
               <tbody>
                 {% for m in measurements %}
                   <tr>
-                    <td>{{ m.timestamp.astimezone(user_zone).strftime("%d.%m.%Y") }}</td>
-                    <td>{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
-                    <td>{{ m.systolic }}</td>
-                    <td>{{ m.diastolic }}</td>
-                    <td>{{ m.pulse if m.pulse is not none else "—" }}</td>
-                    <td>{{ medication_labels[m.medication_taken] }}</td>
-                    <td>{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
-                    <td class="note">{{ m.note or "" }}</td>
+                    <td data-label="Дата">{{ m.timestamp.astimezone(user_zone).strftime("%d.%m.%Y") }}</td>
+                    <td data-label="Время">{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
+                    <td data-label="Сист.">{{ m.systolic }}</td>
+                    <td data-label="Диаст.">{{ m.diastolic }}</td>
+                    <td data-label="Пульс">{{ m.pulse if m.pulse is not none else "—" }}</td>
+                    <td data-label="Лекарство">{{ medication_labels[m.medication_taken] }}</td>
+                    <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
+                    <td data-label="Заметка" class="note">{{ m.note or "" }}</td>
                   </tr>
                 {% endfor %}
               </tbody>
@@ -242,31 +240,7 @@
 {% endif %}
 
 {% if view == "patient" %}
-  <script>
-    // График давления за период (Chart.js).
-    const chartData = {{ chart | tojson }};
-    window.addEventListener("load", () => {
-      const canvas = document.getElementById("bp-chart");
-      if (!canvas || typeof Chart === "undefined" || chartData.length === 0) {
-        return;
-      }
-      new Chart(canvas, {
-        type: "line",
-        data: {
-          labels: chartData.map((point) => point.t),
-          datasets: [
-            { label: "Систолическое", data: chartData.map((point) => point.s), borderColor: "#1476cc", tension: 0.2 },
-            { label: "Диастолическое", data: chartData.map((point) => point.d), borderColor: "#0f5ba3", tension: 0.2 },
-            { label: "Пульс", data: chartData.map((point) => point.p), borderColor: "#9b59b6", tension: 0.2 }
-          ]
-        },
-        options: {
-          plugins: { legend: { position: "bottom" } },
-          scales: { y: { suggestedMin: 40, suggestedMax: 200 } }
-        }
-      });
-    });
-  </script>
+  {% include "partials/bp_charts_scripts.html" %}
 {% endif %}
 </body>
 </html>

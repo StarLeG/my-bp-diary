@@ -6,6 +6,8 @@ HTTP-only, 7 дней), magic link (stateless-подпись, срок 15 мин
 """
 from __future__ import annotations
 
+import json
+import re
 import sqlite3
 from datetime import timedelta
 
@@ -19,6 +21,7 @@ from bot.handlers import support
 from bot.models import User, WebSession, WebUser
 from web.cabinet import auth
 from web.cabinet.app import SESSION_COOKIE, create_app
+from web.cabinet.chart_zones import CHART_ZONES
 
 FAKE_TOKEN = f"123456:{'A' * 35}"
 SECRET = "test-secret"
@@ -1077,3 +1080,102 @@ class TestDashboardRoutes:
 
         response = client.get("/export/medications.csv?days=7")
         assert response.status_code == 200
+
+
+class TestDashboardCharts:
+    """Графики сводки: три панели и цветные зоны АД (SPEC.md, раздел 16.2)."""
+
+    def _add_measurement(self, settings: Settings, user_id: int) -> None:
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO measurements (user_id, timestamp, systolic, diastolic, pulse,"
+            " medication_taken, feeling, note)"
+            " VALUES (?, '2026-01-02 07:05:00', 128, 82, 64, 1, 'normal', 'после сна')",
+            (user_id,),
+        )
+        con.commit()
+        con.close()
+
+    def test_summary_has_three_chart_panels(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        self._add_measurement(settings, user_id)
+        response = client.get("/?days=custom&date_from=2026-01-01&date_to=2026-01-03")
+        assert response.status_code == 200
+        text = response.text
+        assert 'id="bp-chart"' in text
+        assert 'id="bp-chart-dia"' in text
+        assert 'id="bp-chart-pulse"' in text
+        # E2E-локатор qa/test_web_e2e.py: «bp-chart» — ровно один на страницу
+        # (закрывающая кавычка не даёт совпасть с bp-chart-dia).
+        assert text.count('id="bp-chart"') == 1
+
+    def test_chart_zone_thresholds_rendered(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        self._add_measurement(settings, user_id)
+        response = client.get("/?days=custom&date_from=2026-01-01&date_to=2026-01-03")
+        assert response.status_code == 200
+        match = re.search(
+            r'<script id="bp-chart-zones" type="application/json">(.*?)</script>',
+            response.text,
+            re.DOTALL,
+        )
+        assert match, "нет JSON-острова #bp-chart-zones"
+        zones = json.loads(match.group(1))
+        assert [band["to"] for band in zones["systolic"]] == [130, 140, None]
+        assert [band["to"] for band in zones["diastolic"]] == [85, 90, None]
+        for key in ("systolic", "diastolic"):
+            assert len(zones[key]) == 3
+            for band in zones[key]:
+                assert band["label"]
+                assert band["fill"].startswith("rgba(")
+
+    def test_chart_zone_constants(self) -> None:
+        # Единый источник истины — константы web/cabinet/chart_zones.py:
+        # границы ESC/ESH + ВОЗ (SPEC.md, раздел 16.2), у «Пульса» зон нет.
+        assert "pulse" not in CHART_ZONES
+        expected = {"systolic": [130, 140], "diastolic": [85, 90]}
+        for key, thresholds in expected.items():
+            bands = CHART_ZONES[key]
+            assert [band["to"] for band in bands[:-1]] == thresholds
+            assert bands[-1]["to"] is None
+            bounds = [band["to"] for band in bands if band["to"] is not None]
+            assert bounds == sorted(bounds)
+            for band in bands:
+                assert band["fill"].startswith("rgba(")
+                if band["to"] is None:
+                    assert band["line"] is None
+                else:
+                    assert band["line"].startswith("rgba(")
+
+    def test_medications_wide_block(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        for name, dosage, slot_field in (
+            ("Лозартан", "50 мг", "slot_morning"),
+            ("Моксонидин", "", "slot_crisis"),
+        ):
+            response = client.post(
+                "/medications",
+                data={
+                    "csrf_token": _csrf(client),
+                    "name": name,
+                    "dosage": dosage,
+                    slot_field: "1",
+                },
+            )
+            assert response.status_code == 303
+        response = client.get("/")
+        assert response.status_code == 200
+        text = response.text
+        # «Лекарства» — на всю ширину ряда, группы по слотам (§16.2).
+        assert "facts-wide" in text
+        assert "med-groups" in text
+        assert '<span class="med-group-title">Утро</span>' in text
+        assert '<span class="med-group-title">Кризис</span>' in text
+        # Пустые группы («Обед», «Вечер») не показываются.
+        assert '<span class="med-group-title">Обед</span>' not in text
+        assert '<span class="med-group-title">Вечер</span>' not in text
+        assert "<li>Лозартан (50 мг)</li>" in text
+        assert "<li>Моксонидин</li>" in text

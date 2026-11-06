@@ -352,6 +352,20 @@ class TestPatientCard:
         assert "128" in response.text  # измерение в таблице
         assert "Заметки врача" in response.text
 
+    def test_card_has_three_chart_panels(self, app_client, settings) -> None:
+        """Графики сводки: три панели (SPEC.md, разделы 21 и 16.2)."""
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        _add_measurement(settings, user_id)
+        _login_doctor(client, doctor_id)
+        response = client.get(f"/doctor/patient/{user_id}")
+        assert response.status_code == 200
+        text = response.text
+        assert 'id="bp-chart"' in text
+        assert 'id="bp-chart-dia"' in text
+        assert 'id="bp-chart-pulse"' in text
+        assert text.count('id="bp-chart"') == 1
+
     def test_card_without_measurements(self, app_client, settings) -> None:
         client, user_id, doctor_id = app_client
         _link(settings, doctor_id, user_id)

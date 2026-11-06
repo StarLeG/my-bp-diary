@@ -54,6 +54,8 @@ class TestWebE2E:
         assert "История записей" in content
         assert "Сводка за период" in content
         assert page.locator("#bp-chart").count() == 1, "график давления не отрисован"
+        assert page.locator("#bp-chart-dia").count() == 1, "панель «Диастолическое» не отрисована"
+        assert page.locator("#bp-chart-pulse").count() == 1, "панель «Пульс» не отрисована"
 
         # Экспорт CSV из кабинета (§22, п.4).
         with page.expect_download(timeout=15_000) as download_info:

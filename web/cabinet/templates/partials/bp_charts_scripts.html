@@ -1,0 +1,5 @@
+{# Данные и код графиков сводки: JSON-острова + общий static/bp-charts.js
+   (общий для ЛК и кабинета врача, см. SPEC.md, раздел 16.2). #}
+<script id="bp-chart-data" type="application/json">{{ chart | tojson }}</script>
+<script id="bp-chart-zones" type="application/json">{{ chart_zones | tojson }}</script>
+<script src="/static/bp-charts.js" defer></script>
