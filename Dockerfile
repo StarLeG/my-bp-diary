@@ -33,6 +33,8 @@ RUN useradd --create-home --uid 1000 appuser \
 COPY --from=builder --chown=appuser:appuser /app/.venv /app/.venv
 COPY --from=builder --chown=appuser:appuser /app/bot ./bot
 COPY --from=builder --chown=appuser:appuser /app/web ./web
+# pyproject.toml — единственный источник версии для «Здоровья системы» (§18.4).
+COPY --from=builder --chown=appuser:appuser /app/pyproject.toml ./pyproject.toml
 
 USER appuser
 VOLUME /app/data
