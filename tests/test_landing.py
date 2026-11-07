@@ -12,8 +12,28 @@ import pytest
 
 LANDING = Path(__file__).resolve().parents[1] / "web" / "landing" / "index.html"
 
-CABINET_LOGIN_URL = "https://cabinet.electroman.by/login"
-TELEGRAM_CTA_URL = "https://t.me/my_bp_diary_bot?start=landing"
+#: Допустимые URL кабинета: боевой и локальный тестовый стенд.
+#: Перед релизом вернуть боевые ссылки (CLAUDE.md, раздел 5)!
+CABINET_LOGIN_URLS = (
+    "https://cabinet.electroman.by/login",
+    "http://127.0.0.1:8000/login",
+)
+
+#: Допустимые Telegram-CTA: боевой и тестовый бот (см. выше про релиз).
+TELEGRAM_CTA_URLS = (
+    "https://t.me/my_bp_diary_bot?start=landing",
+    "https://t.me/testMasterJournal_Bot?start=landing",
+)
+
+
+def _single_url(html: str, urls: tuple[str, ...]) -> str:
+    """Единственный URL из допустимых, используемый на лендинге.
+
+    Смесь боевого и тестового — ошибка: ссылки переключаются все разом.
+    """
+    found = [url for url in urls if url in html]
+    assert len(found) == 1, f"ожидался ровно один URL из {urls}, найдено: {found}"
+    return found[0]
 
 
 @pytest.fixture(scope="module")
@@ -27,7 +47,7 @@ class TestCabinetLogin:
 
     def test_login_url_in_three_places(self, html: str) -> None:
         """Шапка, финальный CTA и #docs-cabinet ссылаются на /login кабинета."""
-        assert html.count(CABINET_LOGIN_URL) >= 3
+        assert html.count(_single_url(html, CABINET_LOGIN_URLS)) >= 3
 
     def test_login_buttons_texts(self, html: str) -> None:
         """Кнопки входа подписаны: «Войти» в шапке и «Войти в личный кабинет» в CTA/docs."""
@@ -36,7 +56,7 @@ class TestCabinetLogin:
 
     def test_telegram_cta_kept(self, html: str) -> None:
         """Telegram-CTA сохранён хотя бы в шапке и финальном блоке."""
-        assert html.count(TELEGRAM_CTA_URL) >= 2
+        assert html.count(_single_url(html, TELEGRAM_CTA_URLS)) >= 2
 
 
 class TestHeaderResponsive:

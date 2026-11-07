@@ -5,6 +5,8 @@ FROM python:3.12-slim AS builder
 
 WORKDIR /app
 RUN pip install --no-cache-dir uv
+# Медленные сети: дефолтные 30 с роняют загрузку больших колёс (pillow).
+ENV UV_HTTP_TIMEOUT=120
 
 # Сначала зависимости (слой кэшируется, пока не меняется pyproject/uv.lock).
 COPY pyproject.toml uv.lock README.md ./
