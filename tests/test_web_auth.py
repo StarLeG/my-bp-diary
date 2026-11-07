@@ -1081,6 +1081,49 @@ class TestDashboardRoutes:
         response = client.get("/export/medications.csv?days=7")
         assert response.status_code == 200
 
+    def test_history_shows_medication_intake(self, app_client, settings) -> None:
+        """Колонка «Лекарство» — перечень отмеченных приёмов записи (§16.2, §4.11).
+
+        Есть `measurement_medications` — «Принято: Лозартан 50 мг»; без связей —
+        статус флага «Принято» / «Пропущено» / «—».
+        """
+        client, user_id = app_client
+        _register(client)
+        con = sqlite3.connect(settings.db_path)
+        hours = {1: "07", 0: "08", None: "09"}
+        first_id = None
+        for medication_taken, hour in hours.items():
+            con.execute(
+                "INSERT INTO measurements (user_id, timestamp, systolic, diastolic,"
+                " medication_taken, note)"
+                " VALUES (?, ?, 128, 82, ?, '')",
+                (user_id, f"2026-01-02 {hour}:05:00", medication_taken),
+            )
+            if first_id is None:
+                first_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.execute(
+            "INSERT INTO medications (user_id, name, dosage, slot, created_at)"
+            " VALUES (?, 'Лозартан', '50 мг', 'morning', '2026-01-01 00:00:00')",
+            (user_id,),
+        )
+        medication_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.execute(
+            "INSERT INTO measurement_medications (measurement_id, medication_id)"
+            " VALUES (?, ?)",
+            (first_id, medication_id),
+        )
+        con.commit()
+        con.close()
+
+        response = client.get(
+            "/?days=custom&date_from=2026-01-01&date_to=2026-01-03"
+        )
+        assert response.status_code == 200
+        text = response.text
+        assert 'data-label="Лекарство">Принято: Лозартан 50 мг<' in text
+        assert 'data-label="Лекарство">Пропущено<' in text
+        assert 'data-label="Лекарство">—<' in text
+
 
 class TestDashboardCharts:
     """Графики сводки: три панели и цветные зоны АД (SPEC.md, раздел 16.2)."""

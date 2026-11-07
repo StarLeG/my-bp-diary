@@ -23,7 +23,14 @@ from bot.db import create_engine, create_session_factory, init_db
 from bot.handlers import support
 from bot.handlers.stats import _support_footer
 from bot.middlewares import DebounceMiddleware
-from bot.models import Measurement, MedicationLog, Reminder, User as DbUser, WebUser
+from bot.models import (
+    Measurement,
+    MedicationLog,
+    MeasurementMedication,
+    Reminder,
+    User as DbUser,
+    WebUser,
+)
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services.reminders import RemindersService
@@ -375,6 +382,53 @@ class TestMedsIntakeIdempotency:
         # Подписи возвращаются всем (для «💊 Принято: …»), но лог ровно один.
         assert all(labels == ["Лозартан 50 мг"] for _, labels in results)
         assert await count(session_factory, MedicationLog) == 1
+
+    async def test_parallel_link_measurements_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Пять конкурентных «Готово» — ровно одна связь с записью (§4.11, §7.2)."""
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            measurement = await measurements_service.save_measurement(
+                session, user, 130, 85
+            )
+            await session.commit()
+
+        async def tap() -> None:
+            async with session_factory() as own:
+                await medications_service.link_measurement_intake(
+                    own, user, measurement.id, [meds[0].id]
+                )
+                await own.commit()
+
+        await asyncio.gather(*(tap() for _ in range(5)))
+        assert await count(session_factory, MeasurementMedication) == 1
+
+    async def test_double_link_measurements_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Повторное «Готово» (вне окна debounce) — связь не дублируется (§7.2)."""
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            measurement = await measurements_service.save_measurement(
+                session, user, 130, 85
+            )
+            await session.commit()
+        async with session_factory() as session:
+            await medications_service.link_measurement_intake(
+                session, user, measurement.id, [meds[0].id]
+            )
+            await session.commit()
+        async with session_factory() as session:
+            await medications_service.link_measurement_intake(
+                session, user, measurement.id, [meds[0].id]
+            )
+            await session.commit()
+        assert await count(session_factory, MeasurementMedication) == 1
 
     async def test_repeat_yes_creates_one_remeasure(
         self, session_factory, user: DbUser, svc: RemindersService

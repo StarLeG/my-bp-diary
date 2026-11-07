@@ -374,6 +374,37 @@ class TestPatientCard:
         assert response.status_code == 200
         assert "За этот период записей нет." in response.text
 
+    def test_card_shows_medication_intake(self, app_client, settings) -> None:
+        """Колонка «Лекарство» — перечень отмеченных приёмов записи (§16.2, §4.11)."""
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO measurements (user_id, timestamp, systolic, diastolic, pulse,"
+            " medication_taken, feeling, note)"
+            " VALUES (?, ?, 128, 82, 64, 1, 'normal', 'после сна')",
+            (user_id, now),
+        )
+        measurement_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.execute(
+            "INSERT INTO medications (user_id, name, dosage, slot, created_at)"
+            " VALUES (?, 'Лозартан', '50 мг', 'morning', ?)",
+            (user_id, now),
+        )
+        medication_id = con.execute("SELECT last_insert_rowid()").fetchone()[0]
+        con.execute(
+            "INSERT INTO measurement_medications (measurement_id, medication_id)"
+            " VALUES (?, ?)",
+            (measurement_id, medication_id),
+        )
+        con.commit()
+        con.close()
+        _login_doctor(client, doctor_id)
+        response = client.get(f"/doctor/patient/{user_id}")
+        assert response.status_code == 200
+        assert 'data-label="Лекарство">Принято: Лозартан 50 мг<' in response.text
+
 
 # ─────────────────────────── Заметки врача ───────────────────────────
 

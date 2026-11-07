@@ -7,7 +7,7 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models import Medication, MedicationLog, User
+from bot.models import Measurement, Medication, MedicationLog, MeasurementMedication, User
 from bot.services import medications as service
 
 UTC = timezone.utc
@@ -21,6 +21,19 @@ async def _add_med(
     session: AsyncSession, user: User, name: str = "Лозартан", slots=("morning",)
 ) -> list[Medication]:
     return await service.add_medication(session, user, name, "50 мг", slots)
+
+
+async def _add_measurement(session: AsyncSession, user: User) -> int:
+    """Запись измерения для привязки отмеченных лекарств (§4.11)."""
+    row = Measurement(
+        user_id=user.id,
+        timestamp=aware(2026, 11, 4, 8, 5),
+        systolic=135,
+        diastolic=85,
+    )
+    session.add(row)
+    await session.flush()
+    return row.id
 
 
 class TestAddMedication:
@@ -768,3 +781,155 @@ class TestLogManualIntake:
         assert result.already_logged is True
         logs = (await session.execute(select(MedicationLog))).scalars().all()
         assert len(logs) == 1 and logs[0].status == "skipped"
+
+
+class TestLinkMeasurementIntake:
+    """Связи «измерение ↔ отмеченные лекарства» (§4.11, §6.3)."""
+
+    async def _links(self, session: AsyncSession) -> list[tuple[int, int]]:
+        rows = (
+            await session.execute(
+                select(
+                    MeasurementMedication.measurement_id,
+                    MeasurementMedication.medication_id,
+                ).order_by(MeasurementMedication.id)
+            )
+        ).all()
+        return [(row[0], row[1]) for row in rows]
+
+    async def test_creates_link_per_medication(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        await service.link_measurement_intake(
+            session, user, measurement_id, [m.id for m in meds]
+        )
+        await session.commit()
+        assert sorted(await self._links(session)) == [
+            (measurement_id, meds[0].id),
+            (measurement_id, meds[1].id),
+        ]
+
+    async def test_idempotent_no_duplicates(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Повторное «Готово» дублей связей не создаёт (§7.2)."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        await service.link_measurement_intake(session, user, measurement_id, [meds[0].id])
+        await service.link_measurement_intake(session, user, measurement_id, [meds[0].id])
+        await session.commit()
+        assert await self._links(session) == [(measurement_id, meds[0].id)]
+
+    async def test_per_measurement_not_per_day(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Связь — с конкретной записью: второе измерение за сутки получает свою (§4.11)."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        first_id = await _add_measurement(session, user)
+        second_id = await _add_measurement(session, user)
+        await service.link_measurement_intake(session, user, first_id, [meds[0].id])
+        await service.link_measurement_intake(session, user, second_id, [meds[0].id])
+        await session.commit()
+        assert await self._links(session) == [
+            (first_id, meds[0].id),
+            (second_id, meds[0].id),
+        ]
+
+    async def test_foreign_and_unknown_ids_ignored(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Чужие и удалённые id лекарств тихо игнорируются (§7.1)."""
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        foreign_meds = await _add_med(session, other)
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        await service.link_measurement_intake(
+            session, user, measurement_id, [foreign_meds[0].id, 999]
+        )
+        await session.commit()
+        assert await self._links(session) == []
+
+    async def test_foreign_measurement_ignored(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Чужая или удалённая запись измерения — тихо без связей (§7.1)."""
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        meds = await _add_med(session, user)
+        await session.flush()
+        foreign_measurement_id = await _add_measurement(session, other)
+        await service.link_measurement_intake(
+            session, user, foreign_measurement_id, [meds[0].id]
+        )
+        await service.link_measurement_intake(session, user, 999, [meds[0].id])
+        await session.commit()
+        assert await self._links(session) == []
+
+    async def test_empty_selection_noop(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        measurement_id = await _add_measurement(session, user)
+        await service.link_measurement_intake(session, user, measurement_id, [])
+        await session.commit()
+        assert await self._links(session) == []
+
+
+class TestIntakeLabelsByMeasurement:
+    """Подписи отмеченных приёмов для «Истории записей» (§4.11, §16.2)."""
+
+    async def test_labels_format_and_order(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Подписи `fmt_med_item` в порядке `list_medications` (по названию)."""
+        losartan = await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        amlodipine = await service.add_medication(session, user, "Амлодипин", "", ("evening",))
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        await service.link_measurement_intake(
+            session, user, measurement_id, [losartan[0].id, amlodipine[0].id]
+        )
+        await session.commit()
+        labels = await service.intake_labels_by_measurement(
+            session, user, [measurement_id]
+        )
+        assert labels == {measurement_id: ["Амлодипин", "Лозартан 50 мг"]}
+
+    async def test_without_links_absent(self, session: AsyncSession, user: User) -> None:
+        measurement_id = await _add_measurement(session, user)
+        await session.commit()
+        labels = await service.intake_labels_by_measurement(
+            session, user, [measurement_id]
+        )
+        assert labels == {}
+
+    async def test_empty_ids(self, session: AsyncSession, user: User) -> None:
+        assert await service.intake_labels_by_measurement(session, user, []) == {}
+
+    async def test_foreign_links_excluded(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Чужие связи в результат не попадают (§7.1)."""
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        foreign_meds = await _add_med(session, other)
+        await session.flush()
+        foreign_measurement_id = await _add_measurement(session, other)
+        await service.link_measurement_intake(
+            session, other, foreign_measurement_id, [foreign_meds[0].id]
+        )
+        await session.commit()
+        labels = await service.intake_labels_by_measurement(
+            session, user, [foreign_measurement_id]
+        )
+        assert labels == {}

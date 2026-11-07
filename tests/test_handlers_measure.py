@@ -20,7 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import keyboards, texts
 from bot.handlers import measure
 from bot.models import Measurement as MeasurementModel
-from bot.models import Medication, MedicationLog
+from bot.models import Medication, MedicationLog, MeasurementMedication
 from bot.models import User as UserModel
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
@@ -1116,9 +1116,9 @@ class TestMedsMultiselect:
 
     async def test_done_logs_taken(self, session, edit, cb_answer) -> None:
         med_id = await add_med(session, name="Лозартан", dosage="50 мг", slot="morning")
-        await save_draft(session, make_state())
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: [med_id]})
+        await state.set_data({measure.M_ID: measurement_id, measure.M_MED_CHECKED: [med_id]})
         await call(
             measure.cb_med_done,
             callback=make_callback("m:med:done", make_message()),
@@ -1138,13 +1138,22 @@ class TestMedsMultiselect:
             "morning",
             med_id,
         )
+        # Отмеченный приём связан с записью — перечень для истории (§4.11).
+        links = (
+            await session.execute(
+                select(MeasurementMedication).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert [(link.measurement_id, link.medication_id) for link in links] == [
+            (measurement_id, med_id)
+        ]
 
     async def test_done_twice_logs_once(self, session, edit, cb_answer) -> None:
-        """Двойное «Готово» = один набор логов за локальные сутки (§6.3, §7.2)."""
+        """Двойное «Готово» = один набор логов и одна связь (§6.3, §7.2)."""
         med_id = await add_med(session)
-        await save_draft(session, make_state())
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: [med_id]})
+        await state.set_data({measure.M_ID: measurement_id, measure.M_MED_CHECKED: [med_id]})
         await call(
             measure.cb_med_done,
             callback=make_callback("m:med:done", make_message()),
@@ -1165,6 +1174,12 @@ class TestMedsMultiselect:
         ).scalars().all()
         assert len(logs) == 1
         assert edit.call_args.args[0] == texts.fmt_meds_intake(["Лозартан 50 мг"])
+        links = (
+            await session.execute(
+                select(MeasurementMedication).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert len(links) == 1  # связь с записью дублей не создаёт (§4.11)
 
     async def test_done_all_foreign_ids(self, session, edit, cb_answer) -> None:
         await save_draft(session, make_state())
@@ -1179,6 +1194,8 @@ class TestMedsMultiselect:
         cb_answer.assert_awaited_once_with(texts.MEDS_INTAKE_EMPTY)
         logs = (await session.execute(select(MedicationLog))).scalars().all()
         assert logs == []
+        links = (await session.execute(select(MeasurementMedication))).scalars().all()
+        assert links == []
 
     async def test_done_without_draft_goes_to_menu(self, edit, cb_answer) -> None:
         state = make_state()
