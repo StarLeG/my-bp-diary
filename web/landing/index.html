@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Дневник гипертоника — дневник давления в Telegram</title>
-  <meta name="description" content="Личный дневник давления в Telegram: запись за 2 нажатия, напоминания о лекарствах, сводка для врача. Бесплатно, без рекламы.">
+  <meta name="description" content="Личный дневник давления в Telegram: быстрая запись, напоминания о лекарствах, сводка для врача. Бесплатно, без рекламы.">
   <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💓</text></svg>">
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -71,8 +71,8 @@
             который <span class="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-sky-500">не мешает жить</span>
           </h1>
           <p class="mt-6 text-lg md:text-xl text-slate-600 leading-relaxed max-w-xl">
-            Запись давления — за 2 нажатия. Напоминания о лекарствах и повторных
-            замерах. Сводка и CSV для врача.
+            Запись давления — цифрой в чат или набором как на калькуляторе.
+            Напоминания о лекарствах и повторных замерах. Сводка и CSV для врача.
           </p>
           <div class="mt-8 flex flex-wrap items-center gap-4">
             <a class="inline-flex items-center gap-2.5 bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-full shadow-xl shadow-blue-600/30 transition hover:-translate-y-0.5"
@@ -116,7 +116,7 @@
                 <p class="text-sm font-medium">Записать давление</p>
               </div>
               <div class="bg-white rounded-2xl rounded-tl-md px-4 py-3 shadow-sm border border-slate-100">
-                <p class="text-sm text-slate-700">✅ 130/85, пульс 70. Записано.</p>
+                <p class="text-sm text-slate-700">✅ Записано<br>Систолическое: 130<br>Диастолическое: 85<br>Пульс: 70</p>
                 <div class="mt-2.5 flex flex-wrap gap-1.5">
                   <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1">✏️ Изменить</span>
                   <span class="text-xs bg-slate-100 text-slate-600 rounded-full px-2.5 py-1">Добавить заметку</span>
@@ -146,7 +146,7 @@
             <h3 class="text-lg font-semibold text-slate-900 mb-2">Забываете мерить?</h3>
             <p class="text-slate-600 leading-relaxed">
               Бот сам напомнит утром, днём и вечером — в удобное вам время.
-              Одно нажатие — и давление записано.
+              Наберите цифры — и давление записано.
             </p>
           </article>
 
@@ -183,7 +183,7 @@
             <span class="absolute top-6 right-6 text-5xl font-extrabold text-blue-100 leading-none select-none" aria-hidden="true">1</span>
             <span class="inline-flex w-12 h-12 rounded-2xl bg-blue-600 text-white items-center justify-center text-2xl shadow-lg shadow-blue-600/30 mb-5">✍️</span>
             <h3 class="text-lg font-semibold text-slate-900 mb-2">Записывайте</h3>
-            <p class="text-slate-600 leading-relaxed">Систолическое, диастолическое, пульс — кнопками, за пару секунд.</p>
+            <p class="text-slate-600 leading-relaxed">Систолическое, диастолическое, пульс — набором цифр как на калькуляторе или числом в чат, за пару секунд.</p>
           </li>
 
           <li class="relative bg-white rounded-2xl border border-slate-100 shadow-sm p-7">
@@ -356,19 +356,19 @@
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
-              <p>Запись занимает пару секунд: пара нажатий — и готово.</p>
+              <p>Запись занимает пару секунд: наберите цифры — или просто напишите их сообщением.</p>
               <ol class="space-y-2 list-decimal pl-5">
                 <li>Нажмите <b class="text-slate-800">«Записать давление»</b> — в меню или в напоминании.</li>
-                <li>Выберите систолическое (верхнее) — кнопки от 100 до 200 с шагом 5. Нужного нет? Жмите <b class="text-slate-800">«Другое»</b> и вводите число от 70 до 260.</li>
-                <li>Выберите диастолическое (нижнее) — от 60 до 120 с шагом 5; <b class="text-slate-800">«Другое»</b> — от 40 до 160.</li>
-                <li>Пульс — от 50 до 120 с шагом 5, <b class="text-slate-800">«Другое»</b> — от 30 до 220, или <b class="text-slate-800">«Пропустить»</b>.</li>
+                <li>Систолическое (верхнее) — набирайте цифры на кнопках как на калькуляторе (от 70 до 260) или напишите число сообщением. <b class="text-slate-800">«⌫»</b> сотрёт цифру, <b class="text-slate-800">«C»</b> очистит ввод, <b class="text-slate-800">«Готово»</b> подтвердит.</li>
+                <li>Диастолическое (нижнее) — так же, от 40 до 160. Оно всегда ниже систолического: если цифры перепутаны, бот вежливо попросит проверить.</li>
+                <li>Пульс — от 30 до 220, либо <b class="text-slate-800">«Пропустить»</b>.</li>
               </ol>
-              <p>Бот подтвердит: «✅ 130/85, пульс 70. Записано.»</p>
-              <p>Ошиблись? Сразу после сохранения нажмите <b class="text-slate-800">«✏️ Изменить»</b> — и введите значения заново. Исправить последнюю запись можно и позже: «Дневник за сегодня» → <b class="text-slate-800">«✏️ Изменить последнюю»</b>. Бот подтвердит: «✅ 130/85, пульс 70. Обновлено.»</p>
+              <p>Бот покажет введённое и подтвердит: «✅ Записано. Систолическое: 130. Диастолическое: 85. Пульс: 70.»</p>
+              <p>Ошиблись? Нажмите <b class="text-slate-800">«✏️ Изменить»</b> — и введите значения заново. Исправить последнюю запись можно и позже: «Дневник за сегодня» → <b class="text-slate-800">«✏️ Изменить последнюю»</b>. Бот ответит: «✅ Обновлено» и покажет обновлённые данные.</p>
               <p>После записи — всё по желанию, без навязчивости:</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Добавить заметку»</b> — любая мысль до 500 символов: таблетка, погода, самочувствие.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Приняли лекарство?»</b> — «Да», «Нет» или «Пропустил».</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Приняли лекарство?»</b> — «Да» или «Нет». При «Да» бот покажет список ваших лекарств — отметьте, какие приняли, и нажмите <b class="text-slate-800">«Готово»</b>: приём попадёт в статистику приверженности.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Самочувствие»</b> — «Норма», «Головная боль», «Слабость» или «Другое».</span></li>
               </ul>
               <p>Не хотите отвечать — просто пропустите, бот не будет переспрашивать. Если ответить «Да» на «Приняли лекарство?», бот напомнит повторить измерение через паузу (по умолчанию час) — так видно, помогло ли лекарство.</p>
@@ -424,7 +424,7 @@
                 <span class="text-lg leading-none" aria-hidden="true">⚠️</span>
                 <p class="text-sm text-slate-700">У кризисных препаратов нет напоминаний, и в приверженность они не входят. Это SOS-средство, а не расписание — бот не будет звать вас принимать его «по плану».</p>
               </div>
-              <p>Отмечайте приём прямо в напоминании — «Принял всё ✓» или «Частично…». В «Статистике» бот посчитает приверженность: «Лекарства: принято X из Y приёмов за период» — по утрам, обедам и вечерам.</p>
+              <p>Отмечайте приём прямо в напоминании — «Принял всё ✓» или «Частично…» — или при записи давления: «Приняли лекарство?» → «Да» → отметьте, какие именно. В «Статистике» бот посчитает приверженность: «Лекарства: принято X из Y приёмов за период» — по утрам, обедам и вечерам.</p>
             </div>
           </details>
 
