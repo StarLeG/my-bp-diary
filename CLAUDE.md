@@ -39,7 +39,9 @@ Pydantic для валидации, python-dotenv для конфига. Код 
   systolic, diastolic, pulse, medication_taken, feeling, note), `reminders` (user_id, type,
   local_time, next_trigger_time, enabled, last_sent_date, measurement_id), `medications`
   (name, dosage, slot; UNIQUE(user_id, name, slot)), `medication_logs` (medication_id,
-  timestamp, status: taken|skipped|partial, slot), `web_users` (user_id UNIQUE, email,
+  timestamp, status: taken|skipped|partial, slot), `measurement_medications`
+  (measurement_id, medication_id; UNIQUE(measurement_id, medication_id) — отмеченные
+  приёмы записи, перечень для «Истории записей» кабинета), `web_users` (user_id UNIQUE, email,
   password_hash — Argon2id), `web_sessions` (token PK, web_user_id FK, created_at,
   expires_at — сессии кабинета на 7 дней). Расписание напоминаний живёт только в `reminders` (слоты
   morning/noon/evening + med_remeasure; полей `users.reminder_*` нет).
