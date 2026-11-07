@@ -45,6 +45,44 @@ class TestSettingsValidation:
     def test_token_is_stripped(self) -> None:
         assert make_settings(bot_token="  tok  ").bot_token == "tok"
 
+    def test_proxy_default_empty(self) -> None:
+        assert make_settings().bot_proxy == ""
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "http://127.0.0.1:8080",
+            "https://user:pass@proxy.local:3128",
+            "http://proxy.local:3128",
+            "socks5://127.0.0.1:1080",
+            "socks5h://user:pass@proxy.local:1080",
+        ],
+    )
+    def test_proxy_valid(self, raw: str) -> None:
+        assert make_settings(bot_proxy=raw).bot_proxy == raw
+
+    def test_proxy_stripped(self) -> None:
+        assert make_settings(bot_proxy="  http://p.local:1  ").bot_proxy == "http://p.local:1"
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["proxy.local:8080", "ftp://p.local", "http://", "   x"],
+    )
+    def test_proxy_invalid(self, raw: str) -> None:
+        with pytest.raises(ValidationError):
+            make_settings(bot_proxy=raw)
+
+    def test_proxy_error_hides_credentials(self) -> None:
+        """Текст ошибки не раскрывает пароль прокси (§3, безопасность).
+
+        `str(ValidationError)` Pydantic v2 всё равно содержит исходный ввод
+        (input), поэтому целиком его не логируют; наружу уходит только loc —
+        см. `main()`.
+        """
+        with pytest.raises(ValidationError) as exc_info:
+            make_settings(bot_proxy="ftp://user:secretpw@host:21")
+        assert "secretpw" not in exc_info.value.errors()[0]["msg"]
+
     def test_invalid_timezone_rejected(self) -> None:
         with pytest.raises(ValidationError):
             make_settings(default_timezone="Minsk")
@@ -100,6 +138,7 @@ class TestButtonsVisibility:
 class TestGetSettings:
     def test_reads_environment(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setenv("BOT_TOKEN", "env-token")
+        monkeypatch.setenv("BOT_PROXY", "http://proxy.local:3128")
         monkeypatch.setenv("SUPPORT_URL", "https://support.example")
         monkeypatch.setenv("AUTHOR_CONTACT", "@env-author")
         monkeypatch.setenv("DB_PATH", "tmp/x.sqlite3")
@@ -111,6 +150,7 @@ class TestGetSettings:
         try:
             settings = get_settings()
             assert settings.bot_token == "env-token"
+            assert settings.bot_proxy == "http://proxy.local:3128"
             assert settings.support_url == "https://support.example"
             assert settings.author_contact == "@env-author"
             assert settings.db_path == "tmp/x.sqlite3"

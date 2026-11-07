@@ -10,6 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot import texts
 from bot.middlewares import (
+    CLEANUP_INTERVAL,
     DEBOUNCE_SECONDS,
     SESSION_KEY,
     THROTTLE_SECONDS,
@@ -204,6 +205,32 @@ class TestDebounceMiddleware:
         middleware = DebounceMiddleware(clock=FakeClock())
         assert await middleware(handler, make_callback(None), {}) == "ok"
 
+    async def test_stale_entries_dropped(self, answer_mock) -> None:
+        """Словарь не растёт: записи старше окна выбрасываются при чистке (§7.2)."""
+        handler = AsyncMock(return_value="ok")
+        clock = FakeClock()
+        middleware = DebounceMiddleware(clock=clock)
+        await middleware(handler, make_callback("m:med:yes", user_id=1), {})
+        await middleware(handler, make_callback("m:med:yes", user_id=2), {})
+        assert len(middleware._last_seen) == 2
+        clock.advance(CLEANUP_INTERVAL + DEBOUNCE_SECONDS)
+        await middleware(handler, make_callback("m:med:no", user_id=3), {})
+        assert list(middleware._last_seen) == [(3, "m:med:no")]
+
+    async def test_fresh_entries_survive_cleanup(self, answer_mock) -> None:
+        """Чистка не трогает записи внутри окна — подавление повтора не ломается."""
+        handler = AsyncMock(return_value="ok")
+        clock = FakeClock()
+        middleware = DebounceMiddleware(clock=clock)
+        clock.advance(CLEANUP_INTERVAL - 0.5)
+        await middleware(handler, make_callback("m:med:yes", user_id=1), {})
+        clock.advance(1.0)  # окно чистки наступило, запись user1 младше окна
+        await middleware(handler, make_callback("m:med:yes", user_id=2), {})
+        assert (1, "m:med:yes") in middleware._last_seen
+        assert len(middleware._last_seen) == 2
+        # повтор user1 всё ещё глушится: запись пережила чистку
+        assert await middleware(handler, make_callback("m:med:yes", user_id=1), {}) is None
+
 
 # ─────────────────────────── ThrottleMiddleware ───────────────────────────
 
@@ -260,3 +287,15 @@ class TestThrottleMiddleware:
         handler = AsyncMock(return_value="ok")
         middleware = ThrottleMiddleware(clock=FakeClock())
         assert await middleware(handler, make_callback(None), {}) == "ok"
+
+    async def test_stale_entries_dropped(self, answer_mock) -> None:
+        """Словарь не растёт: записи старше окна выбрасываются при чистке (§7.2)."""
+        handler = AsyncMock(return_value="ok")
+        clock = FakeClock()
+        middleware = ThrottleMiddleware(clock=clock)
+        await middleware(handler, make_callback("menu:stats", user_id=1), {})
+        await middleware(handler, make_callback("menu:stats", user_id=2), {})
+        assert len(middleware._last_seen) == 2
+        clock.advance(CLEANUP_INTERVAL + THROTTLE_SECONDS)
+        await middleware(handler, make_callback("menu:stats", user_id=3), {})
+        assert list(middleware._last_seen) == [3]

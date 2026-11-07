@@ -14,6 +14,7 @@ import sys
 from dataclasses import dataclass
 
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.utils.token import TokenValidationError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -91,7 +92,10 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     Исключения:
         TokenValidationError: `BOT_TOKEN` неверного формата.
     """
-    bot = Bot(token=settings.bot_token)  # валидация формата токена, без сети
+    # `BOT_PROXY` — прокси для Telegram API, HTTP(S) или SOCKS (может содержать
+    # пароль, поэтому в логи не выводится). Пусто = обычная сессия без прокси.
+    session = AiohttpSession(proxy=settings.bot_proxy) if settings.bot_proxy else None
+    bot = Bot(token=settings.bot_token, session=session)  # валидация формата токена, без сети
     engine = create_engine(settings.db_path)
     session_factory = create_session_factory(engine)
     if scheduler is None:

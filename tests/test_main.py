@@ -13,6 +13,7 @@ from pathlib import Path
 
 import pytest
 from aiogram import Bot, Dispatcher
+from aiogram.client.session.aiohttp import AiohttpSession
 from aiogram.utils.token import TokenValidationError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -102,6 +103,22 @@ class TestBuildApp:
         assert isinstance(app.dp, Dispatcher)
         assert isinstance(app.scheduler, AsyncIOScheduler)
         assert isinstance(app.reminders, RemindersService)
+
+    def test_bot_proxy_sets_session_proxy(self, tmp_path: Path) -> None:
+        """`BOT_PROXY` подхватывается: сессия Telegram API идёт через прокси (§3)."""
+        settings = Settings(
+            bot_token=FAKE_TOKEN,
+            db_path=str(tmp_path / "bot.sqlite3"),
+            bot_proxy="http://127.0.0.1:8080",
+        )
+        app = build_app(settings)
+        assert isinstance(app.bot.session, AiohttpSession)
+        assert app.bot.session._proxy == "http://127.0.0.1:8080"
+
+    def test_bot_without_proxy_uses_default_session(self, settings: Settings) -> None:
+        """Пустой `BOT_PROXY` — обычная сессия без прокси."""
+        app = build_app(settings)
+        assert app.bot.session._proxy is None
 
     def test_reminders_in_workflow_data(self, settings: Settings) -> None:
         app = build_app(settings)

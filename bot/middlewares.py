@@ -11,8 +11,8 @@
 
 Время берётся из инжектируемого `clock` (по умолчанию `time.monotonic`) —
 тесты управляют временем без sleep. Служебные словари живут в одном процессе
-и используются только для защиты от двойных нажатий (память: один float на
-пользователя).
+и используются только для защиты от двойных нажатий; записи старше окна
+периодически выбрасываются (память не растёт).
 """
 from __future__ import annotations
 
@@ -31,6 +31,9 @@ DEBOUNCE_SECONDS = 1.5
 #: Окно общего throttle для остальных callback'ов (секунды).
 THROTTLE_SECONDS = 1.0
 
+#: Как часто чистить служебные словари от записей старше окна (секунды).
+CLEANUP_INTERVAL = 60.0
+
 #: Callback-префикс флоу записи давления (`m:key:5`, `m:cancel`, …).
 FLOW_PREFIX = "m:"
 
@@ -38,6 +41,17 @@ FLOW_PREFIX = "m:"
 SESSION_KEY = "session"
 
 Handler = Callable[[TelegramObject, dict[str, Any]], Awaitable[Any]]
+
+
+def _drop_stale(seen: dict[Any, float], now: float, ttl: float) -> None:
+    """Выбросить записи старше `ttl`: они уже не подавят повтор.
+
+    Вызывается не чаще `CLEANUP_INTERVAL` (см. классы ниже), между чистками
+    словарь живёт без изменений.
+    """
+    cutoff = now - ttl
+    for key in [key for key, stamp in seen.items() if stamp < cutoff]:
+        del seen[key]
 
 
 class DbSessionMiddleware(BaseMiddleware):
@@ -84,6 +98,7 @@ class DebounceMiddleware(BaseMiddleware):
         self._seconds = seconds
         self._clock = clock
         self._last_seen: dict[tuple[int, str], float] = {}
+        self._last_cleanup = clock()
 
     async def __call__(
         self, handler: Handler, event: TelegramObject, data: dict[str, Any]
@@ -102,6 +117,9 @@ class DebounceMiddleware(BaseMiddleware):
             await event.answer(texts.DEBOUNCE_NOTICE)
             return None
         self._last_seen[key] = now
+        if now - self._last_cleanup >= CLEANUP_INTERVAL:
+            self._last_cleanup = now
+            _drop_stale(self._last_seen, now, self._seconds)
         return await handler(event, data)
 
 
@@ -116,6 +134,7 @@ class ThrottleMiddleware(BaseMiddleware):
         self._seconds = seconds
         self._clock = clock
         self._last_seen: dict[int, float] = {}
+        self._last_cleanup = clock()
 
     async def __call__(
         self, handler: Handler, event: TelegramObject, data: dict[str, Any]
@@ -132,4 +151,7 @@ class ThrottleMiddleware(BaseMiddleware):
             await event.answer()  # снять «часики», без текста
             return None
         self._last_seen[event.from_user.id] = now
+        if now - self._last_cleanup >= CLEANUP_INTERVAL:
+            self._last_cleanup = now
+            _drop_stale(self._last_seen, now, self._seconds)
         return await handler(event, data)

@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 import os
 from functools import lru_cache
+from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 from pydantic import BaseModel, field_validator
@@ -75,6 +76,13 @@ class Settings(BaseModel):
     bot_token: str
     """Токен бота от @BotFather. Только из окружения, не логируется."""
 
+    bot_proxy: str = ""
+    """Прокси для Telegram API (`BOT_PROXY`): HTTP(S) или SOCKS. Пусто = без прокси.
+
+    Может содержать учётные данные (`http://user:pass@host:port`) — как секрет,
+    не логируется и не попадает в сообщения об ошибках.
+    """
+
     support_url: str = ""
     """Ссылка на страницу поддержки. Пусто или плейсхолдер → кнопка скрыта."""
 
@@ -124,6 +132,26 @@ class Settings(BaseModel):
         value = value.strip()
         if not value:
             raise ValueError("BOT_TOKEN не задан")
+        return value
+
+    @field_validator("bot_proxy")
+    @classmethod
+    def _validate_proxy(cls, value: str) -> str:
+        """Прокси — URL `scheme://[user:pass@]host:port`; пусто = без прокси.
+
+        Схемы: http, https, socks4, socks5, socks5h. Значение может содержать
+        пароль, поэтому в текст ошибки оно не включается.
+        """
+        value = value.strip()
+        if not value:
+            return ""
+        parsed = urlparse(value)
+        schemes = {"http", "https", "socks4", "socks5", "socks5h"}
+        if parsed.scheme not in schemes or not parsed.netloc:
+            raise ValueError(
+                "BOT_PROXY: нужен URL вида http://user:pass@host:port "
+                "(или socks5://host:port)"
+            )
         return value
 
     @field_validator("default_timezone")
@@ -198,6 +226,7 @@ def get_settings() -> Settings:
     load_dotenv()
     return Settings(
         bot_token=os.getenv("BOT_TOKEN", ""),
+        bot_proxy=os.getenv("BOT_PROXY", ""),
         support_url=os.getenv("SUPPORT_URL", ""),
         author_contact=os.getenv("AUTHOR_CONTACT", ""),
         db_path=os.getenv("DB_PATH", "data/bot.sqlite3"),
