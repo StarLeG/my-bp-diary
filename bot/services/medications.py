@@ -15,7 +15,10 @@
 - мультивыбор «Какие лекарства приняли?» при записи давления (`log_manual_intake`)
   пишет по одной записи `medication_logs` (`status='taken'`, слот — из строки
   лекарства) на каждый отмеченный приём; идемпотентность — те же локальные сутки
-  (§6.3, §7.2);
+  (§6.3, §7.2); «Готово» дополнительно связывает отмеченные приёмы с записью
+  измерения (`link_measurement_intake` → `measurement_medications`, §4.11) —
+  перечень для «Истории записей» кабинета (§16.2); связь идемпотентна
+  (UNIQUE пары «запись–приём»);
 - детальный трекинг — только здесь: «Приняли лекарство?» → «Да» без выбора
   лекарств в `medication_logs` ничего не пишет (только флаг
   `measurements.medication_taken`, §6.3).
@@ -32,7 +35,7 @@ from sqlalchemy import exists, func, insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import Medication, MedicationLog, User
+from bot.models import Measurement, Medication, MedicationLog, MeasurementMedication, User
 from bot.services.measurements import day_bounds_utc, utcnow
 
 #: Все слоты приёма лекарств: слоты давления + препарат на случай кризиса.
@@ -479,6 +482,91 @@ async def log_manual_intake(
             result.taken.append(texts.fmt_med_item(medication.name, medication.dosage))
         await session.flush()
     result.already_logged = new_logs == 0
+    return result
+
+
+async def link_measurement_intake(
+    session: AsyncSession,
+    user: User,
+    measurement_id: int,
+    medication_ids: Iterable[int],
+) -> None:
+    """Связать отмеченные лекарства с записью измерения (§4.11, §6.3).
+
+    По одной строке `measurement_medications` на отмеченный приём — перечень
+    для «Истории записей» кабинета (§16.2). Идемпотентно (§7.2): повторное
+    «Готово» дублей не создаёт — `INSERT … WHERE NOT EXISTS` по паре
+    (measurement_id, medication_id) атомарно под `_current_intake_lock`,
+    UNIQUE пары продублирован на уровне БД. Чужие и удалённые id лекарств,
+    а также чужая или удалённая запись измерения, тихо игнорируются.
+    """
+    wanted = set(medication_ids)
+    if not wanted:
+        return
+    owner = (
+        await session.execute(
+            select(Measurement.id).where(
+                Measurement.id == measurement_id, Measurement.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    if owner is None:
+        return  # чужая или удалённая запись
+    med_ids = list(
+        (
+            await session.execute(
+                select(Medication.id)
+                .where(Medication.user_id == user.id, Medication.id.in_(wanted))
+                .order_by(Medication.name, Medication.slot)
+            )
+        ).scalars()
+    )
+    async with _current_intake_lock():
+        for med_id in med_ids:
+            duplicate = exists(
+                select(literal(1)).where(
+                    MeasurementMedication.measurement_id == measurement_id,
+                    MeasurementMedication.medication_id == med_id,
+                )
+            )
+            stmt = insert(MeasurementMedication).from_select(
+                ["measurement_id", "medication_id"],
+                select(literal(measurement_id), literal(med_id)).where(~duplicate),
+            )
+            await session.execute(stmt)
+        await session.flush()
+
+
+async def intake_labels_by_measurement(
+    session: AsyncSession,
+    user: User,
+    measurement_ids: Iterable[int],
+) -> dict[int, list[str]]:
+    """Подписи отмеченных приёмов по записям измерения (§4.11, §16.2).
+
+    {id записи: [«Лозартан 50 мг», …]} в порядке `list_medications` (по
+    названию и слоту). Записи без отмеченных приёмов в результат не
+    попадают; чужие связи отсекаются по владельцу лекарства.
+    """
+    wanted = set(measurement_ids)
+    if not wanted:
+        return {}
+    rows = await session.execute(
+        select(
+            MeasurementMedication.measurement_id, Medication.name, Medication.dosage
+        )
+        .join(Medication, Medication.id == MeasurementMedication.medication_id)
+        .where(
+            MeasurementMedication.measurement_id.in_(wanted),
+            Medication.user_id == user.id,
+        )
+        .order_by(
+            MeasurementMedication.measurement_id, Medication.name, Medication.slot
+        )
+    )
+    result: dict[int, list[str]] = {}
+    for measurement_id, name, dosage in rows.all():
+        result.setdefault(measurement_id, []).append(texts.fmt_med_item(name, dosage))
     return result
 
 

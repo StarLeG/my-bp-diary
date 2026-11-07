@@ -59,6 +59,31 @@ SLOT_ORDER = ("morning", "noon", "evening")
 #: Человекочитаемые отметки приёма лекарства в истории.
 MEDICATION_TAKEN_LABELS = {True: "Принято", False: "Пропущено", None: "—"}
 
+
+def _medication_cell(flag: bool | None, intake: list[str]) -> str:
+    """Ячейка «Лекарство» в «Истории записей» (SPEC.md, раздел 16.2).
+
+    Есть отмеченные приёмы (`measurement_medications`, §4.11) — перечень:
+    «Принято: Лозартан 50 мг, Амлодипин 5 мг»; нет — статус флага
+    «Принято» / «Пропущено» / «—» (`measurements.medication_taken`).
+    """
+    if intake:
+        return f"{MEDICATION_TAKEN_LABELS[True]}: {', '.join(intake)}"
+    return MEDICATION_TAKEN_LABELS[flag]
+
+
+async def _medication_cells(
+    db: AsyncSession, user: User, measurements: list[Measurement]
+) -> dict[int, str]:
+    """Ячейки «Лекарство» для всех записей истории одним запросом связей (§16.2)."""
+    intake = await medications_service.intake_labels_by_measurement(
+        db, user, [m.id for m in measurements]
+    )
+    return {
+        m.id: _medication_cell(m.medication_taken, intake.get(m.id, []))
+        for m in measurements
+    }
+
 _BASE_DIR = Path(__file__).resolve().parent
 _templates = Jinja2Templates(directory=str(_BASE_DIR / "templates"))
 
@@ -524,6 +549,7 @@ def create_app(
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
+        medication_cells = await _medication_cells(db, user, measurements)
         medications = await medications_service.list_medications(db, user)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         reminders = list(
@@ -547,7 +573,7 @@ def create_app(
                 "med_slot_order": medications_service.SLOTS,
                 "slot_labels": texts.SLOT_LABELS,
                 "feeling_labels": texts.FEELING_LABELS,
-                "medication_labels": MEDICATION_TAKEN_LABELS,
+                "medication_cells": medication_cells,
                 "measurements": measurements,
                 "summary": summary,
                 "medications": medications,
@@ -948,6 +974,7 @@ def create_app(
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
+        medication_cells = await _medication_cells(db, user, measurements)
         notes = await doctor_service.notes_for_patient(db, user.id)
         csrf_token = csrf.issue()
         response = _templates.TemplateResponse(
@@ -959,7 +986,7 @@ def create_app(
                 "user": user,
                 "user_zone": ZoneInfo(user.timezone),
                 "feeling_labels": texts.FEELING_LABELS,
-                "medication_labels": MEDICATION_TAKEN_LABELS,
+                "medication_cells": medication_cells,
                 "measurements": measurements,
                 "summary": summary,
                 "notes": notes,

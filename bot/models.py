@@ -237,6 +237,32 @@ class MedicationLog(Base):
     )
 
 
+class MeasurementMedication(Base):
+    """Связь «измерение ↔ отмеченные лекарства» (SPEC.md, раздел 4.11).
+
+    Создаётся «Готово» мультивыбора «Какие лекарства приняли?» (§6.3):
+    перечень отмеченных приёмов показывается в «Истории записей» кабинета
+    (§16.2). Журнал приёмов за сутки — отдельно, в `medication_logs` (§4.5).
+    """
+
+    __tablename__ = "measurement_medications"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    measurement_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("measurements.id", ondelete="CASCADE"), nullable=False
+    )
+    medication_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("medications.id", ondelete="CASCADE"), nullable=False
+    )
+
+    __table_args__ = (
+        # Один приём отмечается у записи один раз (идемпотентность «Готово»).
+        UniqueConstraint(
+            "measurement_id", "medication_id", name="uq_measurement_medications_pair"
+        ),
+    )
+
+
 class WebUser(Base):
     """Учётная запись личного кабинета (SPEC.md, раздел 4.6).
 

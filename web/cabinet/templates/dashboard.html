@@ -192,7 +192,7 @@
                   <td data-label="Сист.">{{ m.systolic }}</td>
                   <td data-label="Диаст.">{{ m.diastolic }}</td>
                   <td data-label="Пульс">{{ m.pulse if m.pulse is not none else "—" }}</td>
-                  <td data-label="Лекарство">{{ medication_labels[m.medication_taken] }}</td>
+                  <td data-label="Лекарство">{{ medication_cells[m.id] }}</td>
                   <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
                   <td data-label="Заметка" class="note">{{ m.note or "" }}</td>
                 </tr>

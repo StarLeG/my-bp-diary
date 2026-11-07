@@ -591,8 +591,11 @@ async def cb_med_done(
 ) -> None:
     """«Готово»: по одной записи `medication_logs` на отмеченный приём (§6.3).
 
-    Повторное «Готово» за те же локальные сутки новые записи не создаёт
-    (§7.2) — идемпотентно. Ответ — «💊 Принято: …» + кнопки сводки.
+    Отмеченные приёмы связываются с записью измерения
+    (`measurement_medications`, §4.11) — перечень для «Истории записей»
+    кабинета (§16.2). Повторное «Готово» за те же локальные сутки новые
+    записи и связи не создаёт (§7.2) — идемпотентно. Ответ —
+    «💊 Принято: …» + кнопки сводки.
     """
     data = await state.get_data()
     if M_ID not in data:
@@ -605,6 +608,9 @@ async def cb_med_done(
     tg_id = callback.from_user.id
     user = await measurements_service.get_or_create_user(session, tg_id)
     result = await medications_service.log_manual_intake(session, user, checked)
+    await medications_service.link_measurement_intake(
+        session, user, data[M_ID], checked
+    )
     await session.commit()
     if not result.taken:  # все id чужие или удалённые
         await callback.answer(texts.MEDS_INTAKE_EMPTY)
