@@ -12,6 +12,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from bot import texts
+
 #: Допустимые значения самочувствия (SPEC.md, раздел 4.2).
 FeelingLiteral = Literal["normal", "headache", "weakness", "other"]
 
@@ -133,6 +135,18 @@ def validate_int(raw: str, lo: int, hi: int, label: str = "значение") ->
     if not lo <= number <= hi:
         raise ValueError(f"Нужно {label} от {lo} до {hi}, а получилось {number}")
     return number
+
+
+def validate_pair(systolic: int, diastolic: int) -> None:
+    """Проверить пару давлений: систолическое строго выше диастолического (§9).
+
+    Минимальная разница (пульсовое давление) не ограничивается.
+
+    Исключения:
+        ValueError: диастолическое не ниже систолического.
+    """
+    if diastolic >= systolic:
+        raise ValueError(texts.DIA_NOT_LOWER)
 
 
 def _clean_error(exc: ValidationError) -> str:

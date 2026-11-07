@@ -44,7 +44,6 @@ BTN_EDIT_LAST = "✏️ Изменить последнюю"
 
 BTN_MED_YES = "Да"
 BTN_MED_NO = "Нет"
-BTN_MED_SKIPPED = "Пропустил"
 BTN_NO_NEED = "Не надо"
 BTN_NOT_NOW = "Не сейчас"
 
@@ -115,20 +114,32 @@ ASK_SYSTOLIC = "Систолическое (верхнее)?"
 ASK_DIASTOLIC = "Диастолическое (нижнее)?"
 ASK_PULSE = "Пульс?"
 
-PROMPT_SYSTOLIC_OTHER = "Введите систолическое (верхнее) число от 70 до 260."
-PROMPT_DIASTOLIC_OTHER = "Введите диастолическое (нижнее) число от 40 до 160."
-PROMPT_PULSE_OTHER = "Введите пульс от 30 до 220."
+BTN_KEYPAD_BACKSPACE = "⌫"
+BTN_KEYPAD_CLEAR = "C"
+KEYPAD_ENTERED = "Введено: {value}"
+KEYPAD_ENTERED_EMPTY = "—"
+KEYPAD_HINT = "Можно также написать число сообщением."
+KEYPAD_EMPTY_INPUT = "Введите число"
+DIA_NOT_LOWER = (
+    "Диастолическое (нижнее) должно быть ниже систолического (верхнего) — "
+    "проверьте цифры."
+)
+
 PROMPT_NOTE = "Напишите заметку (до 500 символов)."
 PROMPT_FEELING_OTHER = "Коротко опишите самочувствие — сохраню в заметку."
 
-MEASUREMENT_SAVED = "✅ {measurement}. Записано."
-MEASUREMENT_SAVED_PULSE = "✅ {measurement}, пульс {pulse}. Записано."
-MEASUREMENT_UPDATED = "✅ {measurement}. Обновлено."
-MEASUREMENT_UPDATED_PULSE = "✅ {measurement}, пульс {pulse}. Обновлено."
+MEASUREMENT_SAVED = "✅ Записано"
+MEASUREMENT_UPDATED = "✅ Обновлено"
+SUMMARY_SYSTOLIC = "Систолическое: {value}"
+SUMMARY_DIASTOLIC = "Диастолическое: {value}"
+SUMMARY_PULSE = "Пульс: {value}"
 HIGH_PRESSURE_WARNING = "Эти значения стоит обсудить с врачом на ближайшем приёме."
 NOTE_SAVED = "Заметка сохранена"
 
 MED_ASK = "Приняли лекарство?"
+MEDS_INTAKE_ASK = "Какие лекарства приняли?"
+MEDS_INTAKE_DONE = "💊 Принято: {items}"
+MEDS_INTAKE_EMPTY = "Отметьте, что приняли"
 FEELING_ASK = "Как самочувствие?"
 MED_REMEASURE_PLANNED = "Напомню повторить измерение через {delay} минут."
 MED_REMEASURE_DISABLED = "Повтор измерения после лекарства выключен — включите в настройках, если нужен."
@@ -157,22 +168,33 @@ def fmt_measurement_short(systolic: int, diastolic: int, pulse: Optional[int] = 
     return result
 
 
-def fmt_saved(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
-    """Сообщение о сохранённом измерении (SPEC.md, раздел 6.3)."""
-    if pulse is None:
-        return MEASUREMENT_SAVED.format(measurement=fmt_measurement_short(systolic, diastolic))
-    return MEASUREMENT_SAVED_PULSE.format(
-        measurement=fmt_measurement_short(systolic, diastolic), pulse=pulse
+def _fmt_summary(header: str, systolic: int, diastolic: int, pulse: Optional[int]) -> str:
+    """Сводка введённых данных: значения — каждый на своей строке (§6.3)."""
+    pulse_str = str(pulse) if pulse is not None else KEYPAD_ENTERED_EMPTY
+    return "\n".join(
+        [
+            header,
+            SUMMARY_SYSTOLIC.format(value=systolic),
+            SUMMARY_DIASTOLIC.format(value=diastolic),
+            SUMMARY_PULSE.format(value=pulse_str),
+        ]
     )
+
+
+def fmt_saved(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
+    """Сводка после сохранения измерения (SPEC.md, раздел 6.3)."""
+    return _fmt_summary(MEASUREMENT_SAVED, systolic, diastolic, pulse)
 
 
 def fmt_updated(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
-    """Сообщение об обновлённой записи правки (SPEC.md, раздел 6.3)."""
-    if pulse is None:
-        return MEASUREMENT_UPDATED.format(measurement=fmt_measurement_short(systolic, diastolic))
-    return MEASUREMENT_UPDATED_PULSE.format(
-        measurement=fmt_measurement_short(systolic, diastolic), pulse=pulse
-    )
+    """Сводка после обновления записи правки (SPEC.md, раздел 6.3)."""
+    return _fmt_summary(MEASUREMENT_UPDATED, systolic, diastolic, pulse)
+
+
+def fmt_keypad_prompt(question: str, buffer: str) -> str:
+    """Экран калькулятора: вопрос, текущий набор и подсказка (SPEC.md, §6.3)."""
+    entered = buffer if buffer else KEYPAD_ENTERED_EMPTY
+    return f"{question}\n\n{KEYPAD_ENTERED.format(value=entered)}\n{KEYPAD_HINT}"
 
 
 def fmt_diary_line(
@@ -318,6 +340,16 @@ def fmt_slot_message(slot: str, medications: Sequence[str]) -> str:
 def fmt_med_item(name: str, dosage: str) -> str:
     """Лекарство в перечне: «Лозартан 50 мг»; без дозировки — просто «Лозартан»."""
     return f"{name} {dosage}".strip()
+
+
+def fmt_intake_item(name: str, dosage: str, slot: str) -> str:
+    """Приём в мультивыборе «Какие лекарства приняли?»: «Лозартан 50 мг · утро» (§6.3)."""
+    return f"{fmt_med_item(name, dosage)} · {SLOT_LABELS.get(slot, slot).lower()}"
+
+
+def fmt_meds_intake(taken: Sequence[str]) -> str:
+    """Итог мультивыбора приёмов: «💊 Принято: Лозартан 50 мг, Амлодипин 5 мг» (§6.3)."""
+    return MEDS_INTAKE_DONE.format(items=", ".join(taken))
 
 
 def fmt_meds_summary(taken: Sequence[str], skipped: Sequence[str]) -> str:

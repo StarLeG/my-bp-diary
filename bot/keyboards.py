@@ -13,6 +13,7 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPrevie
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot import texts
+from bot.models import Medication
 
 #: Максимальная длина callback_data в байтах (ограничение Telegram).
 CALLBACK_DATA_LIMIT = 64
@@ -78,27 +79,6 @@ SLOT_TIME_PRESETS = {
     "evening": ("20:00", "21:00", "22:00"),
 }
 
-#: Пределы числовых кнопок записи (SPEC.md, раздел 6.3).
-SYSTOLIC_RANGE = range(100, 201, 5)
-DIASTOLIC_RANGE = range(60, 121, 5)
-PULSE_RANGE = range(50, 121, 5)
-
-
-def _rows(values: Sequence[object], per_row: int = 4) -> list[list[InlineKeyboardButton]]:
-    """Разбить кнопки на ряды по `per_row` штук."""
-    return [list(values[i : i + per_row]) for i in range(0, len(values), per_row)]
-
-
-def _numbers(
-    values: Iterable[int], prefix: str
-) -> list[InlineKeyboardButton]:
-    """Числовые кнопки шага 5: callback_data вида `<prefix>:<число>`."""
-    return [
-        InlineKeyboardButton(text=str(value), callback_data=f"{prefix}:{value}")
-        for value in values
-    ]
-
-
 # ─────────────────────────── Главное меню ───────────────────────────
 
 
@@ -125,33 +105,61 @@ def back_to_menu() -> InlineKeyboardMarkup:
 # ─────────────────────────── Запись давления ───────────────────────────
 
 
-def systolic_kb() -> InlineKeyboardMarkup:
-    """Кнопки систолического 100…200 шаг 5 + «Другое» + «Отмена»."""
+def keypad_kb(buf: str, *, allow_skip: bool) -> InlineKeyboardMarkup:
+    """Клавиатура-калькулятор ввода значения (SPEC.md, раздел 6.3).
+
+    Цифры 0…9, «C» (`m:key:clear`) — очистить, «⌫» (`m:key:bksp`) — стереть
+    последнюю цифру, «Готово» (`m:key:ok`) — подтвердить, «Пропустить»
+    (`m:key:skip`) — только для пульса (`allow_skip=True`), «Отмена» — в меню.
+
+    `buf` — текущий буфер набора; на разметку не влияет (значение показывает
+    `texts.fmt_keypad_prompt`), передаётся для единообразия с текстом экрана.
+    """
     builder = InlineKeyboardBuilder()
-    for row in _rows(_numbers(SYSTOLIC_RANGE, "m:sys")):
-        builder.row(*row)
-    builder.row(InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="m:sys:other"))
+    # Раскладка как у калькулятора: 7-8-9 сверху, 1-2-3 снизу, «C 0 ⌫» последним рядом.
+    for digits in ((7, 8, 9), (4, 5, 6), (1, 2, 3)):
+        builder.row(
+            *[
+                InlineKeyboardButton(text=str(d), callback_data=f"m:key:{d}")
+                for d in digits
+            ]
+        )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_KEYPAD_CLEAR, callback_data="m:key:clear"),
+        InlineKeyboardButton(text="0", callback_data="m:key:0"),
+        InlineKeyboardButton(text=texts.BTN_KEYPAD_BACKSPACE, callback_data="m:key:bksp"),
+    )
+    if allow_skip:
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"),
+            InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="m:key:skip"),
+        )
+    else:
+        builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"))
     builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
     return builder.as_markup()
 
 
-def diastolic_kb() -> InlineKeyboardMarkup:
-    """Кнопки диастолического 60…120 шаг 5 + «Другое» + «Отмена»."""
-    builder = InlineKeyboardBuilder()
-    for row in _rows(_numbers(DIASTOLIC_RANGE, "m:dia")):
-        builder.row(*row)
-    builder.row(InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="m:dia:other"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
-    return builder.as_markup()
+def intake_meds_kb(
+    checked: set[int], medications: Sequence[Medication]
+) -> InlineKeyboardMarkup:
+    """Мультивыбор принятых лекарств (SPEC.md, раздел 6.3).
 
-
-def pulse_kb() -> InlineKeyboardMarkup:
-    """Кнопки пульса 50…120 шаг 5 + «Другое» + «Пропустить»."""
+    Строка-чекбокс на приём («✓ Лозартан 50 мг · утро», § fmt_intake_item):
+    `m:med:pick:{id}` переключает отметку, «Готово» (`m:med:done`) сохраняет
+    журнал приёмов, «Отмена» (`m:med:cancel`) возвращается к сводке.
+    """
     builder = InlineKeyboardBuilder()
-    for row in _rows(_numbers(PULSE_RANGE, "m:pulse")):
-        builder.row(*row)
-    builder.row(InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="m:pulse:other"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="m:pulse:skip"))
+    for med in medications:
+        mark = "✓ " if med.id in checked else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{mark}{texts.fmt_intake_item(med.name, med.dosage, med.slot)}",
+                callback_data=f"m:med:pick:{med.id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:med:done"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:med:cancel"))
     return builder.as_markup()
 
 
@@ -167,12 +175,11 @@ def saved_kb() -> InlineKeyboardMarkup:
 
 
 def medication_taken_kb() -> InlineKeyboardMarkup:
-    """«Приняли лекарство?» → Да / Нет / Пропустил (TRUE / FALSE / NULL)."""
+    """«Приняли лекарство?» → Да / Нет (TRUE / FALSE; NULL — не отмечал)."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text=texts.BTN_MED_YES, callback_data="m:med:yes"),
         InlineKeyboardButton(text=texts.BTN_MED_NO, callback_data="m:med:no"),
-        InlineKeyboardButton(text=texts.BTN_MED_SKIPPED, callback_data="m:med:skip"),
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()

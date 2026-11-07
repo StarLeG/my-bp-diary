@@ -12,8 +12,13 @@
 - «Принял всё ✓» / «Частично…» / «Пропускаю» пишут по одной записи
   `medication_logs` на лекарство одной транзакцией; повторное действие за те же
   локальные сутки и слот новые логи не создаёт (двойное нажатие безопасно);
-- детальный трекинг — только здесь: «Приняли лекарство?» → «Да» при записи
-  давления в `medication_logs` ничего не пишет (§6.3).
+- мультивыбор «Какие лекарства приняли?» при записи давления (`log_manual_intake`)
+  пишет по одной записи `medication_logs` (`status='taken'`, слот — из строки
+  лекарства) на каждый отмеченный приём; идемпотентность — те же локальные сутки
+  (§6.3, §7.2);
+- детальный трекинг — только здесь: «Приняли лекарство?» → «Да» без выбора
+  лекарств в `medication_logs` ничего не пишет (только флаг
+  `measurements.medication_taken`, §6.3).
 """
 from __future__ import annotations
 
@@ -64,6 +69,27 @@ class SlotIntakeResult:
     taken: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     already_logged: bool = False
+
+
+@dataclass
+class ManualIntakeResult:
+    """Итог ручной отметки приёмов (мультивыбор «Какие лекарства приняли?», §6.3).
+
+    `taken` — подписи всех отмеченных приёмов (`fmt_med_item`, в порядке
+    `list_medications`); `already_logged` — True, если новые записи не
+    создавались (всё уже было отмечено за локальные сутки).
+    """
+
+    taken: list[str] = field(default_factory=list)
+    already_logged: bool = False
+
+
+def _as_utc(moment: Optional[datetime]) -> datetime:
+    """Момент времени в UTC; наивное время трактуется как UTC."""
+    moment = moment or utcnow()
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=timezone.utc)
+    return moment.astimezone(timezone.utc)
 
 
 async def add_medication(
@@ -318,10 +344,7 @@ async def log_slot_intake(
     (`_current_intake_lock`) и запросом `INSERT … WHERE NOT EXISTS` —
     конкурентный проигравший получает `rowcount=0` и дубль не создаёт.
     """
-    moment = timestamp or utcnow()
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=timezone.utc)
-    moment = moment.astimezone(timezone.utc)
+    moment = _as_utc(timestamp)
     medications = await slot_medications(session, user, slot)
     by_id = {medication.id: medication for medication in medications}
     local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
@@ -364,6 +387,96 @@ async def log_slot_intake(
                 result.taken.append(label)
             else:
                 result.skipped.append(label)
+        await session.flush()
+    result.already_logged = new_logs == 0
+    return result
+
+
+async def logged_intake_ids_today(
+    session: AsyncSession, user: User, timestamp: Optional[datetime] = None
+) -> set[int]:
+    """Id лекарств с отметкой приёма за локальные сутки («✓» в мультивыборе, §6.3).
+
+    Учитывается любая отметка (`taken`/`skipped`/`partial`) во всех слотах —
+    повторная отметка того же приёма за те же сутки записи не создаёт.
+    """
+    moment = _as_utc(timestamp)
+    local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
+    start, end = day_bounds_utc(user.timezone, local_day)
+    rows = (
+        await session.execute(
+            select(MedicationLog.medication_id).where(
+                MedicationLog.user_id == user.id,
+                MedicationLog.timestamp >= start,
+                MedicationLog.timestamp < end,
+            )
+        )
+    ).scalars()
+    return set(rows)
+
+
+async def log_manual_intake(
+    session: AsyncSession,
+    user: User,
+    medication_ids: Iterable[int],
+    *,
+    timestamp: Optional[datetime] = None,
+) -> ManualIntakeResult:
+    """Отметить приём выбранных лекарств вручную («Готово» мультивыбора, §6.3).
+
+    По одной записи `medication_logs` (`status='taken'`, слот — из строки
+    лекарства) на каждый отмеченный приём. Повторная отметка того же приёма за
+    те же локальные сутки новые записи не создаёт (§7.2): проверка «уже
+    отмечено» и вставка атомарны — под `_current_intake_lock` и запросом
+    `INSERT … WHERE NOT EXISTS`. Чужие и удалённые id тихо игнорируются.
+
+    Возвращает подписи всех отмеченных (для «💊 Принято: …») и признак того,
+    что всё уже было отмечено (`already_logged`).
+    """
+    wanted = set(medication_ids)
+    if not wanted:
+        return ManualIntakeResult()
+    moment = _as_utc(timestamp)
+    medications = list(
+        (
+            await session.execute(
+                select(Medication)
+                .where(Medication.user_id == user.id, Medication.id.in_(wanted))
+                .order_by(Medication.name, Medication.slot)
+            )
+        ).scalars()
+    )
+    local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
+    day_start, day_end = day_bounds_utc(user.timezone, local_day)
+    result = ManualIntakeResult()
+    new_logs = 0
+    async with _current_intake_lock():
+        logged_today = await logged_intake_ids_today(session, user, timestamp=moment)
+        for medication in medications:
+            if medication.id not in logged_today:
+                duplicate = exists(
+                    select(literal(1)).where(
+                        MedicationLog.user_id == user.id,
+                        MedicationLog.medication_id == medication.id,
+                        MedicationLog.slot == medication.slot,
+                        MedicationLog.timestamp >= day_start,
+                        MedicationLog.timestamp < day_end,
+                    )
+                )
+                stmt = insert(MedicationLog).from_select(
+                    ["user_id", "medication_id", "timestamp", "status", "slot"],
+                    select(
+                        literal(user.id),
+                        literal(medication.id),
+                        literal(moment),
+                        literal("taken"),
+                        literal(medication.slot),
+                    ).where(~duplicate),
+                )
+                inserted = await session.execute(stmt)
+                if inserted.rowcount:
+                    new_logs += 1
+            result.taken.append(texts.fmt_med_item(medication.name, medication.dosage))
         await session.flush()
     result.already_logged = new_logs == 0
     return result
