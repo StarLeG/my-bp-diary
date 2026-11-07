@@ -332,6 +332,50 @@ class TestMedsIntakeIdempotency:
             assert labels == []
         assert await count(session_factory, MedicationLog) == 1
 
+    async def test_double_done_logs_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Двойное «Готово» мультивыбора — один набор логов за сутки (§6.3)."""
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            await session.commit()
+        async with session_factory() as session:
+            first = await medications_service.log_manual_intake(session, user, [meds[0].id])
+            await session.commit()
+        async with session_factory() as session:
+            second = await medications_service.log_manual_intake(session, user, [meds[0].id])
+            await session.commit()
+        assert first.already_logged is False
+        assert second.already_logged is True
+        assert first.taken == second.taken == ["Лозартан 50 мг"]
+        assert await count(session_factory, MedicationLog) == 1
+
+    async def test_parallel_done_logs_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Пять конкурентных «Готово» с одним набором — ровно один набор логов."""
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            await session.commit()
+
+        async def tap() -> tuple[bool, list[str]]:
+            async with session_factory() as own:
+                result = await medications_service.log_manual_intake(
+                    own, user, [meds[0].id]
+                )
+                await own.commit()
+            return result.already_logged, result.taken
+
+        results = await asyncio.gather(*(tap() for _ in range(5)))
+        assert sorted(flag for flag, _ in results) == [False] + [True] * 4
+        # Подписи возвращаются всем (для «💊 Принято: …»), но лог ровно один.
+        assert all(labels == ["Лозартан 50 мг"] for _, labels in results)
+        assert await count(session_factory, MedicationLog) == 1
+
     async def test_repeat_yes_creates_one_remeasure(
         self, session_factory, user: DbUser, svc: RemindersService
     ) -> None:

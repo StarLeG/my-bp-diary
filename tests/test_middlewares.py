@@ -115,7 +115,7 @@ class TestDebounceMiddleware:
     async def test_first_flow_tap_passes(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
         middleware = DebounceMiddleware(clock=FakeClock())
-        result = await middleware(handler, make_callback("m:sys:135"), {})
+        result = await middleware(handler, make_callback("m:med:yes"), {})
         assert result == "ok"
         handler.assert_awaited_once()
         answer_mock.assert_not_awaited()
@@ -123,8 +123,8 @@ class TestDebounceMiddleware:
     async def test_double_tap_blocked(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
         middleware = DebounceMiddleware(clock=FakeClock())
-        await middleware(handler, make_callback("m:sys:135"), {})
-        second = await middleware(handler, make_callback("m:sys:135"), {})
+        await middleware(handler, make_callback("m:med:yes"), {})
+        second = await middleware(handler, make_callback("m:med:yes"), {})
         assert second is None
         handler.assert_awaited_once()
         answer_mock.assert_awaited_once_with(texts.DEBOUNCE_NOTICE)
@@ -133,26 +133,57 @@ class TestDebounceMiddleware:
         handler = AsyncMock(return_value="ok")
         clock = FakeClock()
         middleware = DebounceMiddleware(clock=clock)
-        await middleware(handler, make_callback("m:sys:135"), {})
+        await middleware(handler, make_callback("m:med:yes"), {})
         clock.advance(DEBOUNCE_SECONDS + 0.1)
-        assert await middleware(handler, make_callback("m:sys:135"), {}) == "ok"
+        assert await middleware(handler, make_callback("m:med:yes"), {}) == "ok"
         assert handler.await_count == 2
 
     async def test_still_blocked_inside_window(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
         clock = FakeClock()
         middleware = DebounceMiddleware(clock=clock)
-        await middleware(handler, make_callback("m:sys:135"), {})
+        await middleware(handler, make_callback("m:med:yes"), {})
         clock.advance(DEBOUNCE_SECONDS - 0.1)
-        assert await middleware(handler, make_callback("m:sys:135"), {}) is None
+        assert await middleware(handler, make_callback("m:med:yes"), {}) is None
         assert handler.await_count == 1
 
     async def test_users_are_independent(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
         middleware = DebounceMiddleware(clock=FakeClock())
-        await middleware(handler, make_callback("m:sys:135", user_id=1), {})
-        assert await middleware(handler, make_callback("m:sys:135", user_id=2), {}) == "ok"
+        await middleware(handler, make_callback("m:med:yes", user_id=1), {})
+        assert await middleware(handler, make_callback("m:med:yes", user_id=2), {}) == "ok"
         assert handler.await_count == 2
+
+    async def test_different_buttons_not_blocked(self, answer_mock) -> None:
+        """Окно — по паре (пользователь, callback_data): разные кнопки флоу не ждут."""
+        handler = AsyncMock(return_value="ok")
+        middleware = DebounceMiddleware(clock=FakeClock())
+        assert await middleware(handler, make_callback("m:med:yes"), {}) == "ok"
+        assert await middleware(handler, make_callback("m:note"), {}) == "ok"
+        assert handler.await_count == 2
+
+    async def test_confirm_actions_debounced(self, answer_mock) -> None:
+        """«Готово»/«Пропустить» сохраняют данные — двойной тап глушится (§7.2)."""
+        handler = AsyncMock(return_value="ok")
+        middleware = DebounceMiddleware(clock=FakeClock())
+        await middleware(handler, make_callback("m:key:ok"), {})
+        assert await middleware(handler, make_callback("m:key:ok"), {}) is None
+        handler2 = AsyncMock(return_value="ok")
+        await middleware(handler2, make_callback("m:key:skip"), {})
+        assert await middleware(handler2, make_callback("m:key:skip"), {}) is None
+
+    @pytest.mark.parametrize(
+        "data",
+        ["m:key:5", "m:key:0", "m:key:bksp", "m:key:clear", "m:med:pick:7"],
+    )
+    async def test_screen_edits_exempt(self, answer_mock, data: str) -> None:
+        """Цифры, «⌫», «C» и чекбоксы — на каждое нажатие (§6.3, §7.2)."""
+        handler = AsyncMock(return_value="ok")
+        middleware = DebounceMiddleware(clock=FakeClock())
+        await middleware(handler, make_callback(data), {})
+        assert await middleware(handler, make_callback(data), {}) == "ok"
+        assert handler.await_count == 2
+        answer_mock.assert_not_awaited()
 
     async def test_non_flow_callback_passes(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
@@ -208,8 +239,8 @@ class TestThrottleMiddleware:
 
         handler = AsyncMock(return_value="ok")
         middleware = ThrottleMiddleware(clock=FakeClock())
-        assert await middleware(handler, make_callback("m:sys:135"), {}) == "ok"
-        assert await middleware(handler, make_callback("m:dia:85"), {}) == "ok"
+        assert await middleware(handler, make_callback("m:med:yes"), {}) == "ok"
+        assert await middleware(handler, make_callback("m:note"), {}) == "ok"
         assert handler.await_count == 2
 
     async def test_users_are_independent(self, answer_mock) -> None:

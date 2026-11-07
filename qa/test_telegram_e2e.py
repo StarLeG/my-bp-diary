@@ -37,16 +37,22 @@ class TestTelegramE2E:
         assert db.reminder_count(tg_me.id, "morning") == 1, "слот утра не включён"
 
     def test_measurement_flow(self, dialog, db, tg_me, ensure_onboarded) -> None:
-        """§22, п.2: запись давления нажатиями кнопок и сохранение в БД."""
+        """§22, п.2: запись давления нажатиями кнопок калькулятора (§6.3)."""
         ensure_onboarded()
         before = db.measurement_count(tg_me.id)
 
         dialog.send("/start")
         dialog.wait_screen(texts.MAIN_MENU)
         dialog.press("menu:measure", contains=texts.ASK_SYSTOLIC)
-        dialog.press("m:sys:130", contains=texts.ASK_DIASTOLIC)
-        dialog.press("m:dia:85", contains=texts.ASK_PULSE)
-        dialog.press("m:pulse:70", contains=texts.fmt_saved(130, 85, 70))
+        for digit in "130":  # систолическое: 1 → 3 → 0
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_DIASTOLIC)
+        for digit in "85":  # диастолическое
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_PULSE)
+        for digit in "70":  # пульс
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.fmt_saved(130, 85, 70))
 
         assert db.measurement_count(tg_me.id) == before + 1, "измерение не сохранено"
         row = db.last_measurement(tg_me.id)
@@ -63,17 +69,29 @@ class TestTelegramE2E:
         dialog.send("/start")
         dialog.wait_screen(texts.MAIN_MENU)
         dialog.press("menu:measure", contains=texts.ASK_SYSTOLIC)
-        dialog.press("m:sys:135", contains=texts.ASK_DIASTOLIC)
-        dialog.press("m:dia:85", contains=texts.ASK_PULSE)
-        dialog.press("m:pulse:70", contains=texts.fmt_saved(135, 85, 70))
+        for digit in "135":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_DIASTOLIC)
+        for digit in "85":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_PULSE)
+        for digit in "70":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.fmt_saved(135, 85, 70))
         row = db.last_measurement(tg_me.id)
         assert row is not None
         saved_ts = row["timestamp"]
 
         dialog.press("m:edit", contains=texts.ASK_SYSTOLIC)
-        dialog.press("m:sys:140", contains=texts.ASK_DIASTOLIC)
-        dialog.press("m:dia:90", contains=texts.ASK_PULSE)
-        dialog.press("m:pulse:75", contains=texts.fmt_updated(140, 90, 75))
+        for digit in "140":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_DIASTOLIC)
+        for digit in "90":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_PULSE)
+        for digit in "75":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.fmt_updated(140, 90, 75))
 
         # Правка — UPDATE: записей не прибавилось, время записи прежнее.
         assert db.measurement_count(tg_me.id) == before + 1
@@ -94,9 +112,13 @@ class TestTelegramE2E:
         dialog.press("menu:diary")
         # Кнопка «✏️ Изменить последнюю» есть в непустом дневнике (§6.4).
         dialog.press("m:edit", contains=texts.ASK_SYSTOLIC)
-        dialog.press("m:sys:140", contains=texts.ASK_DIASTOLIC)
-        dialog.press("m:dia:90", contains=texts.ASK_PULSE)
-        dialog.press("m:pulse:skip", contains=texts.fmt_updated(140, 90, None))
+        for digit in "140":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_DIASTOLIC)
+        for digit in "90":
+            dialog.press(f"m:key:{digit}")
+        dialog.press("m:key:ok", contains=texts.ASK_PULSE)
+        dialog.press("m:key:skip", contains=texts.fmt_updated(140, 90, None))
 
         assert db.measurement_count(tg_me.id) == before
         row = db.last_measurement(tg_me.id)

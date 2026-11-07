@@ -616,3 +616,155 @@ class TestUpdateMedication:
         assert updated is not None
         assert {row.id for row in updated} == ids_before
         assert len(await service.list_medications(session, user)) == 2
+
+
+class TestLoggedIntakeIdsToday:
+    async def test_any_status_counts(self, session: AsyncSession, user: User) -> None:
+        """«✓» — у любой отметки за сутки: taken, skipped, partial (§6.3)."""
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "taken"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        # 18:05 UTC = 21:05 Europe/Minsk — те же локальные сутки (UTC+3).
+        await service.log_slot_intake(
+            session, user, "evening", {meds[1].id: "skipped"}, timestamp=aware(2026, 11, 4, 18, 5)
+        )
+        await session.commit()
+        ids = await service.logged_intake_ids_today(session, user, timestamp=aware(2026, 11, 4, 12, 0))
+        assert ids == {meds[0].id, meds[1].id}
+
+    async def test_other_day_not_counted(self, session: AsyncSession, user: User) -> None:
+        """Вчерашние отметки в «✓» сегодня не попадают (локальные сутки)."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "taken"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        ids = await service.logged_intake_ids_today(session, user, timestamp=aware(2026, 11, 5, 12, 0))
+        assert ids == set()
+
+    async def test_other_user_excluded(self, session: AsyncSession, user: User) -> None:
+        """Изоляция по пользователю: чужие отметки не видны (§7.1)."""
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        meds = await _add_med(session, other)
+        await session.flush()
+        await service.log_slot_intake(
+            session, other, "morning", {meds[0].id: "taken"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        ids = await service.logged_intake_ids_today(session, user, timestamp=aware(2026, 11, 4, 12, 0))
+        assert ids == set()
+
+
+class TestLogManualIntake:
+    async def test_creates_taken_logs_with_med_slot(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """«Готово» пишет по одной записи taken со слотом строки лекарства (§6.3)."""
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        result = await service.log_manual_intake(
+            session, user, [m.id for m in meds], timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        assert result.taken == ["Лозартан 50 мг", "Лозартан 50 мг"]
+        assert result.already_logged is False
+        logs = (
+            await session.execute(
+                select(MedicationLog).order_by(MedicationLog.slot)
+            )
+        ).scalars().all()
+        assert [(log.status, log.slot) for log in logs] == [
+            ("taken", "evening"),
+            ("taken", "morning"),
+        ]
+
+    async def test_idempotent_within_day(self, session: AsyncSession, user: User) -> None:
+        """Двойная отметка тех же приёмов за сутки — один набор логов (§7.2)."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        first = await service.log_manual_intake(
+            session, user, [meds[0].id], timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        second = await service.log_manual_intake(
+            session, user, [meds[0].id], timestamp=aware(2026, 11, 4, 9, 0)
+        )
+        await session.commit()
+        assert first.already_logged is False
+        assert second.already_logged is True
+        assert second.taken == ["Лозартан 50 мг"]  # подпись возвращается и повторно
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 1
+
+    async def test_new_day_writes_again(self, session: AsyncSession, user: User) -> None:
+        meds = await _add_med(session, user)
+        await session.flush()
+        await service.log_manual_intake(
+            session, user, [meds[0].id], timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        result = await service.log_manual_intake(
+            session, user, [meds[0].id], timestamp=aware(2026, 11, 5, 8, 5)
+        )
+        await session.commit()
+        assert result.already_logged is False
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 2
+
+    async def test_foreign_and_unknown_ids_ignored(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Чужие и удалённые id тихо игнорируются (§7.1)."""
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        foreign_meds = await _add_med(session, other)
+        await session.flush()
+        result = await service.log_manual_intake(
+            session,
+            user,
+            [foreign_meds[0].id, 999],
+            timestamp=aware(2026, 11, 4, 8, 5),
+        )
+        await session.commit()
+        assert result.taken == []
+        assert result.already_logged is True
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert logs == []
+
+    async def test_empty_selection_writes_nothing(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        result = await service.log_manual_intake(
+            session, user, [], timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        assert result.taken == []
+        assert result.already_logged is False
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert logs == []
+
+    async def test_previously_logged_counts_as_taken(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Если приём уже отмечен (даже skipped) — новый лог не пишется, подпись есть."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "skipped"}, timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        result = await service.log_manual_intake(
+            session, user, [meds[0].id], timestamp=aware(2026, 11, 4, 9, 0)
+        )
+        await session.commit()
+        assert result.taken == ["Лозартан 50 мг"]
+        assert result.already_logged is True
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert len(logs) == 1 and logs[0].status == "skipped"

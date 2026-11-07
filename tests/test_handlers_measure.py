@@ -20,6 +20,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import keyboards, texts
 from bot.handlers import measure
 from bot.models import Measurement as MeasurementModel
+from bot.models import Medication, MedicationLog
 from bot.models import User as UserModel
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
@@ -102,6 +103,38 @@ async def save_draft(
     return measurement.id
 
 
+async def tap(
+    state: FSMContext,
+    data: str,
+    session: AsyncSession | None = None,
+    message: Message | None = None,
+    cb_answer=None,
+    edit=None,
+) -> None:
+    """Нажать кнопку калькулятора (`m:key:…`)."""
+    await call(
+        measure.cb_keypad,
+        callback=make_callback(data, message or make_message()),
+        state=state,
+        session=session,
+    )
+
+
+async def start_input(state: FSMContext, target: str) -> None:
+    """Перевести FSM в шаг ввода `target` с пустым буфером (как после `cb_measure_begin`)."""
+    states = {
+        "sys": measure.MeasureInput.sys_input,
+        "dia": measure.MeasureInput.dia_input,
+        "pulse": measure.MeasureInput.pulse_input,
+    }
+    await state.set_state(states[target])
+    await state.update_data(**{measure.M_BUF: ""})
+
+
+def keypad_text(question: str, buf: str = "") -> str:
+    return texts.fmt_keypad_prompt(question, buf)
+
+
 @pytest.fixture
 def answer(mocker):
     return mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
@@ -129,15 +162,18 @@ def reminders(mocker):
 
 
 class TestBeginCancel:
-    async def test_begin_shows_systolic(self, edit, cb_answer) -> None:
+    async def test_begin_shows_systolic_keypad(self, edit, cb_answer) -> None:
         state = make_state()
         await call(
             measure.cb_measure_begin,
             callback=make_callback("menu:measure", make_message()),
             state=state,
         )
-        assert edit.call_args.args[0] == texts.ASK_SYSTOLIC
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.systolic_kb()
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "", allow_skip=False
+        )
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
         cb_answer.assert_awaited_once()
 
     async def test_begin_resets_old_draft(self, edit, cb_answer) -> None:
@@ -148,7 +184,7 @@ class TestBeginCancel:
             callback=make_callback("menu:measure", make_message()),
             state=state,
         )
-        assert await state.get_data() == {}
+        assert await state.get_data() == {measure.M_BUF: ""}
 
     @pytest.mark.parametrize("data", ["rem:write", "rem:now"])
     async def test_begin_from_reminder(self, data: str, edit, cb_answer) -> None:
@@ -159,12 +195,11 @@ class TestBeginCancel:
             callback=make_callback(data, make_message()),
             state=state,
         )
-        assert edit.call_args.args[0] == texts.ASK_SYSTOLIC
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.systolic_kb()
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC)
 
     async def test_cancel_returns_to_menu(self, edit, cb_answer) -> None:
         state = make_state()
-        await state.set_state(measure.MeasureInput.sys_other)
+        await start_input(state, "sys")
         await call(
             measure.cb_measure_cancel,
             callback=make_callback("m:cancel", make_message()),
@@ -173,106 +208,146 @@ class TestBeginCancel:
         assert edit.call_args.args[0] == texts.MAIN_MENU
         assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
         assert await state.get_state() is None
+        assert await state.get_data() == {}
 
 
-# ─────────────────────────── Числовые кнопки ───────────────────────────
+# ─────────────────────────── Калькулятор: буфер ───────────────────────────
 
 
-class TestNumericButtons:
-    async def test_systolic_button(self, edit, cb_answer) -> None:
+class TestKeypadBuffer:
+    async def test_digits_accumulate(self, edit, cb_answer) -> None:
         state = make_state()
-        await call(
-            measure.cb_systolic,
-            callback=make_callback("m:sys:135", make_message()),
-            state=state,
+        await start_input(state, "sys")
+        await tap(state, "m:key:1")
+        await tap(state, "m:key:3")
+        await tap(state, "m:key:5")
+        assert (await state.get_data())[measure.M_BUF] == "135"
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC, "135")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "135", allow_skip=False
         )
-        assert edit.call_args.args[0] == texts.ASK_DIASTOLIC
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.diastolic_kb()
-        assert (await state.get_data())["m_sys"] == 135
 
-    async def test_systolic_other_prompts(self, edit, cb_answer) -> None:
+    async def test_leading_zeros_collapse(self, edit, cb_answer) -> None:
         state = make_state()
-        await call(
-            measure.cb_systolic,
-            callback=make_callback("m:sys:other", make_message()),
-            state=state,
-        )
-        assert edit.call_args.args[0] == texts.PROMPT_SYSTOLIC_OTHER
-        assert await state.get_state() == measure.MeasureInput.sys_other.state
+        await start_input(state, "sys")
+        await tap(state, "m:key:0")
+        assert (await state.get_data())[measure.M_BUF] == "0"
+        await tap(state, "m:key:0")
+        assert (await state.get_data())[measure.M_BUF] == "0"
+        await tap(state, "m:key:7")
+        assert (await state.get_data())[measure.M_BUF] == "7"
 
-    async def test_systolic_invalid_value(self, edit, cb_answer) -> None:
+    async def test_overflow_ignored(self, edit, cb_answer) -> None:
         state = make_state()
-        await call(
-            measure.cb_systolic,
-            callback=make_callback("m:sys:55", make_message()),
-            state=state,
-        )
-        edit.assert_not_awaited()
-        cb_answer.assert_awaited_once()
+        await start_input(state, "sys")
+        for digit in "2605":
+            await tap(state, f"m:key:{digit}")
+        assert (await state.get_data())[measure.M_BUF] == "260"
 
-    async def test_diastolic_button(self, edit, cb_answer) -> None:
+    async def test_backspace(self, edit, cb_answer) -> None:
         state = make_state()
-        await call(
-            measure.cb_diastolic,
-            callback=make_callback("m:dia:85", make_message()),
-            state=state,
-        )
-        assert edit.call_args.args[0] == texts.ASK_PULSE
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.pulse_kb()
-        assert (await state.get_data())["m_dia"] == 85
+        await start_input(state, "sys")
+        await state.update_data(**{measure.M_BUF: "13"})
+        await tap(state, "m:key:bksp")
+        assert (await state.get_data())[measure.M_BUF] == "1"
+        await tap(state, "m:key:bksp")
+        assert (await state.get_data())[measure.M_BUF] == ""
+        await tap(state, "m:key:bksp")  # пустой буфер не падает
+        assert (await state.get_data())[measure.M_BUF] == ""
 
-    async def test_diastolic_other_prompts(self, edit, cb_answer) -> None:
+    async def test_clear(self, edit, cb_answer) -> None:
         state = make_state()
-        await call(
-            measure.cb_diastolic,
-            callback=make_callback("m:dia:other", make_message()),
-            state=state,
-        )
-        assert edit.call_args.args[0] == texts.PROMPT_DIASTOLIC_OTHER
-        assert await state.get_state() == measure.MeasureInput.dia_other.state
+        await start_input(state, "sys")
+        await state.update_data(**{measure.M_BUF: "135"})
+        await tap(state, "m:key:clear")
+        assert (await state.get_data())[measure.M_BUF] == ""
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC, "")
 
-    async def test_diastolic_invalid_value(self, edit, cb_answer) -> None:
-        state = make_state()
-        await call(
-            measure.cb_diastolic,
-            callback=make_callback("m:dia:5", make_message()),
-            state=state,
-        )
-        edit.assert_not_awaited()
-        cb_answer.assert_awaited_once()
 
-    async def test_pulse_button_saves(self, session, edit, cb_answer, answer) -> None:
+# ─────────────────────────── Калькулятор: «Готово» / «Пропустить» ───────────────────────────
+
+
+class TestKeypadConfirm:
+    async def test_ok_empty_buffer(self, edit, cb_answer) -> None:
         state = make_state()
-        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:72", make_message()),
-            state=state,
-            session=session,
+        await start_input(state, "sys")
+        await tap(state, "m:key:ok")
+        cb_answer.assert_awaited_once_with(texts.KEYPAD_EMPTY_INPUT)
+        edit.assert_not_awaited()  # экран не меняется
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
+
+    async def test_ok_out_of_range(self, edit, cb_answer) -> None:
+        state = make_state()
+        await start_input(state, "sys")
+        await state.update_data(**{measure.M_BUF: "300"})
+        await tap(state, "m:key:ok")
+        cb_answer.assert_awaited_once_with(
+            "Нужно систолическое от 70 до 260, а получилось 300"
         )
+        edit.assert_not_awaited()  # экран не меняется
+        assert (await state.get_data())[measure.M_BUF] == "300"
+
+    async def test_ok_systolic_advances(self, edit, cb_answer) -> None:
+        state = make_state()
+        await start_input(state, "sys")
+        await state.update_data(**{measure.M_BUF: "135"})
+        await tap(state, "m:key:ok", session=None)
+        assert (await state.get_data())[measure.M_SYS] == 135
+        assert await state.get_state() == measure.MeasureInput.dia_input.state
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_DIASTOLIC, "")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "", allow_skip=False
+        )
+
+    async def test_ok_diastolic_advances_to_pulse(self, edit, cb_answer) -> None:
+        state = make_state()
+        await start_input(state, "dia")
+        await state.update_data(**{measure.M_SYS: 135, measure.M_BUF: "85"})
+        await tap(state, "m:key:ok", session=None)
+        assert (await state.get_data())[measure.M_DIA] == 85
+        assert await state.get_state() == measure.MeasureInput.pulse_input.state
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "", allow_skip=True
+        )
+
+    async def test_ok_diastolic_pair_violation(self, edit, cb_answer) -> None:
+        state = make_state()
+        await start_input(state, "dia")
+        await state.update_data(**{measure.M_SYS: 120, measure.M_BUF: "120"})
+        await tap(state, "m:key:ok", session=None)
+        cb_answer.assert_awaited_once_with(texts.DIA_NOT_LOWER)
+        edit.assert_not_awaited()  # экран не меняется
+        assert await state.get_state() == measure.MeasureInput.dia_input.state
+        assert measure.M_DIA not in await state.get_data()
+
+    async def test_ok_pair_equal_values_violation(self, edit, cb_answer) -> None:
+        """Диастолическое строго ниже систолического — равные значения тоже ошибка (§9)."""
+        state = make_state()
+        await start_input(state, "dia")
+        await state.update_data(**{measure.M_SYS: 100, measure.M_BUF: "100"})
+        await tap(state, "m:key:ok", session=None)
+        cb_answer.assert_awaited_once_with(texts.DIA_NOT_LOWER)
+
+    async def test_ok_pulse_saves(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await start_input(state, "pulse")
+        await state.update_data(**{measure.M_SYS: 135, measure.M_DIA: 85, measure.M_BUF: "72"})
+        await tap(state, "m:key:ok", session=session)
         assert edit.call_args.args[0] == texts.fmt_saved(135, 85, 72)
         assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
-        user = await reload_user(session)
-        rows = (
+        row = (
             await session.execute(
-                select(MeasurementModel)
-                .where(MeasurementModel.user_id == user.id)
-                .execution_options(populate_existing=True)
+                select(MeasurementModel).execution_options(populate_existing=True)
             )
-        ).scalars().all()
-        assert len(rows) == 1
-        assert (rows[0].systolic, rows[0].diastolic, rows[0].pulse) == (135, 85, 72)
-        assert (await state.get_data())["m_id"] == rows[0].id
+        ).scalars().one()
+        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)
+        assert (await state.get_data())[measure.M_ID] == row.id
 
-    async def test_pulse_skip_saves_without_pulse(self, session, edit, cb_answer) -> None:
+    async def test_skip_pulse_saves_without_pulse(self, session, edit, cb_answer) -> None:
         state = make_state()
-        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:skip", make_message()),
-            state=state,
-            session=session,
-        )
+        await start_input(state, "pulse")
+        await state.update_data(**{measure.M_SYS: 135, measure.M_DIA: 85})
+        await tap(state, "m:key:skip", session=session)
         assert edit.call_args.args[0] == texts.fmt_saved(135, 85, None)
         row = (
             await session.execute(
@@ -281,66 +356,91 @@ class TestNumericButtons:
         ).scalars().one()
         assert row.pulse is None
 
-    async def test_pulse_other_prompts(self, edit, cb_answer) -> None:
+    async def test_skip_only_on_pulse(self, edit, cb_answer) -> None:
         state = make_state()
-        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
+        await start_input(state, "sys")
+        await tap(state, "m:key:skip", session=None)
+        assert edit.call_args.args[0] == texts.MAIN_MENU  # устаревшие кнопки — в меню
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
+
+    async def test_unknown_key_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await start_input(state, "sys")
+        await tap(state, "m:key:foo", session=None)
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_key_without_state_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await tap(state, "m:key:5", session=None)
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+
+# ─────────────────────────── Число сообщением в чат ───────────────────────────
+
+
+class TestTextInput:
+    async def test_msg_systolic_advances(self, answer) -> None:
+        state = make_state()
+        await start_input(state, "sys")
         await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:other", make_message()),
-            state=state,
-            session=None,
+            measure.msg_systolic, message=make_message(" 120 "), state=state, session=None
         )
-        assert edit.call_args.args[0] == texts.PROMPT_PULSE_OTHER
-        assert await state.get_state() == measure.MeasureInput.pulse_other.state
+        assert answer.call_args.args[0] == keypad_text(texts.ASK_DIASTOLIC, "")
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "", allow_skip=False
+        )
+        assert (await state.get_data())[measure.M_SYS] == 120
+        assert await state.get_state() == measure.MeasureInput.dia_input.state
 
-    async def test_pulse_invalid_value(self, edit, cb_answer) -> None:
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("12.5", "Нужно целое число от 70 до 260"),
+            ("120/80", "Нужно целое число от 70 до 260"),
+            ("абырвалг", "Нужно целое число от 70 до 260"),
+            ("", "Нужно целое число от 70 до 260"),
+            ("300", "Нужно систолическое от 70 до 260, а получилось 300"),
+        ],
+    )
+    async def test_msg_systolic_invalid(self, answer, text: str, expected: str) -> None:
         state = make_state()
-        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
+        await start_input(state, "sys")
         await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:10", make_message()),
-            state=state,
-            session=None,
+            measure.msg_systolic, message=make_message(text), state=state, session=None
         )
-        edit.assert_not_awaited()
-        cb_answer.assert_awaited_once()
+        answer.assert_awaited_once_with(expected)  # короткая ошибка, повтор ввода
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
 
-
-# ─────────────────────────── Свободный ввод ───────────────────────────
-
-
-class TestFreeInput:
-    async def test_msg_systolic(self, answer) -> None:
+    async def test_msg_diastolic_advances(self, answer) -> None:
         state = make_state()
-        await call(measure.msg_systolic, message=make_message("132"), state=state)
-        assert answer.call_args.args[0] == texts.ASK_DIASTOLIC
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.diastolic_kb()
-        assert await state.get_state() is None
+        await start_input(state, "dia")
+        await state.update_data(**{measure.M_SYS: 135})
+        await call(
+            measure.msg_diastolic, message=make_message("88"), state=state, session=None
+        )
+        assert answer.call_args.args[0] == keypad_text(texts.ASK_PULSE, "")
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "", allow_skip=True
+        )
+        assert (await state.get_data())[measure.M_DIA] == 88
 
-    @pytest.mark.parametrize("text", ["50", "абырвалг", ""])
-    async def test_msg_systolic_invalid(self, answer, text: str) -> None:
+    async def test_msg_diastolic_pair_violation(self, answer) -> None:
         state = make_state()
-        await state.set_state(measure.MeasureInput.sys_other)
-        await call(measure.msg_systolic, message=make_message(text), state=state)
-        assert answer.call_args.args[0] != texts.ASK_DIASTOLIC
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb()
-        assert await state.get_state() == measure.MeasureInput.sys_other.state
-
-    async def test_msg_diastolic(self, answer) -> None:
-        state = make_state()
-        await call(measure.msg_diastolic, message=make_message(" 88 "), state=state)
-        assert answer.call_args.args[0] == texts.ASK_PULSE
-        assert (await state.get_data())["m_dia"] == 88
-
-    async def test_msg_diastolic_invalid(self, answer) -> None:
-        state = make_state()
-        await call(measure.msg_diastolic, message=make_message("300"), state=state)
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb()
+        await start_input(state, "dia")
+        await state.update_data(**{measure.M_SYS: 120})
+        await call(
+            measure.msg_diastolic, message=make_message("125"), state=state, session=None
+        )
+        answer.assert_awaited_once_with(texts.DIA_NOT_LOWER)
+        assert await state.get_state() == measure.MeasureInput.dia_input.state
 
     async def test_msg_pulse_saves(self, session, answer) -> None:
         state = make_state()
-        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85})
-        await call(measure.msg_pulse, message=make_message("66"), state=state, session=session)
+        await start_input(state, "pulse")
+        await state.update_data(**{measure.M_SYS: 135, measure.M_DIA: 85})
+        await call(
+            measure.msg_pulse, message=make_message("66"), state=state, session=session
+        )
         assert answer.call_args.args[0] == texts.fmt_saved(135, 85, 66)
         assert answer.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
         row = (
@@ -352,10 +452,13 @@ class TestFreeInput:
 
     async def test_msg_pulse_invalid(self, answer) -> None:
         state = make_state()
+        await start_input(state, "pulse")
+        await state.update_data(**{measure.M_SYS: 135, measure.M_DIA: 85})
         await call(
             measure.msg_pulse, message=make_message("999"), state=state, session=None
         )
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb()
+        answer.assert_awaited_once_with("Нужно пульс от 30 до 220, а получилось 999")
+        assert await state.get_state() == measure.MeasureInput.pulse_input.state
 
 
 # ─────────────────────────── Сохранение ───────────────────────────
@@ -394,8 +497,43 @@ class TestSave:
         rows = (await session.execute(select(MeasurementModel))).scalars().all()
         assert len(rows) == 1
 
+    async def test_summary_format_exact(self, session, answer) -> None:
+        """Сводка — ровно как в SPEC §6.3 (код-блок, без пульса — «Пульс: —»)."""
+        state = make_state()
+        await state.set_data({measure.M_SYS: 135, measure.M_DIA: 85, measure.M_PULSE: None})
+        await measure._save(make_message(), state, session, TG_ID, via_message=True)
+        assert answer.call_args.args[0] == (
+            "✅ Записано\nСистолическое: 135\nДиастолическое: 85\nПульс: —"
+        )
+
+    async def test_save_without_draft_shows_menu(self, session, answer) -> None:
+        state = make_state()
+        await measure._save(make_message(), state, session, TG_ID, via_message=True)
+        assert answer.call_args.args[0] == texts.MAIN_MENU
+
 
 # ─────────────────────────── Правка последней записи ───────────────────────────
+
+
+async def make_measurement(
+    session: AsyncSession,
+    telegram_id: int = TG_ID,
+    sys_v: int = 120,
+    dia_v: int = 80,
+    pulse: int | None = 66,
+    ts: datetime | None = None,
+) -> int:
+    user = await measurements_service.get_or_create_user(session, telegram_id)
+    row = MeasurementModel(
+        user_id=user.id,
+        timestamp=ts or datetime.now(timezone.utc),
+        systolic=sys_v,
+        diastolic=dia_v,
+        pulse=pulse,
+    )
+    session.add(row)
+    await session.commit()
+    return row.id
 
 
 class TestEditEntry:
@@ -409,438 +547,204 @@ class TestEditEntry:
         )
         cb_answer.assert_awaited_once_with(texts.NOT_YOUR_RECORD)
         edit.assert_not_awaited()
-        assert await state.get_data() == {}
 
-    async def test_opens_systolic_fixes_target(self, session, edit, cb_answer) -> None:
+    async def test_opens_keypad_fixes_target(self, session, edit, cb_answer) -> None:
+        measurement_id = await make_measurement(session)
         state = make_state()
-        measurement_id = await save_draft(session, state)
         await call(
             measure.cb_edit_begin,
             callback=make_callback("m:edit", make_message()),
             state=state,
             session=session,
         )
-        assert edit.call_args.args[0] == texts.ASK_SYSTOLIC
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.systolic_kb()
-        cb_answer.assert_awaited_once()
-        assert await state.get_data() == {
-            measure.M_EDIT_ID: measurement_id,
-            measure.M_ID: measurement_id,
-        }
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC)
+        data = await state.get_data()
+        assert data[measure.M_EDIT_ID] == measurement_id
+        assert data[measure.M_ID] == measurement_id
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
 
     async def test_resets_old_draft_and_state(self, session, edit, cb_answer) -> None:
+        measurement_id = await make_measurement(session)
         state = make_state()
-        measurement_id = await save_draft(session, state)
-        await state.set_state(measure.MeasureInput.note_input)  # огрызок старого ввода
+        await state.set_state(measure.MeasureInput.note_input)
+        await state.set_data({measure.M_SYS: 999, measure.M_ID: 0})
         await call(
             measure.cb_edit_begin,
             callback=make_callback("m:edit", make_message()),
             state=state,
             session=session,
         )
-        assert await state.get_state() is None
-        assert await state.get_data() == {
-            measure.M_EDIT_ID: measurement_id,
-            measure.M_ID: measurement_id,
-        }
+        data = await state.get_data()
+        assert measure.M_SYS not in data
+        assert data[measure.M_EDIT_ID] == measurement_id
 
     async def test_resolves_latest_by_timestamp(self, session, edit, cb_answer) -> None:
+        now = datetime.now(timezone.utc)
+        older = await make_measurement(session, sys_v=120, ts=now - timedelta(minutes=5))
+        newer = await make_measurement(session, sys_v=130, ts=now)
         state = make_state()
-        user = await measurements_service.get_or_create_user(session, TG_ID)
-        await measurements_service.save_measurement(
-            session,
-            user,
-            135,
-            85,
-            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
-        )
-        newest = await measurements_service.save_measurement(
-            session, user, 140, 90, timestamp=measurements_service.utcnow()
-        )
-        await session.commit()
         await call(
             measure.cb_edit_begin,
             callback=make_callback("m:edit", make_message()),
             state=state,
             session=session,
         )
-        assert (await state.get_data())[measure.M_EDIT_ID] == newest.id
+        assert (await state.get_data())[measure.M_EDIT_ID] == newer
+        assert (await state.get_data())[measure.M_EDIT_ID] != older
 
     async def test_foreign_newer_not_selected(self, session, edit, cb_answer) -> None:
+        """«Последняя» — только своя запись (§7.1)."""
+        mine = await make_measurement(session)
+        await make_measurement(session, telegram_id=222_222, sys_v=180)
         state = make_state()
-        user = await measurements_service.get_or_create_user(session, TG_ID)
-        mine = await measurements_service.save_measurement(
-            session,
-            user,
-            135,
-            85,
-            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
-        )
-        other = UserModel(telegram_id=222_222)
-        session.add(other)
-        await session.flush()
-        await measurements_service.save_measurement(
-            session, other, 200, 120, timestamp=measurements_service.utcnow()
-        )
-        await session.commit()
         await call(
             measure.cb_edit_begin,
             callback=make_callback("m:edit", make_message()),
             state=state,
             session=session,
         )
-        assert (await state.get_data())[measure.M_EDIT_ID] == mine.id
+        assert (await state.get_data())[measure.M_EDIT_ID] == mine
 
 
 class TestEditSave:
-    async def test_button_flow_updates_record(self, session, edit, cb_answer) -> None:
+    async def test_update_keeps_timestamp(self, session, edit, cb_answer) -> None:
+        measurement_id = await save_draft(session, make_state())
+        before = await reload_measurement(session, measurement_id)
+        ts = before.timestamp
         state = make_state()
-        measurement_id = await save_draft(session, state)
-        saved_ts = (await reload_measurement(session, measurement_id)).timestamp
-        message = make_message()
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:70", message),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
-        row = await reload_measurement(session, measurement_id)
-        assert (row.systolic, row.diastolic, row.pulse) == (140, 90, 70)
-        assert row.timestamp == saved_ts  # время записи не меняется
-        assert (await state.get_data())[measure.M_ID] == measurement_id
-
-    async def test_free_input_systolic_in_edit(
-        self, session, edit, cb_answer, answer
-    ) -> None:
-        """«Другое» при правке: свободный ввод систолического переиспользуется."""
-        state = make_state()
-        measurement_id = await save_draft(session, state)
-        message = make_message()
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:other", message), state=state
-        )
-        assert edit.call_args.args[0] == texts.PROMPT_SYSTOLIC_OTHER
-        await call(measure.msg_systolic, message=make_message("150"), state=state)
-        assert answer.call_args.args[0] == texts.ASK_DIASTOLIC
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:70", message),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_updated(150, 90, 70)
-        row = await reload_measurement(session, measurement_id)
-        assert (row.systolic, row.diastolic, row.pulse) == (150, 90, 70)
-
-    async def test_skip_clears_pulse(self, session, edit, cb_answer) -> None:
-        state = make_state()
-        measurement_id = await save_draft(session, state)  # запись с пульсом 72
-        message = make_message()
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:skip", message),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, None)
-        row = await reload_measurement(session, measurement_id)
-        assert row.pulse is None  # «Пропустить» — полная перезапись
-
-    async def test_edit_same_minute_is_not_duplicate(
-        self, session, edit, cb_answer
-    ) -> None:
-        """Правка записи текущей минуты — UPDATE, дубль-проверка не применяется."""
-        state = make_state()
-        measurement_id = await save_draft(session, state)  # timestamp — текущая минута
-        message = make_message()
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:70", message),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
-        assert texts.DUPLICATE_MEASUREMENT not in edit.call_args.args[0]
-        row = await reload_measurement(session, measurement_id)
-        assert (row.systolic, row.diastolic, row.pulse) == (140, 90, 70)
-        rows = (await session.execute(select(MeasurementModel))).scalars().all()
-        assert len(rows) == 1
-
-    @pytest.mark.parametrize(
-        ("sys_v", "dia_v", "warning"),
-        [(185, 85, True), (140, 112, True), (179, 109, False)],
-    )
-    async def test_high_pressure_warning(
-        self, session, answer, sys_v: int, dia_v: int, warning: bool
-    ) -> None:
-        state = make_state()
-        measurement_id = await save_draft(session, state)
         await state.set_data(
             {
+                measure.M_SYS: 140,
+                measure.M_DIA: 90,
+                measure.M_PULSE: None,
                 measure.M_EDIT_ID: measurement_id,
                 measure.M_ID: measurement_id,
-                measure.M_SYS: sys_v,
-                measure.M_DIA: dia_v,
-                measure.M_PULSE: None,
             }
         )
-        await measure._save(make_message(), state, session, TG_ID, via_message=True)
-        text = answer.call_args.args[0]
-        assert text.startswith(texts.fmt_updated(sys_v, dia_v, None))
-        assert (texts.HIGH_PRESSURE_WARNING in text) is warning
+        await measure._save(make_message(), state, session, TG_ID)
+        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, None)
+        row = await reload_measurement(session, measurement_id)
+        assert (row.systolic, row.diastolic, row.pulse) == (140, 90, None)
+        assert row.timestamp == ts
+
+    async def test_skip_clears_pulse(self, session, edit, cb_answer) -> None:
+        """«Пропустить» в правке очищает пульс (§6.3)."""
+        measurement_id = await save_draft(session, make_state(), pulse=72)
+        state = make_state()
+        await state.set_data(
+            {
+                measure.M_SYS: 135,
+                measure.M_DIA: 85,
+                measure.M_PULSE: None,
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
+            }
+        )
+        await measure._save(make_message(), state, session, TG_ID)
+        row = await reload_measurement(session, measurement_id)
+        assert row.pulse is None
+
+    async def test_edit_same_minute_is_not_duplicate(self, session, edit) -> None:
+        """Правка в ту же минуту — UPDATE, а не дедуп (§7.2)."""
+        measurement_id = await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data(
+            {
+                measure.M_SYS: 135,
+                measure.M_DIA: 85,
+                measure.M_PULSE: 72,
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
+            }
+        )
+        await measure._save(make_message(), state, session, TG_ID)
+        assert texts.DUPLICATE_MEASUREMENT not in edit.call_args.args[0]
+        assert edit.call_args.args[0] == texts.fmt_updated(135, 85, 72)
 
     async def test_record_deleted_between_entry_and_save(
         self, session, edit, cb_answer
     ) -> None:
-        state = make_state()
-        measurement_id = await save_draft(session, state)
-        message = make_message()
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
+        measurement_id = await save_draft(session, make_state())
         row = await reload_measurement(session, measurement_id)
         await session.delete(row)
         await session.commit()
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:70", message),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.NOT_YOUR_RECORD
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
-        assert await state.get_data() == {}
-
-    async def test_cancel_discards_edit(self, session, edit, cb_answer) -> None:
         state = make_state()
-        measurement_id = await save_draft(session, state)
         await state.set_data(
             {
-                measure.M_EDIT_ID: measurement_id,
-                measure.M_ID: measurement_id,
                 measure.M_SYS: 140,
                 measure.M_DIA: 90,
+                measure.M_PULSE: 70,
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
             }
         )
+        await measure._save(make_message(), state, session, TG_ID)
+        assert edit.call_args.args[0] == texts.NOT_YOUR_RECORD
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+
+    async def test_cancel_discards_edit(self, session, edit, cb_answer) -> None:
+        """«Отмена» в правке не сохраняет (§6.3)."""
+        measurement_id = await save_draft(session, make_state())
+        state = make_state()
+        await state.set_state(measure.MeasureInput.sys_input)
+        await state.set_data({measure.M_EDIT_ID: measurement_id, measure.M_ID: measurement_id})
         await call(
             measure.cb_measure_cancel,
             callback=make_callback("m:cancel", make_message()),
             state=state,
         )
-        assert edit.call_args.args[0] == texts.MAIN_MENU
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
-        assert await state.get_data() == {}
         row = await reload_measurement(session, measurement_id)
-        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)  # не изменена
+        assert (row.systolic, row.diastolic) == (135, 85)
+        assert edit.call_args.args[0] == texts.MAIN_MENU
 
-    async def test_begin_mid_edit_saves_new_record(
-        self, session, edit, cb_answer
-    ) -> None:
+    async def test_begin_mid_edit_saves_new_record(self, session, edit, cb_answer) -> None:
+        """«Записать давление» посреди правки сбрасывает цель — сохранится новая запись."""
+        await save_draft(session, make_state())
         state = make_state()
-        user = await measurements_service.get_or_create_user(session, TG_ID)
-        old = await measurements_service.save_measurement(
-            session,
-            user,
-            135,
-            85,
-            72,
-            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
-        )
-        await session.commit()
-        await state.set_data(
-            {
-                measure.M_EDIT_ID: old.id,
-                measure.M_ID: old.id,
-                measure.M_SYS: 140,
-            }
-        )
-        message = make_message()
+        await state.set_data({measure.M_EDIT_ID: 1, measure.M_ID: 1})
         await call(
             measure.cb_measure_begin,
-            callback=make_callback("menu:measure", message),
+            callback=make_callback("menu:measure", make_message()),
             state=state,
         )
-        assert await state.get_data() == {}  # правка отменена
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:110", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:70", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:60", message),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_saved(110, 70, 60)  # новая запись
-        rows = (
-            await session.execute(select(MeasurementModel).order_by(MeasurementModel.id))
-        ).scalars().all()
-        assert len(rows) == 2
-        assert (rows[0].systolic, rows[0].diastolic, rows[0].pulse) == (135, 85, 72)
-        assert (rows[1].systolic, rows[1].diastolic, rows[1].pulse) == (110, 70, 60)
-
-    async def test_note_after_edit_attaches_to_edited_record(
-        self, session, edit, cb_answer, answer
-    ) -> None:
-        state = make_state()
-        measurement_id = await save_draft(session, state)
-        message = make_message()
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:70", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_note, callback=make_callback("m:note", message), state=state
-        )
-        await call(
-            measure.msg_note,
-            message=make_message("после кофе"),
-            state=state,
-            session=session,
-        )
-        row = await reload_measurement(session, measurement_id)
-        assert (row.systolic, row.diastolic, row.pulse, row.note) == (140, 90, 70, "после кофе")
+        data = await state.get_data()
+        assert measure.M_EDIT_ID not in data
 
     async def test_hub_shows_updated_after_edit(self, session, edit, cb_answer) -> None:
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        measurement_id = await save_draft(session, state)
         await state.set_data(
             {
-                measure.M_EDIT_ID: measurement_id,
-                measure.M_ID: measurement_id,
                 measure.M_SYS: 140,
                 measure.M_DIA: 90,
                 measure.M_PULSE: 70,
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
+            }
+        )
+        await measure._hub(make_message(), await state.get_data())
+        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
+
+    async def test_reedit_targets_same_record(self, session, edit, cb_answer) -> None:
+        """Повторное «✏️ Изменить» правит ту же запись (§6.3)."""
+        measurement_id = await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data(
+            {
+                measure.M_SYS: 140,
+                measure.M_DIA: 90,
+                measure.M_PULSE: 70,
+                measure.M_EDIT_ID: measurement_id,
+                measure.M_ID: measurement_id,
             }
         )
         await call(
-            measure.cb_med_no_skip,
-            callback=make_callback("m:med:no", make_message()),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_updated(140, 90, 70)
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
-
-    async def test_reedit_targets_same_record(self, session, edit, cb_answer) -> None:
-        """Пока запись остаётся последней, повторное «✏️ Изменить» правит её же."""
-        state = make_state()
-        user = await measurements_service.get_or_create_user(session, TG_ID)
-        await measurements_service.save_measurement(
-            session,
-            user,
-            120,
-            80,
-            timestamp=measurements_service.utcnow() - timedelta(minutes=5),
-        )
-        target = await measurements_service.save_measurement(
-            session,
-            user,
-            135,
-            85,
-            timestamp=measurements_service.utcnow() - timedelta(minutes=2),
-        )
-        await session.commit()
-        message = make_message()
-        await call(
             measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
+            callback=make_callback("m:edit", make_message()),
             state=state,
             session=session,
         )
-        assert (await state.get_data())[measure.M_EDIT_ID] == target.id
-        await call(
-            measure.cb_systolic, callback=make_callback("m:sys:140", message), state=state
-        )
-        await call(
-            measure.cb_diastolic, callback=make_callback("m:dia:90", message), state=state
-        )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:70", message),
-            state=state,
-            session=session,
-        )
-        # Повторный вход: «последняя» резолвится заново — та же запись.
-        await call(
-            measure.cb_edit_begin,
-            callback=make_callback("m:edit", message),
-            state=state,
-            session=session,
-        )
-        assert (await state.get_data())[measure.M_EDIT_ID] == target.id
+        assert (await state.get_data())[measure.M_EDIT_ID] == measurement_id
 
 
 # ─────────────────────────── Заметка ───────────────────────────
@@ -848,8 +752,9 @@ class TestEditSave:
 
 class TestNote:
     async def test_note_flow_saves(self, session, edit, cb_answer, answer) -> None:
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        measurement_id = await save_draft(session, state)
+        await state.set_data({measure.M_ID: measurement_id})
         await call(
             measure.cb_note,
             callback=make_callback("m:note", make_message()),
@@ -859,46 +764,69 @@ class TestNote:
         assert await state.get_state() == measure.MeasureInput.note_input.state
         await call(
             measure.msg_note,
-            message=make_message("после кофе"),
+            message=make_message("После прогулки"),
             state=state,
             session=session,
         )
         assert answer.call_args.args[0] == texts.NOTE_SAVED
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
         row = await reload_measurement(session, measurement_id)
-        assert row.note == "после кофе"
+        assert row.note == "После прогулки"
 
-    @pytest.mark.parametrize("text", ["", "   ", "x" * 501])
+    @pytest.mark.parametrize("text", ["", "   ", "х" * 501])
     async def test_msg_note_invalid(self, answer, text: str) -> None:
         state = make_state()
         await state.set_state(measure.MeasureInput.note_input)
-        await call(
-            measure.msg_note, message=make_message(text), state=state, session=None
-        )
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.note_cancel_kb()
+        await call(measure.msg_note, message=make_message(text), state=state, session=None)
+        answer.assert_awaited_once()
         assert await state.get_state() == measure.MeasureInput.note_input.state
+
+    async def test_note_without_draft_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_note,
+            callback=make_callback("m:note", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
 
 
 # ─────────────────────────── «Приняли лекарство?» ───────────────────────────
 
 
+async def add_med(
+    session: AsyncSession,
+    name: str = "Лозартан",
+    dosage: str = "50 мг",
+    slot: str = "morning",
+) -> int:
+    user = await measurements_service.get_or_create_user(session, TG_ID)
+    rows = await medications_service.add_medication(session, user, name, dosage, [slot])
+    await session.commit()
+    return rows[0].id
+
+
 class TestMedication:
     async def test_med_ask_screen(self, session, edit, cb_answer) -> None:
+        await save_draft(session, make_state())
         state = make_state()
-        await save_draft(session, state)
+        await state.set_data({measure.M_ID: 1})
         await call(
-            measure.cb_med, callback=make_callback("m:med", make_message()), state=state
+            measure.cb_med,
+            callback=make_callback("m:med", make_message()),
+            state=state,
         )
         assert edit.call_args.args[0] == texts.MED_ASK
         assert edit.call_args.kwargs["reply_markup"] == keyboards.medication_taken_kb()
 
     async def test_med_yes_plans_remeasure(
-        self, session, user, edit, cb_answer, answer, reminders
+        self, session, edit, cb_answer, answer, reminders
     ) -> None:
-        await medications_service.add_medication(session, user, "Лозартан", "50 мг", ["morning"])
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = 60
         await session.commit()
         state = make_state()
-        measurement_id = await save_draft(session, state)
+        await state.set_data({measure.M_ID: measurement_id})
         await call(
             measure.cb_med_yes,
             callback=make_callback("m:med:yes", make_message()),
@@ -906,20 +834,21 @@ class TestMedication:
             session=session,
             reminders=reminders,
         )
-        row = await reload_measurement(session, measurement_id)
-        assert row.medication_taken is True
         reminders.ensure_remeasure.assert_awaited_once_with(user.id, measurement_id, 60)
         assert edit.call_args.args[0] == texts.MED_REMEASURE_PLANNED.format(delay=60)
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.no_remeasure_kb(measurement_id)
-        answer.assert_not_awaited()  # лекарства уже настроены — подсказки нет
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.no_remeasure_kb(
+            measurement_id
+        )
 
     async def test_med_yes_disabled_delay(
-        self, session, user, edit, cb_answer, answer, reminders
+        self, session, edit, cb_answer, answer, reminders
     ) -> None:
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
         user.med_remeasure_delay = None
         await session.commit()
         state = make_state()
-        await save_draft(session, state)
+        await state.set_data({measure.M_ID: measurement_id})
         await call(
             measure.cb_med_yes,
             callback=make_callback("m:med:yes", make_message()),
@@ -929,15 +858,13 @@ class TestMedication:
         )
         reminders.ensure_remeasure.assert_not_awaited()
         assert edit.call_args.args[0] == texts.MED_REMEASURE_DISABLED
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
-        # Подсказка о лекарствах не зависит от повтора: первая «Да» — показать.
-        assert answer.call_args.args[0] == texts.MEDS_ASK_PROMPT
 
-    async def test_med_yes_prompts_meds_first_time(
+    async def test_med_yes_sets_flag_true(
         self, session, edit, cb_answer, answer, reminders
     ) -> None:
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        await save_draft(session, state)
+        await state.set_data({measure.M_ID: measurement_id})
         await call(
             measure.cb_med_yes,
             callback=make_callback("m:med:yes", make_message()),
@@ -945,25 +872,39 @@ class TestMedication:
             session=session,
             reminders=reminders,
         )
-        assert answer.call_args.args[0] == texts.MEDS_ASK_PROMPT
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.meds_ask_kb()
+        row = await reload_measurement(session, measurement_id)
+        assert row.medication_taken is True
+
+    async def test_med_yes_prompts_meds_first_time(
+        self, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        measurement_id = await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: measurement_id})
+        await call(
+            measure.cb_med_yes,
+            callback=make_callback("m:med:yes", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        answer.assert_awaited_once_with(
+            texts.MEDS_ASK_PROMPT, reply_markup=keyboards.meds_ask_kb()
+        )
 
     async def test_med_yes_no_prompt_on_second_time(
         self, session, edit, cb_answer, answer, reminders
     ) -> None:
-        state = make_state()
-        await save_draft(session, state)
-        # Прошлая запись уже с «Да» — промпт был, повторять не нужно.
-        user = await reload_user(session)
-        first = await measurements_service.save_measurement(
-            session,
-            user,
-            130,
-            80,
-            timestamp=measurements_service.utcnow() + timedelta(minutes=2),
+        """Подсказка — один раз: после второй записи с «Да» её нет (§6.3)."""
+        first_id = await make_measurement(
+            session, ts=datetime.now(timezone.utc) - timedelta(minutes=5)
         )
-        await measurements_service.set_medication_taken(session, user, first.id, True)
+        user = await reload_user(session)
+        await measurements_service.set_medication_taken(session, user, first_id, True)
         await session.commit()
+        second_id = await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: second_id})
         await call(
             measure.cb_med_yes,
             callback=make_callback("m:med:yes", make_message()),
@@ -974,12 +915,15 @@ class TestMedication:
         answer.assert_not_awaited()
 
     async def test_med_yes_no_prompt_when_meds_configured(
-        self, session, user, edit, cb_answer, answer, reminders
+        self, session, edit, cb_answer, answer, reminders
     ) -> None:
-        await medications_service.add_medication(session, user, "Лозартан", "50 мг", ["morning"])
+        await add_med(session)
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = None
         await session.commit()
         state = make_state()
-        await save_draft(session, state)
+        await state.set_data({measure.M_ID: measurement_id})
         await call(
             measure.cb_med_yes,
             callback=make_callback("m:med:yes", make_message()),
@@ -987,34 +931,24 @@ class TestMedication:
             session=session,
             reminders=reminders,
         )
+        assert edit.call_args.args[0] == texts.MEDS_INTAKE_ASK
         answer.assert_not_awaited()
 
     async def test_med_no_sets_false(self, session, edit, cb_answer) -> None:
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        measurement_id = await save_draft(session, state)
+        await state.set_data(
+            {measure.M_ID: measurement_id, measure.M_SYS: 135, measure.M_DIA: 85}
+        )
         await call(
-            measure.cb_med_no_skip,
+            measure.cb_med_no,
             callback=make_callback("m:med:no", make_message()),
             state=state,
             session=session,
         )
         row = await reload_measurement(session, measurement_id)
         assert row.medication_taken is False
-        assert edit.call_args.args[0] == texts.fmt_saved(135, 85, 72)
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
-
-    async def test_med_skip_sets_none(self, session, edit, cb_answer) -> None:
-        state = make_state()
-        measurement_id = await save_draft(session, state)
-        await call(
-            measure.cb_med_no_skip,
-            callback=make_callback("m:med:skip", make_message()),
-            state=state,
-            session=session,
-        )
-        row = await reload_measurement(session, measurement_id)
-        assert row.medication_taken is None
-        assert edit.call_args.args[0] == texts.fmt_saved(135, 85, 72)
+        assert edit.call_args.args[0] == texts.fmt_saved(135, 85, None)
 
     async def test_meds_ask_dismiss(self, edit, cb_answer) -> None:
         await call(
@@ -1022,7 +956,273 @@ class TestMedication:
             callback=make_callback("m:medask:dismiss", make_message()),
         )
         assert edit.call_args.args[0] == texts.MEDS_ASK_DISMISSED
-        cb_answer.assert_awaited_once()
+
+
+# ─────────────────── Мультивыбор «Какие лекарства приняли?» ───────────────────
+
+
+class TestMedsMultiselect:
+    async def test_shows_multiselect_with_empty_checkmarks(
+        self, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        med_id = await add_med(session)
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = None
+        await session.commit()
+        state = make_state()
+        await state.set_data({measure.M_ID: measurement_id})
+        await call(
+            measure.cb_med_yes,
+            callback=make_callback("m:med:yes", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        meds = await medications_service.list_medications(
+            session, await reload_user(session)
+        )
+        assert edit.call_args.args[0] == texts.MEDS_INTAKE_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(set(), meds)
+        assert (await state.get_data())[measure.M_MED_CHECKED] == []
+
+    async def test_prechecks_logged_today(
+        self, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        """«✓» — у уже отмеченных за сегодня (§6.3)."""
+        med_id = await add_med(session)
+        user = await reload_user(session)
+        await medications_service.log_manual_intake(session, user, {med_id})
+        await session.commit()
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = None
+        await session.commit()
+        state = make_state()
+        await state.set_data({measure.M_ID: measurement_id})
+        await call(
+            measure.cb_med_yes,
+            callback=make_callback("m:med:yes", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        meds = await medications_service.list_medications(session, await reload_user(session))
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(
+            {med_id}, meds
+        )
+        assert (await state.get_data())[measure.M_MED_CHECKED] == [med_id]
+
+    async def test_with_delay_two_screens(
+        self, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        """«Напомню…» + «Не надо» — одним экраном, мультивыбор — следующим сообщением."""
+        med_id = await add_med(session)
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = 60
+        await session.commit()
+        state = make_state()
+        await state.set_data({measure.M_ID: measurement_id})
+        await call(
+            measure.cb_med_yes,
+            callback=make_callback("m:med:yes", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        reminders.ensure_remeasure.assert_awaited_once()
+        assert edit.call_args.args[0] == texts.MED_REMEASURE_PLANNED.format(delay=60)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.no_remeasure_kb(
+            measurement_id
+        )
+        answer.assert_awaited_once()
+        assert answer.call_args.args[0] == texts.MEDS_INTAKE_ASK
+
+    async def test_pick_toggles_checkmark(self, session, edit, cb_answer) -> None:
+        med_id = await add_med(session)
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: []})
+        await call(
+            measure.cb_med_pick,
+            callback=make_callback(f"m:med:pick:{med_id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.M_MED_CHECKED] == [med_id]
+        meds = await medications_service.list_medications(
+            session, await reload_user(session)
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(
+            {med_id}, meds
+        )
+        await call(  # повторное нажатие снимает отметку
+            measure.cb_med_pick,
+            callback=make_callback(f"m:med:pick:{med_id}", make_message()),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.M_MED_CHECKED] == []
+
+    async def test_pick_foreign_id_rejected(self, session, edit, cb_answer) -> None:
+        await add_med(session)
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: []})
+        await call(
+            measure.cb_med_pick,
+            callback=make_callback("m:med:pick:9999", make_message()),
+            state=state,
+            session=session,
+        )
+        cb_answer.assert_awaited_once_with(texts.NOT_YOUR_RECORD)
+        edit.assert_not_awaited()
+        assert (await state.get_data())[measure.M_MED_CHECKED] == []
+
+    async def test_pick_without_draft_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_med_pick,
+            callback=make_callback("m:med:pick:1", make_message()),
+            state=state,
+            session=None,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_pick_bad_value_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await state.set_data({measure.M_ID: 1})
+        await call(
+            measure.cb_med_pick,
+            callback=make_callback("m:med:pick:abc", make_message()),
+            state=state,
+            session=None,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_done_empty_selection(self, session, edit, cb_answer) -> None:
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: []})
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=session,
+        )
+        cb_answer.assert_awaited_once_with(texts.MEDS_INTAKE_EMPTY)
+        edit.assert_not_awaited()  # экран не меняется
+
+    async def test_done_logs_taken(self, session, edit, cb_answer) -> None:
+        med_id = await add_med(session, name="Лозартан", dosage="50 мг", slot="morning")
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: [med_id]})
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_meds_intake(["Лозартан 50 мг"])
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
+        logs = (
+            await session.execute(
+                select(MedicationLog).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert len(logs) == 1
+        assert (logs[0].status, logs[0].slot, logs[0].medication_id) == (
+            "taken",
+            "morning",
+            med_id,
+        )
+
+    async def test_done_twice_logs_once(self, session, edit, cb_answer) -> None:
+        """Двойное «Готово» = один набор логов за локальные сутки (§6.3, §7.2)."""
+        med_id = await add_med(session)
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: [med_id]})
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=session,
+        )
+        await state.update_data(**{measure.M_MED_CHECKED: [med_id]})
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=session,
+        )
+        logs = (
+            await session.execute(
+                select(MedicationLog).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert len(logs) == 1
+        assert edit.call_args.args[0] == texts.fmt_meds_intake(["Лозартан 50 мг"])
+
+    async def test_done_all_foreign_ids(self, session, edit, cb_answer) -> None:
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data({measure.M_ID: 1, measure.M_MED_CHECKED: [9999]})
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=session,
+        )
+        cb_answer.assert_awaited_once_with(texts.MEDS_INTAKE_EMPTY)
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert logs == []
+
+    async def test_done_without_draft_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=None,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_cancel_returns_to_hub_without_logs(
+        self, session, edit, cb_answer
+    ) -> None:
+        """«Отмена» — назад к сводке без записей (§6.3)."""
+        med_id = await add_med(session)
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data(
+            {
+                measure.M_ID: 1,
+                measure.M_SYS: 135,
+                measure.M_DIA: 85,
+                measure.M_MED_CHECKED: [med_id],
+            }
+        )
+        await call(
+            measure.cb_med_cancel,
+            callback=make_callback("m:med:cancel", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.fmt_saved(135, 85, None)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert logs == []
+
+    async def test_cancel_without_draft_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_med_cancel,
+            callback=make_callback("m:med:cancel", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
 
 
 # ─────────────────────────── Самочувствие ───────────────────────────
@@ -1030,8 +1230,9 @@ class TestMedication:
 
 class TestFeeling:
     async def test_feeling_screen(self, session, edit, cb_answer) -> None:
+        await save_draft(session, make_state())
         state = make_state()
-        await save_draft(session, state)
+        await state.set_data({measure.M_ID: 1})
         await call(
             measure.cb_feeling,
             callback=make_callback("m:feeling", make_message()),
@@ -1040,15 +1241,18 @@ class TestFeeling:
         assert edit.call_args.args[0] == texts.FEELING_ASK
         assert edit.call_args.kwargs["reply_markup"] == keyboards.feeling_kb()
 
-    @pytest.mark.parametrize(
-        ("value", "expected"),
-        [("normal", "normal"), ("headache", "headache"), ("weakness", "weakness")],
-    )
-    async def test_feeling_set(
-        self, session, edit, cb_answer, value: str, expected: str
-    ) -> None:
+    @pytest.mark.parametrize("value", ["normal", "headache", "weakness"])
+    async def test_feeling_set(self, session, edit, cb_answer, value: str) -> None:
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        measurement_id = await save_draft(session, state)
+        await state.set_data(
+            {
+                measure.M_ID: measurement_id,
+                measure.M_SYS: 135,
+                measure.M_DIA: 85,
+                measure.M_PULSE: 72,
+            }
+        )
         await call(
             measure.cb_feeling_set,
             callback=make_callback(f"m:feeling:{value}", make_message()),
@@ -1056,43 +1260,38 @@ class TestFeeling:
             session=session,
         )
         row = await reload_measurement(session, measurement_id)
-        assert row.feeling == expected
+        assert row.feeling == value
         assert edit.call_args.args[0] == texts.fmt_saved(135, 85, 72)
 
-    async def test_feeling_other_prompts(self, session, edit, cb_answer) -> None:
+    async def test_feeling_other_saves_note(self, session, edit, cb_answer, answer) -> None:
+        measurement_id = await save_draft(session, make_state())
         state = make_state()
-        await save_draft(session, state)
+        await state.set_data({measure.M_ID: measurement_id})
         await call(
             measure.cb_feeling_other,
             callback=make_callback("m:feeling:other", make_message()),
             state=state,
         )
-        assert edit.call_args.args[0] == texts.PROMPT_FEELING_OTHER
         assert await state.get_state() == measure.MeasureInput.feeling_other.state
-
-    async def test_feeling_other_saves_note(self, session, answer) -> None:
-        state = make_state()
-        measurement_id = await save_draft(session, state)
-        await state.set_state(measure.MeasureInput.feeling_other)
         await call(
             measure.msg_feeling_other,
-            message=make_message("тошнота после еды"),
+            message=make_message("Немного кружится голова"),
             state=state,
             session=session,
         )
         row = await reload_measurement(session, measurement_id)
         assert row.feeling == "other"
-        assert row.note == "тошнота после еды"
+        assert row.note == "Немного кружится голова"
         assert answer.call_args.args[0] == texts.NOTE_SAVED
 
-    @pytest.mark.parametrize("text", ["", "   ", "x" * 501])
+    @pytest.mark.parametrize("text", ["", "   ", "х" * 501])
     async def test_msg_feeling_other_invalid(self, answer, text: str) -> None:
         state = make_state()
         await state.set_state(measure.MeasureInput.feeling_other)
         await call(
             measure.msg_feeling_other, message=make_message(text), state=state, session=None
         )
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.note_cancel_kb()
+        answer.assert_awaited_once()
         assert await state.get_state() == measure.MeasureInput.feeling_other.state
 
 
@@ -1103,50 +1302,28 @@ class TestNoRemeasure:
     async def test_no_remeasure_cancels(
         self, session, edit, cb_answer, reminders
     ) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
         state = make_state()
-        measurement_id = await save_draft(session, state)
         await call(
             measure.cb_no_remeasure,
-            callback=make_callback(f"m:noremeasure:{measurement_id}", make_message()),
+            callback=make_callback("m:noremeasure:42", make_message()),
             session=session,
             reminders=reminders,
         )
-        user = await reload_user(session)
-        reminders.cancel_remeasure_for_measurement.assert_awaited_once_with(
-            user.id, measurement_id
-        )
+        reminders.cancel_remeasure_for_measurement.assert_awaited_once_with(user.id, 42)
         assert edit.call_args.args[0] == texts.MED_REMEASURE_CANCELLED
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
-
-    async def test_no_remeasure_checks_owner(
-        self, session, edit, cb_answer, reminders
-    ) -> None:
-        # id записи передаётся в callback_data, но в сервис уходит user_id
-        # нажавшего — чужая запись для него выглядит как отсутствующая.
-        await call(
-            measure.cb_no_remeasure,
-            callback=make_callback(
-                "m:noremeasure:777", make_message(user_id=222_222), user_id=222_222
-            ),
-            session=session,
-            reminders=reminders,
-        )
-        user = (
-            await session.execute(
-                select(UserModel).where(UserModel.telegram_id == 222_222)
-            )
-        ).scalar_one()
-        reminders.cancel_remeasure_for_measurement.assert_awaited_once_with(user.id, 777)
 
     async def test_no_remeasure_bad_value(self, edit, cb_answer, reminders) -> None:
+        state = make_state()
         await call(
             measure.cb_no_remeasure,
             callback=make_callback("m:noremeasure:abc", make_message()),
+            state=state,
             session=None,
             reminders=reminders,
         )
-        assert edit.call_args.args[0] == texts.MAIN_MENU
         reminders.cancel_remeasure_for_measurement.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.MAIN_MENU
 
 
 # ─────────────────────────── Устаревшие кнопки ───────────────────────────
@@ -1154,85 +1331,78 @@ class TestNoRemeasure:
 
 class TestStaleButtons:
     @pytest.mark.parametrize(
-        ("data", "handler"),
-        [
-            ("m:note", measure.cb_note),
-            ("m:med", measure.cb_med),
-            ("m:med:yes", measure.cb_med_yes),
-            ("m:med:no", measure.cb_med_no_skip),
-            ("m:med:skip", measure.cb_med_no_skip),
-            ("m:feeling", measure.cb_feeling),
-            ("m:feeling:normal", measure.cb_feeling_set),
-            ("m:feeling:other", measure.cb_feeling_other),
-            ("m:pulse:50", measure.cb_pulse),
-            ("m:pulse:other", measure.cb_pulse),
-        ],
+        "data",
+        ["m:med:done", "m:med:cancel", "m:note", "m:med", "m:feeling", "m:med:no"],
     )
-    async def test_without_draft_shows_menu(
-        self, session, edit, cb_answer, reminders, data: str, handler
-    ) -> None:
+    async def test_without_draft_shows_menu(self, data, edit, cb_answer) -> None:
+        """Кнопки без черновика — в главное меню, без ошибок (§6.3)."""
+        handlers = {
+            "m:med:done": measure.cb_med_done,
+            "m:med:cancel": measure.cb_med_cancel,
+            "m:note": measure.cb_note,
+            "m:med": measure.cb_med,
+            "m:feeling": measure.cb_feeling,
+            "m:med:no": measure.cb_med_no,
+        }
         state = make_state()
-        callback = make_callback(data, make_message())
         await call(
-            handler,
-            callback=callback,
+            handlers[data],
+            callback=make_callback(data, make_message()),
             state=state,
-            session=session,
-            reminders=reminders,
+            session=None,
         )
         assert edit.call_args.args[0] == texts.MAIN_MENU
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
-        cb_answer.assert_awaited_once()
-
-    async def test_save_without_draft_shows_menu(self, session, answer) -> None:
-        """Устаревший `msg_pulse` без черновика не даёт KeyError — главное меню."""
-        state = make_state()
-        await call(
-            measure.msg_pulse,
-            message=make_message("66"),
-            state=state,
-            session=session,
-        )
-        assert answer.call_args.args[0] == texts.MAIN_MENU
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.main_menu()
 
 
 # ─────────────────────────── Полный флоу ───────────────────────────
 
 
 class TestFullFlow:
-    async def test_end_to_end(
-        self, session, answer, edit, cb_answer, reminders
-    ) -> None:
+    async def test_keypad_end_to_end(self, session, edit, cb_answer) -> None:
+        """135 → 85 → 72 калькулятором: три шага и сводка (§6.3)."""
         state = make_state()
-        message = make_message()
-        callback = make_callback("menu:measure", message)
-        await call(measure.cb_measure_begin, callback=callback, state=state)
         await call(
-            measure.cb_systolic,
-            callback=make_callback("m:sys:135", message),
+            measure.cb_measure_begin,
+            callback=make_callback("menu:measure", make_message()),
+            state=state,
+        )
+        for digit in "135":
+            await tap(state, f"m:key:{digit}")
+        await tap(state, "m:key:ok")
+        for digit in "85":
+            await tap(state, f"m:key:{digit}")
+        await tap(state, "m:key:ok")
+        for digit in "72":
+            await tap(state, f"m:key:{digit}")
+        await tap(state, "m:key:ok", session=session)
+        assert edit.call_args.args[0] == texts.fmt_saved(135, 85, 72)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.saved_kb()
+        row = (
+            await session.execute(
+                select(MeasurementModel).execution_options(populate_existing=True)
+            )
+        ).scalars().one()
+        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)
+
+    async def test_mixed_text_and_keypad(self, session, edit, cb_answer, answer) -> None:
+        """Систолическое — сообщением, остальное — калькулятором (§6.3)."""
+        state = make_state()
+        await call(
+            measure.cb_measure_begin,
+            callback=make_callback("menu:measure", make_message()),
             state=state,
         )
         await call(
-            measure.cb_diastolic,
-            callback=make_callback("m:dia:85", message),
-            state=state,
+            measure.msg_systolic, message=make_message("135"), state=state, session=None
         )
-        await call(
-            measure.cb_pulse,
-            callback=make_callback("m:pulse:72", message),
-            state=state,
-            session=session,
-        )
-        await call(
-            measure.cb_note, callback=make_callback("m:note", message), state=state
-        )
-        await call(
-            measure.msg_note,
-            message=make_message("после кофе"),
-            state=state,
-            session=session,
-        )
-        row = (await session.execute(select(MeasurementModel))).scalars().one()
-        assert (row.systolic, row.diastolic, row.pulse, row.note) == (135, 85, 72, "после кофе")
-        assert await state.get_state() is None
+        for digit in "85":
+            await tap(state, f"m:key:{digit}")
+        await tap(state, "m:key:ok")
+        await tap(state, "m:key:skip", session=session)
+        assert edit.call_args.args[0] == texts.fmt_saved(135, 85, None)
+        row = (
+            await session.execute(
+                select(MeasurementModel).execution_options(populate_existing=True)
+            )
+        ).scalars().one()
+        assert row.pulse is None

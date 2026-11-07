@@ -7,6 +7,7 @@ import pytest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 
 from bot import keyboards, texts
+from bot.models import Medication
 
 #: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
 KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "set", "med", "rem", "about", "adm"}
@@ -33,12 +34,13 @@ def callback_buttons(markup: InlineKeyboardMarkup) -> list[InlineKeyboardButton]
 def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
     """Все билдеры клавиатур с именами — для общих проверок."""
     med = (1, "Лозартан", "50 мг")
+    med_row = Medication(id=1, user_id=1, name="Лозартан", dosage="50 мг", slot="morning")
     return [
         ("main_menu", keyboards.main_menu()),
         ("back_to_menu", keyboards.back_to_menu()),
-        ("systolic_kb", keyboards.systolic_kb()),
-        ("diastolic_kb", keyboards.diastolic_kb()),
-        ("pulse_kb", keyboards.pulse_kb()),
+        ("keypad_kb", keyboards.keypad_kb("", allow_skip=False)),
+        ("keypad_kb_skip", keyboards.keypad_kb("12", allow_skip=True)),
+        ("intake_meds_kb", keyboards.intake_meds_kb({1}, [med_row])),
         ("saved_kb", keyboards.saved_kb()),
         ("medication_taken_kb", keyboards.medication_taken_kb()),
         ("feeling_kb", keyboards.feeling_kb()),
@@ -150,44 +152,87 @@ class TestCallbackData:
         assert len(longest) <= keyboards.CALLBACK_DATA_LIMIT
 
 
+class TestKeypadKeyboard:
+    def test_calculator_layout(self) -> None:
+        """Раскладка как у калькулятора: 7-8-9 / 4-5-6 / 1-2-3 / «C 0 ⌫» (§6.3)."""
+        markup = keyboards.keypad_kb("", allow_skip=False)
+        digit_rows = [[button.callback_data for button in row] for row in markup.inline_keyboard[:4]]
+        assert digit_rows == [
+            ["m:key:7", "m:key:8", "m:key:9"],
+            ["m:key:4", "m:key:5", "m:key:6"],
+            ["m:key:1", "m:key:2", "m:key:3"],
+            ["m:key:clear", "m:key:0", "m:key:bksp"],
+        ]
+
+    def test_done_cancel_rows(self) -> None:
+        markup = keyboards.keypad_kb("", allow_skip=False)
+        rows = [[button.callback_data for button in row] for row in markup.inline_keyboard[4:]]
+        assert rows == [["m:key:ok"], ["m:cancel"]]
+
+    def test_skip_only_with_allow_skip(self) -> None:
+        """«Пропустить» — только у пульса (`allow_skip=True`), §6.3."""
+        without = {
+            button.callback_data for button in callback_buttons(keyboards.keypad_kb("", allow_skip=False))
+        }
+        with_skip = {
+            button.callback_data for button in callback_buttons(keyboards.keypad_kb("", allow_skip=True))
+        }
+        assert "m:key:skip" not in without
+        assert "m:key:skip" in with_skip
+        assert without < with_skip
+
+    def test_all_digit_keys_present(self) -> None:
+        data = {
+            button.callback_data for button in callback_buttons(keyboards.keypad_kb("12", allow_skip=True))
+        }
+        assert {f"m:key:{digit}" for digit in range(10)} <= data
+        assert {"m:key:clear", "m:key:bksp", "m:key:ok", "m:cancel"} <= data
+
+    def test_buffer_does_not_change_layout(self) -> None:
+        """`buf` на разметку не влияет — её рисует `texts.fmt_keypad_prompt`."""
+        empty = keyboards.keypad_kb("", allow_skip=True)
+        filled = keyboards.keypad_kb("42", allow_skip=True)
+        assert [[b.callback_data for b in row] for row in empty.inline_keyboard] == [
+            [b.callback_data for b in row] for row in filled.inline_keyboard
+        ]
+
+
+class TestIntakeMedsKeyboard:
+    def test_checkbox_rows_with_intake_labels(self) -> None:
+        """Чекбокс на приём: «✓ Лозартан 50 мг · утро» (§6.3, fmt_intake_item)."""
+        meds = [
+            Medication(id=1, user_id=1, name="Лозартан", dosage="50 мг", slot="morning"),
+            Medication(id=2, user_id=1, name="Амлодипин", dosage="", slot="evening"),
+        ]
+        markup = keyboards.intake_meds_kb({2}, meds)
+        texts_by_data = {
+            button.callback_data: button.text for button in callback_buttons(markup)
+        }
+        assert texts_by_data["m:med:pick:1"] == texts.fmt_intake_item("Лозартан", "50 мг", "morning")
+        assert texts_by_data["m:med:pick:2"] == f"✓ {texts.fmt_intake_item('Амлодипин', '', 'evening')}"
+        assert texts_by_data["m:med:done"] == texts.BTN_DONE
+        assert texts_by_data["m:med:cancel"] == texts.BTN_CANCEL
+
+    def test_checked_ids_only_marked(self) -> None:
+        meds = [
+            Medication(id=1, user_id=1, name="Лозартан", dosage="50 мг", slot="morning"),
+            Medication(id=2, user_id=1, name="Амлодипин", dosage="5 мг", slot="evening"),
+        ]
+        markup = keyboards.intake_meds_kb({1}, meds)
+        texts_by_data = {
+            button.callback_data: button.text for button in callback_buttons(markup)
+        }
+        assert texts_by_data["m:med:pick:1"].startswith("✓ ")
+        assert not texts_by_data["m:med:pick:2"].startswith("✓ ")
+
+    def test_empty_medications_still_has_actions(self) -> None:
+        data = {
+            button.callback_data for button in callback_buttons(keyboards.intake_meds_kb(set(), []))
+        }
+        assert data == {"m:med:done", "m:med:cancel"}
+
+
 class TestMeasurementKeyboards:
-    def test_systolic_values(self) -> None:
-        markup = keyboards.systolic_kb()
-        values = {
-            int(value_part(button.callback_data))
-            for button in callback_buttons(markup)
-            if value_part(button.callback_data).isdigit()
-        }
-        assert values == set(keyboards.SYSTOLIC_RANGE)
-
-    def test_systolic_rows_of_four(self) -> None:
-        markup = keyboards.systolic_kb()
-        # 21 числовая кнопка рядами по 4: пять полных рядов и хвост.
-        number_rows = [row for row in markup.inline_keyboard if len(row) == 4]
-        assert len(number_rows) == 5
-
-    def test_systolic_other_and_cancel(self) -> None:
-        data = {button.callback_data for button in callback_buttons(keyboards.systolic_kb())}
-        assert "m:sys:other" in data
-        assert "m:cancel" in data
-
-    def test_diastolic_values(self) -> None:
-        markup = keyboards.diastolic_kb()
-        values = {
-            int(value_part(button.callback_data))
-            for button in callback_buttons(markup)
-            if value_part(button.callback_data).isdigit()
-        }
-        assert values == set(keyboards.DIASTOLIC_RANGE)
-
-    def test_pulse_values_and_skip(self) -> None:
-        markup = keyboards.pulse_kb()
-        data = {button.callback_data for button in callback_buttons(markup)}
-        values = {int(value_part(item)) for item in data if value_part(item).isdigit()}
-        assert values == set(keyboards.PULSE_RANGE)
-        assert "m:pulse:skip" in data
-        assert "m:pulse:other" in data
-
     def test_saved_kb_actions(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.saved_kb())}
         assert data == {"m:edit", "m:note", "m:med", "m:feeling", "menu:back"}
@@ -212,8 +257,9 @@ class TestMeasurementKeyboards:
         assert "m:edit" not in empty
 
     def test_medication_taken_kb_semantics(self) -> None:
+        """«Приняли лекарство?» — только Да / Нет (без «Пропустить», §6.3)."""
         data = {button.callback_data for button in callback_buttons(keyboards.medication_taken_kb())}
-        assert data == {"m:med:yes", "m:med:no", "m:med:skip", "menu:back"}
+        assert data == {"m:med:yes", "m:med:no", "menu:back"}
 
     def test_feeling_kb_options(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.feeling_kb())}

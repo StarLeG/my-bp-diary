@@ -15,16 +15,48 @@ def all_text_values() -> list[str]:
 
 class TestFormatting:
     def test_fmt_saved_without_pulse(self) -> None:
-        assert texts.fmt_saved(135, 85) == "✅ 135/85. Записано."
+        # SPEC.md, §6.3 — сводка дословно, без пульса — «Пульс: —».
+        assert texts.fmt_saved(135, 85) == (
+            "✅ Записано\nСистолическое: 135\nДиастолическое: 85\nПульс: —"
+        )
 
     def test_fmt_saved_with_pulse(self) -> None:
-        assert texts.fmt_saved(135, 85, 72) == "✅ 135/85, пульс 72. Записано."
+        assert texts.fmt_saved(135, 85, 72) == (
+            "✅ Записано\nСистолическое: 135\nДиастолическое: 85\nПульс: 72"
+        )
 
     def test_fmt_updated_without_pulse(self) -> None:
-        assert texts.fmt_updated(135, 85) == "✅ 135/85. Обновлено."
+        assert texts.fmt_updated(135, 85) == (
+            "✅ Обновлено\nСистолическое: 135\nДиастолическое: 85\nПульс: —"
+        )
 
     def test_fmt_updated_with_pulse(self) -> None:
-        assert texts.fmt_updated(135, 85, 72) == "✅ 135/85, пульс 72. Обновлено."
+        assert texts.fmt_updated(135, 85, 72) == (
+            "✅ Обновлено\nСистолическое: 135\nДиастолическое: 85\nПульс: 72"
+        )
+
+    def test_fmt_keypad_prompt(self) -> None:
+        """Экран калькулятора: вопрос, набор и подсказка (§6.3)."""
+        assert texts.fmt_keypad_prompt(texts.ASK_SYSTOLIC, "12") == (
+            "Систолическое (верхнее)?\n\n"
+            "Введено: 12\nМожно также написать число сообщением."
+        )
+
+    def test_fmt_keypad_prompt_empty_buffer(self) -> None:
+        assert texts.fmt_keypad_prompt(texts.ASK_PULSE, "") == (
+            "Пульс?\n\nВведено: —\nМожно также написать число сообщением."
+        )
+
+    def test_fmt_intake_item(self) -> None:
+        """Строка мультивыбора: «Лозартан 50 мг · утро» (§6.3)."""
+        assert texts.fmt_intake_item("Лозартан", "50 мг", "morning") == "Лозартан 50 мг · утро"
+        assert texts.fmt_intake_item("Амлодипин", "", "evening") == "Амлодипин · вечер"
+
+    def test_fmt_meds_intake(self) -> None:
+        assert texts.fmt_meds_intake(["Лозартан 50 мг", "Амлодипин 5 мг"]) == (
+            "💊 Принято: Лозартан 50 мг, Амлодипин 5 мг"
+        )
+        assert texts.fmt_meds_intake([]) == "💊 Принято: "
 
     def test_fmt_measurement_short(self) -> None:
         assert texts.fmt_measurement_short(135, 85) == "135/85"
@@ -199,8 +231,7 @@ class TestCanonicalTexts:
         # SPEC.md, §6.3 — кнопки правки последней записи дословно.
         assert texts.BTN_EDIT == "✏️ Изменить"
         assert texts.BTN_EDIT_LAST == "✏️ Изменить последнюю"
-        assert texts.MEASUREMENT_UPDATED == "✅ {measurement}. Обновлено."
-        assert texts.MEASUREMENT_UPDATED_PULSE == "✅ {measurement}, пульс {pulse}. Обновлено."
+        assert texts.MEASUREMENT_UPDATED == "✅ Обновлено"
 
     def test_csv_too_many_text(self) -> None:
         assert texts.CSV_TOO_MANY == "Слишком много записей, выберите 7 или 30 дней"

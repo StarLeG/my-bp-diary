@@ -17,9 +17,11 @@ from bot.schemas import (
     validate_dosage,
     validate_medication_name,
     validate_note,
+    validate_pair,
     validate_time,
     validate_timezone,
 )
+from bot import texts
 
 
 class TestMeasurementInput:
@@ -203,6 +205,31 @@ class TestValidateInt:
     def test_float_rejected(self) -> None:
         with pytest.raises(ValueError):
             validate_int("120.5", 70, 260)
+
+
+class TestValidatePair:
+    @pytest.mark.parametrize(
+        ("systolic", "diastolic"),
+        [(120, 80), (260, 40), (71, 70), (135, 85)],
+    )
+    def test_valid_pairs(self, systolic: int, diastolic: int) -> None:
+        validate_pair(systolic, diastolic)  # не бросает
+
+    @pytest.mark.parametrize(
+        ("systolic", "diastolic"),
+        [(120, 120), (120, 130), (70, 90)],
+    )
+    def test_diastolic_not_lower_raises(self, systolic: int, diastolic: int) -> None:
+        """Равные или более высокие значения — ошибка (§9: строго ниже)."""
+        with pytest.raises(ValueError) as exc_info:
+            validate_pair(systolic, diastolic)
+        assert str(exc_info.value) == texts.DIA_NOT_LOWER
+
+    def test_error_text_is_canonical(self) -> None:
+        assert texts.DIA_NOT_LOWER == (
+            "Диастолическое (нижнее) должно быть ниже систолического (верхнего) — "
+            "проверьте цифры."
+        )
 
 
 class TestValidateTime:
