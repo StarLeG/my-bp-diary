@@ -7,7 +7,8 @@
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram.fsm.context import FSMContext
@@ -17,7 +18,7 @@ from aiogram.types import CallbackQuery, Chat, Message, User
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot import keyboards, texts
+from bot import keyboards, schemas, texts
 from bot.handlers import measure
 from bot.models import Measurement as MeasurementModel
 from bot.models import Medication, MedicationLog, MeasurementMedication
@@ -1423,3 +1424,583 @@ class TestFullFlow:
             )
         ).scalars().one()
         assert row.pulse is None
+
+
+# ─────────────────── Архивные записи (SPEC.md, §6.10) ───────────────────
+
+
+def today_minsk() -> date:
+    """Сегодняшняя дата в таймзоне пользователя теста (Europe/Minsk)."""
+    return datetime.now(ZoneInfo("Europe/Minsk")).date()
+
+
+async def archive_draft(state: FSMContext, moment_iso: str, **extra) -> None:
+    """Черновик архива: момент + значения (то же, что делает `_archive_set_moment` + калькулятор)."""
+    await state.update_data(
+        **{
+            measure.M_SYS: 135,
+            measure.M_DIA: 85,
+            measure.M_PULSE: 72,
+            measure.M_ARCH_TS: moment_iso,
+            measure.M_ARCH_LABEL: "12.03.2025, 08:00",
+            measure.M_BUF: "72",
+            **extra,
+        }
+    )
+
+
+class TestArchiveEntry:
+    """Шаги «Когда?» и «Во сколько?» (§6.10)."""
+
+    async def test_add_opens_date_step(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_begin,
+            callback=make_callback("set:archive:add", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.ARCHIVE_DATE_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_date_kb()
+        assert await state.get_state() == measure.ArchiveInput.date.state
+
+    async def test_more_opens_date_step_too(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_begin,
+            callback=make_callback("m:arch:more", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.ARCHIVE_DATE_ASK
+        assert await state.get_state() == measure.ArchiveInput.date.state
+
+    async def test_date_preset_yesterday(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_date,
+            callback=make_callback("set:archive:date:yesterday", make_message()),
+            state=state,
+            session=session,
+        )
+        data = await state.get_data()
+        expected = (today_minsk() - timedelta(days=1)).isoformat()
+        assert data[measure.A_DATE] == expected
+        assert await state.get_state() == measure.ArchiveInput.time.state
+        assert edit.call_args.args[0] == texts.ARCHIVE_TIME_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_time_kb()
+
+    @pytest.mark.parametrize(
+        ("action", "days"),
+        [("set:archive:date:today", 0), ("set:archive:date:3d", 3), ("set:archive:date:week", 7)],
+    )
+    async def test_date_presets_offsets(
+        self, session, edit, cb_answer, action: str, days: int
+    ) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_date,
+            callback=make_callback(action, make_message()),
+            state=state,
+            session=session,
+        )
+        expected = (today_minsk() - timedelta(days=days)).isoformat()
+        assert (await state.get_data())[measure.A_DATE] == expected
+
+    async def test_date_other_prompts_free_input(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_date,
+            callback=make_callback("set:archive:date:other", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.ARCHIVE_DATE_OTHER_PROMPT
+        assert await state.get_state() == measure.ArchiveInput.date.state
+
+    async def test_date_stale_action_ignored(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_date,
+            callback=make_callback("set:archive:date:stale", make_message()),
+            state=state,
+            session=session,
+        )
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once()
+
+    async def test_msg_date_valid(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.date)
+        await call(
+            measure.msg_archive_date,
+            message=make_message("12.03.2024"),
+            state=state,
+            session=session,
+        )
+        assert (await state.get_data())[measure.A_DATE] == "2024-03-12"
+        assert await state.get_state() == measure.ArchiveInput.time.state
+        assert answer.call_args.args[0] == texts.ARCHIVE_TIME_ASK
+
+    async def test_msg_date_short_year(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.date)
+        await call(
+            measure.msg_archive_date,
+            message=make_message("01.02"),
+            state=state,
+            session=session,
+        )
+        year = today_minsk().year
+        assert (await state.get_data())[measure.A_DATE] == f"{year}-02-01"
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("абырвалг", texts.ARCHIVE_DATE_FORMAT_HINT),
+            ("31.02.2025", texts.ARCHIVE_DATE_FORMAT_HINT),
+            ("01.01.2999", texts.ARCHIVE_FUTURE_ERROR),
+        ],
+    )
+    async def test_msg_date_invalid(self, session, answer, text: str, expected: str) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.date)
+        await call(
+            measure.msg_archive_date,
+            message=make_message(text),
+            state=state,
+            session=session,
+        )
+        answer.assert_awaited_once_with(expected, reply_markup=keyboards.note_cancel_kb())
+        assert await state.get_state() == measure.ArchiveInput.date.state
+
+    async def test_time_other_prompts_free_input(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_time,
+            callback=make_callback("set:archive:time:other", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.ARCHIVE_TIME_OTHER_PROMPT
+        assert await state.get_state() == measure.ArchiveInput.time.state
+
+    async def test_time_preset_opens_calculator(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await state.update_data(**{measure.A_DATE: "2024-03-12"})
+        await call(
+            measure.cb_archive_time,
+            callback=make_callback("set:archive:time:08:00", make_message()),
+            state=state,
+            session=session,
+        )
+        data = await state.get_data()
+        assert data[measure.M_ARCH_LABEL] == "12.03.2024, 08:00"
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
+        assert data[measure.M_BUF] == ""
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "", allow_skip=False
+        )
+
+    async def test_time_preset_future_is_toast(self, session, cb_answer) -> None:
+        state = make_state()
+        tomorrow = (today_minsk() + timedelta(days=1)).isoformat()
+        await state.update_data(**{measure.A_DATE: tomorrow})
+        await call(
+            measure.cb_archive_time,
+            callback=make_callback("set:archive:time:08:00", make_message()),
+            state=state,
+            session=session,
+        )
+        cb_answer.assert_awaited_once_with(texts.ARCHIVE_FUTURE_ERROR)
+        assert await state.get_state() != measure.MeasureInput.sys_input.state
+
+    async def test_time_preset_bad_format_is_toast(self, session, cb_answer) -> None:
+        state = make_state()
+        await state.update_data(**{measure.A_DATE: "2024-03-12"})
+        await call(
+            measure.cb_archive_time,
+            callback=make_callback("set:archive:time:25:99", make_message()),
+            state=state,
+            session=session,
+        )
+        cb_answer.assert_awaited_once_with(schemas.TIME_FORMAT_HINT)
+
+    async def test_time_preset_without_date_goes_to_menu(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_time,
+            callback=make_callback("set:archive:time:08:00", make_message()),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_msg_time_valid(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.time)
+        await state.update_data(**{measure.A_DATE: "2024-03-12"})
+        await call(
+            measure.msg_archive_time,
+            message=make_message("23:30"),
+            state=state,
+            session=session,
+        )
+        data = await state.get_data()
+        assert data[measure.M_ARCH_LABEL] == "12.03.2024, 23:30"
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
+
+    @pytest.mark.parametrize("text", ["25:00", "абырвалг", ""])
+    async def test_msg_time_invalid(self, session, answer, text: str) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.time)
+        await state.update_data(**{measure.A_DATE: "2024-03-12"})
+        await call(
+            measure.msg_archive_time,
+            message=make_message(text),
+            state=state,
+            session=session,
+        )
+        answer.assert_awaited_once_with(
+            schemas.TIME_FORMAT_HINT, reply_markup=keyboards.note_cancel_kb()
+        )
+        assert await state.get_state() == measure.ArchiveInput.time.state
+
+    async def test_msg_time_future(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.time)
+        tomorrow = (today_minsk() + timedelta(days=1)).isoformat()
+        await state.update_data(**{measure.A_DATE: tomorrow})
+        await call(
+            measure.msg_archive_time,
+            message=make_message("08:00"),
+            state=state,
+            session=session,
+        )
+        answer.assert_awaited_once_with(
+            texts.ARCHIVE_FUTURE_ERROR, reply_markup=keyboards.note_cancel_kb()
+        )
+
+
+class TestArchiveQuick:
+    """Быстрый ввод одной строкой (§6.10)."""
+
+    async def test_quick_prompts(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_archive_quick,
+            callback=make_callback("set:archive:quick", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.ARCHIVE_QUICK_PROMPT
+        assert await state.get_state() == measure.ArchiveInput.quick.state
+
+    async def test_quick_saves_with_given_moment(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.quick)
+        await call(
+            measure.msg_archive_quick,
+            message=make_message("12.03.2024 08:30 135/85 72"),
+            state=state,
+            session=session,
+        )
+        expected_text = texts.fmt_archive_saved("12.03.2024, 08:30", 135, 85, 72)
+        assert answer.call_args.args[0] == expected_text
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.archive_saved_kb()
+        row = (
+            await session.execute(
+                select(MeasurementModel).execution_options(populate_existing=True)
+            )
+        ).scalars().one()
+        # 08:30 Europe/Minsk (UTC+3) = 05:30 UTC
+        assert row.timestamp == datetime(2024, 3, 12, 5, 30, tzinfo=timezone.utc)
+        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)
+        data = await state.get_data()
+        assert data[measure.M_ID] == row.id
+        assert data[measure.M_ARCH_LABEL] == "12.03.2024, 08:30"
+
+    async def test_quick_no_pulse(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.quick)
+        await call(
+            measure.msg_archive_quick,
+            message=make_message("12.03.2024 08:30 135/85"),
+            state=state,
+            session=session,
+        )
+        row = (
+            await session.execute(select(MeasurementModel).execution_options(populate_existing=True))
+        ).scalars().one()
+        assert row.pulse is None
+
+    async def test_quick_single_digit_time_accepted(self, session, answer) -> None:
+        """«8:30» — то же, что «08:30» (минимум трения, §2)."""
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.quick)
+        await call(
+            measure.msg_archive_quick,
+            message=make_message("12.03.2024 8:30 135/85 72"),
+            state=state,
+            session=session,
+        )
+        row = (
+            await session.execute(select(MeasurementModel).execution_options(populate_existing=True))
+        ).scalars().one()
+        # 08:30 Europe/Minsk (UTC+3) = 05:30 UTC
+        assert row.timestamp == datetime(2024, 3, 12, 5, 30, tzinfo=timezone.utc)
+        assert (row.systolic, row.diastolic, row.pulse) == (135, 85, 72)
+
+    @pytest.mark.parametrize(
+        "text,expected",
+        [
+            ("абырвалг", texts.ARCHIVE_QUICK_FORMAT_HINT),
+            ("12.03.2024 08:30", texts.ARCHIVE_QUICK_FORMAT_HINT),
+            ("01.01.2999 08:30 135/85", texts.ARCHIVE_FUTURE_ERROR),
+        ],
+    )
+    async def test_quick_invalid(self, session, answer, text: str, expected: str) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.quick)
+        await call(
+            measure.msg_archive_quick, message=make_message(text), state=state, session=session
+        )
+        answer.assert_awaited_once_with(expected, reply_markup=keyboards.note_cancel_kb())
+        rows = (
+            await session.execute(select(MeasurementModel).execution_options(populate_existing=True))
+        ).scalars().all()
+        assert rows == []
+        assert await state.get_state() == measure.ArchiveInput.quick.state
+
+    async def test_quick_duplicate_rejected(self, session, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.ArchiveInput.quick)
+        for _ in range(2):
+            await call(
+                measure.msg_archive_quick,
+                message=make_message("12.03.2024 08:30 135/85 72"),
+                state=state,
+                session=session,
+            )
+        rows = (
+            await session.execute(select(MeasurementModel).execution_options(populate_existing=True))
+        ).scalars().all()
+        assert len(rows) == 1
+        assert answer.call_args.args[0] == texts.DUPLICATE_MEASUREMENT
+
+
+class TestArchiveSave:
+    """Сохранение архива через калькулятор: сводка и ограничения (§6.10)."""
+
+    async def test_saved_summary_is_archive(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await state.set_state(measure.MeasureInput.pulse_input)
+        await archive_draft(state, "2024-03-12T05:30:00+00:00")
+        await tap(state, "m:key:ok", session=session)
+        assert edit.call_args.args[0] == texts.fmt_archive_saved(
+            "12.03.2025, 08:00", 135, 85, 72
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_saved_kb()
+
+    async def test_saved_uses_given_timestamp(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await state.set_state(measure.MeasureInput.pulse_input)
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_PULSE: None})
+        await tap(state, "m:key:skip", session=session)
+        row = (
+            await session.execute(select(MeasurementModel).execution_options(populate_existing=True))
+        ).scalars().one()
+        assert row.timestamp == datetime(2024, 3, 12, 5, 30, tzinfo=timezone.utc)
+
+    async def test_no_high_pressure_warning_in_archive(self, session, edit, cb_answer) -> None:
+        state = make_state()
+        await state.set_state(measure.MeasureInput.pulse_input)
+        await archive_draft(
+            state, "2024-03-12T05:30:00+00:00", **{measure.M_SYS: 190, measure.M_DIA: 120}
+        )
+        await tap(state, "m:key:ok", session=session)
+        assert texts.HIGH_PRESSURE_WARNING not in edit.call_args.args[0]
+
+    async def test_duplicate_archive_moment(self, session, edit, cb_answer) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        await measurements_service.save_measurement(
+            session, user, 135, 85, 72,
+            timestamp=datetime(2024, 3, 12, 5, 30, tzinfo=timezone.utc),
+        )
+        await session.commit()
+        state = make_state()
+        await state.set_state(measure.MeasureInput.pulse_input)
+        await archive_draft(state, "2024-03-12T05:30:45+00:00")  # та же минута
+        await tap(state, "m:key:ok", session=session)
+        assert edit.call_args.args[0] == texts.DUPLICATE_MEASUREMENT
+
+
+class TestArchiveSummaryActions:
+    """Кнопки сводки архива `m:arch:*` (§6.10)."""
+
+    async def test_edit_targets_context_record(self, session, edit, cb_answer) -> None:
+        """«✏️ Изменить» правит запись из контекста, а не последнюю по времени."""
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        older = await measurements_service.save_measurement(
+            session, user, 120, 80,
+            timestamp=datetime(2024, 3, 12, 5, 30, tzinfo=timezone.utc),
+        )
+        await measurements_service.save_measurement(
+            session, user, 130, 85,
+            timestamp=datetime(2025, 1, 1, 10, 0, tzinfo=timezone.utc),
+        )
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: older.id})
+        await call(
+            measure.cb_arch_edit,
+            callback=make_callback("m:arch:edit", make_message()),
+            state=state,
+        )
+        data = await state.get_data()
+        assert data[measure.M_EDIT_ID] == older.id
+        assert data[measure.M_ARCH_TS] == "2024-03-12T05:30:00+00:00"
+        assert await state.get_state() == measure.MeasureInput.sys_input.state
+
+    async def test_edit_without_context_goes_to_menu(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(
+            measure.cb_arch_edit,
+            callback=make_callback("m:arch:edit", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_med_yes_sets_flag_only(self, session, edit, cb_answer) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        measurement = await measurements_service.save_measurement(session, user, 135, 85, 72)
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: measurement.id})
+        await call(
+            measure.cb_arch_med_set,
+            callback=make_callback("m:arch:med:yes", make_message()),
+            state=state,
+            session=session,
+        )
+        row = await reload_measurement(session, measurement.id)
+        assert row.medication_taken is True
+        # Повторный замер и логи приёмов для архива не создаются (§6.10).
+        logs = (
+            await session.execute(
+                select(MedicationLog).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert logs == []
+        rows = (
+            await session.execute(select(MeasurementModel).execution_options(populate_existing=True))
+        ).scalars().all()
+        assert len(rows) == 1
+        assert edit.call_args.args[0] == texts.fmt_archive_saved(
+            "12.03.2025, 08:00", 135, 85, 72
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_saved_kb()
+
+    async def test_med_no_sets_false(self, session, edit, cb_answer) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        measurement = await measurements_service.save_measurement(session, user, 135, 85, 72)
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: measurement.id})
+        await call(
+            measure.cb_arch_med_set,
+            callback=make_callback("m:arch:med:no", make_message()),
+            state=state,
+            session=session,
+        )
+        assert (await reload_measurement(session, measurement.id)).medication_taken is False
+
+    async def test_feel_set(self, session, edit, cb_answer) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        measurement = await measurements_service.save_measurement(session, user, 135, 85, 72)
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: measurement.id})
+        await call(
+            measure.cb_arch_feel_set,
+            callback=make_callback("m:arch:feel:headache", make_message()),
+            state=state,
+            session=session,
+        )
+        assert (await reload_measurement(session, measurement.id)).feeling == "headache"
+
+    async def test_feel_other_text_goes_to_note(self, session, answer) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        measurement = await measurements_service.save_measurement(session, user, 135, 85, 72)
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: measurement.id})
+        await state.set_state(measure.MeasureInput.feeling_other)
+        await call(
+            measure.msg_feeling_other,
+            message=make_message("лёгкое недомогание"),
+            state=state,
+            session=session,
+        )
+        row = await reload_measurement(session, measurement.id)
+        assert row.feeling == "other"
+        assert row.note == "лёгкое недомогание"
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.archive_saved_kb()
+
+    async def test_note_keeps_archive_buttons(self, session, answer) -> None:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        measurement = await measurements_service.save_measurement(session, user, 135, 85, 72)
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: measurement.id})
+        await state.set_state(measure.MeasureInput.note_input)
+        await call(
+            measure.msg_note,
+            message=make_message("после кофе"),
+            state=state,
+            session=session,
+        )
+        assert (await reload_measurement(session, measurement.id)).note == "после кофе"
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.archive_saved_kb()
+
+    async def test_menu_resets_state(self, edit, cb_answer) -> None:
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00")
+        await call(
+            measure.cb_arch_menu,
+            callback=make_callback("m:arch:menu", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MAIN_MENU
+        assert await state.get_data() == {}
+
+    async def test_actions_without_context_go_to_menu(self, edit, cb_answer) -> None:
+        handlers = {
+            "m:arch:note": measure.cb_arch_note,
+            "m:arch:med": measure.cb_arch_med,
+            "m:arch:feel": measure.cb_arch_feel,
+            "m:arch:feel:other": measure.cb_arch_feel_other,
+        }
+        for action, handler in handlers.items():
+            state = make_state()
+            await call(handler, callback=make_callback(action, make_message()), state=state)
+            assert edit.call_args.args[0] == texts.MAIN_MENU
+
+    async def test_med_ask_screen(self, edit, cb_answer) -> None:
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: 1})
+        await call(
+            measure.cb_arch_med,
+            callback=make_callback("m:arch:med", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.MED_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_medication_taken_kb()
+
+    async def test_feel_ask_screen(self, edit, cb_answer) -> None:
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: 1})
+        await call(
+            measure.cb_arch_feel,
+            callback=make_callback("m:arch:feel", make_message()),
+            state=state,
+        )
+        assert edit.call_args.args[0] == texts.FEELING_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_feeling_kb()

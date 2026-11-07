@@ -316,3 +316,25 @@ class TestTone:
                 if word.isascii() and word.isalpha() and len(word) > 3
             ]
             assert not latin_words, f"латиница в тексте: {value!r}"
+
+
+class TestArchiveFormatting:
+    """Сводка архивной записи (§6.10): «✅ Записано за …» + значения."""
+
+    def test_fmt_archive_saved_without_pulse(self) -> None:
+        assert texts.fmt_archive_saved("12.03.2025, 08:00", 135, 85) == (
+            "✅ Записано за 12.03.2025, 08:00\n"
+            "Систолическое: 135\nДиастолическое: 85\nПульс: —"
+        )
+
+    def test_fmt_archive_saved_with_pulse(self) -> None:
+        assert texts.fmt_archive_saved("12.03.2025, 08:00", 135, 85, 72) == (
+            "✅ Записано за 12.03.2025, 08:00\n"
+            "Систолическое: 135\nДиастолическое: 85\nПульс: 72"
+        )
+
+    def test_archive_saved_template_canonical(self) -> None:
+        assert texts.ARCHIVE_SAVED == "✅ Записано за {moment}"
+
+    def test_archive_future_error_canonical(self) -> None:
+        assert texts.ARCHIVE_FUTURE_ERROR == "Время измерения не может быть в будущем"

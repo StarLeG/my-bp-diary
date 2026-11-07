@@ -8,7 +8,7 @@ from sqlalchemy import delete as sa_delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm.exc import StaleDataError
 
-from bot.models import Measurement, User
+from bot.models import Measurement, MeasurementMedication, Medication, MedicationLog, User
 from bot.services import measurements as service
 
 UTC = timezone.utc
@@ -515,3 +515,145 @@ class TestDeleteUserData:
         reminders.remove_user_jobs.assert_awaited_once_with(uid)
         # Откат: строка пользователя осталась на месте.
         assert await service.get_user(session, tg) is not None
+
+
+class TestUpdateMeasurementTimestamp:
+    """Смена момента записи правкой из ЛК (§16.2)."""
+
+    async def _saved(self, session: AsyncSession, user: User) -> Measurement:
+        saved = await service.save_measurement(
+            session, user, 135, 85, 72, timestamp=aware(2026, 11, 4, 8, 30)
+        )
+        await session.commit()
+        return saved
+
+    async def test_changes_timestamp(self, session: AsyncSession, user: User) -> None:
+        saved = await self._saved(session, user)
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 135, 85, 72, timestamp=aware(2026, 11, 4, 21, 0)
+        )
+        await session.commit()
+        assert updated is not None
+        assert updated.timestamp == aware(2026, 11, 4, 21, 0)
+
+    async def test_same_minute_own_record_ok(self, session: AsyncSession, user: User) -> None:
+        """Проверка дубля не считает саму правимую запись."""
+        saved = await self._saved(session, user)
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 135, 85, 72, timestamp=aware(2026, 11, 4, 8, 30, 45)
+        )
+        await session.commit()
+        assert updated is not None
+        assert updated.timestamp == aware(2026, 11, 4, 8, 30, 45)
+
+    async def test_duplicate_minute_rejected(self, session: AsyncSession, user: User) -> None:
+        saved = await self._saved(session, user)
+        await service.save_measurement(
+            session, user, 120, 80, timestamp=aware(2026, 11, 5, 10, 0)
+        )
+        await session.commit()
+        with pytest.raises(service.DuplicateMeasurementError):
+            await service.update_measurement_values(
+                session, user, saved.id, 135, 85, 72, timestamp=aware(2026, 11, 5, 10, 0, 30)
+            )
+
+    async def test_foreign_duplicate_minute_rejected(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        saved = await self._saved(session, user)
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        await service.save_measurement(
+            session, other, 120, 80, timestamp=aware(2026, 11, 5, 10, 0)
+        )
+        await session.commit()
+        # Чужая запись в ту же минуту не мешает: дедуп строго по владельцу (§7.1).
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 135, 85, 72, timestamp=aware(2026, 11, 5, 10, 0, 30)
+        )
+        await session.commit()
+        assert updated is not None
+
+    async def test_naive_timestamp_treated_as_utc(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        saved = await self._saved(session, user)
+        updated = await service.update_measurement_values(
+            session, user, saved.id, 135, 85, 72,
+            timestamp=datetime(2026, 11, 4, 21, 0),
+        )
+        await session.commit()
+        assert updated is not None
+        assert updated.timestamp == aware(2026, 11, 4, 21, 0)
+
+
+class TestDeleteMeasurement:
+    """Удаление записи из ЛК (§16.2)."""
+
+    async def _saved(self, session: AsyncSession, user: User) -> Measurement:
+        saved = await service.save_measurement(
+            session, user, 135, 85, 72, timestamp=aware(2026, 11, 4, 8, 30)
+        )
+        await session.commit()
+        return saved
+
+    async def test_deletes_own_record(self, session: AsyncSession, user: User) -> None:
+        saved = await self._saved(session, user)
+        assert await service.delete_measurement(session, user, saved.id) is True
+        await session.commit()
+        assert await service.get_measurement(session, user, saved.id) is None
+
+    async def test_missing_record_returns_false(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        assert await service.delete_measurement(session, user, 999) is False
+
+    async def test_foreign_record_returns_false(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        saved = await self._saved(session, user)
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        assert await service.delete_measurement(session, other, saved.id) is False
+        await session.commit()
+        assert await service.get_measurement(session, user, saved.id) is not None
+
+    async def test_double_delete_is_idempotent(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        saved = await self._saved(session, user)
+        assert await service.delete_measurement(session, user, saved.id) is True
+        await session.commit()
+        assert await service.delete_measurement(session, user, saved.id) is False
+
+    async def test_cascades_links_keeps_logs(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """`measurement_medications` — каскадом, `medication_logs` не трогаются (§16.2)."""
+        saved = await self._saved(session, user)
+        medication = Medication(user_id=user.id, name="Лозартан", dosage="50 мг", slot="morning")
+        session.add(medication)
+        await session.flush()
+        session.add(MeasurementMedication(measurement_id=saved.id, medication_id=medication.id))
+        log = MedicationLog(
+            user_id=user.id, medication_id=medication.id, timestamp=aware(2026, 11, 4, 8, 0),
+            status="taken", slot="morning",
+        )
+        session.add(log)
+        await session.commit()
+        assert await service.delete_measurement(session, user, saved.id) is True
+        await session.commit()
+        links = (
+            await session.execute(
+                select(MeasurementMedication).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert links == []
+        logs = (
+            await session.execute(
+                select(MedicationLog).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert len(logs) == 1

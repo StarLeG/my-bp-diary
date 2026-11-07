@@ -1,11 +1,15 @@
 """Тесты Pydantic-схем и парсеров ввода (bot/schemas.py)."""
 from __future__ import annotations
 
+from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
+
 import pytest
 from pydantic import ValidationError
 
 from bot.schemas import (
     TIME_FORMAT_HINT,
+    ArchiveQuick,
     DosageInput,
     FeelingInput,
     MeasurementInput,
@@ -13,6 +17,9 @@ from bot.schemas import (
     NoteInput,
     TimeInput,
     TimezoneInput,
+    combine_moment,
+    parse_archive_date,
+    parse_archive_quick,
     validate_int,
     validate_dosage,
     validate_medication_name,
@@ -148,6 +155,8 @@ class TestTimeInput:
         [
             ("00:00", 0, 0),
             ("08:30", 8, 30),
+            ("2:30", 2, 30),  # час без ведущего нуля = 02:30
+            ("8:30", 8, 30),
             ("23:59", 23, 59),
             ("  09:05  ", 9, 5),
         ],
@@ -158,7 +167,7 @@ class TestTimeInput:
 
     @pytest.mark.parametrize(
         "raw",
-        ["8:30", "08:3", "0830", "24:00", "12:60", "08:30:00", "абырвалг", "", "  "],
+        ["08:3", "0830", "24:00", "12:60", "08:30:00", "абырвалг", "", "  "],
     )
     def test_invalid(self, raw: str) -> None:
         with pytest.raises(ValidationError) as exc_info:
@@ -237,6 +246,10 @@ class TestValidateTime:
         value = validate_time("08:30")
         assert (value.hour, value.minute) == (8, 30)
 
+    def test_single_digit_hour(self) -> None:
+        """«2:30» — то же, что «02:30» (минимум трения, §2)."""
+        assert validate_time("2:30") == time(2, 30)
+
     def test_invalid_raises_clean_value_error(self) -> None:
         with pytest.raises(ValueError) as exc_info:
             validate_time("25:00")
@@ -312,3 +325,172 @@ class TestValidateDosage:
     def test_too_long(self) -> None:
         with pytest.raises(ValueError):
             validate_dosage("x" * 51)
+
+
+#: Фиксированное «сейчас» для архивных парсеров (§9, §6.10).
+NOW = datetime(2025, 3, 20, 12, 0, tzinfo=ZoneInfo("Europe/Minsk"))
+TODAY = NOW.date()
+
+
+class TestParseArchiveDate:
+    """Дата архива `ДД.ММ[.ГГГГ]` (§9, §6.10)."""
+
+    def test_full_date(self) -> None:
+        assert parse_archive_date("12.03.2025", TODAY) == date(2025, 3, 12)
+
+    def test_short_date_uses_current_year(self) -> None:
+        assert parse_archive_date("12.03", TODAY) == date(2025, 3, 12)
+
+    def test_strip(self) -> None:
+        assert parse_archive_date("  01.03.2024  ", TODAY) == date(2024, 3, 1)
+
+    @pytest.mark.parametrize("raw", ["1.3.2025", "1.03.2025", "01.3.2025"])
+    def test_single_digit_day_or_month(self, raw: str) -> None:
+        """«1.3» — то же, что «01.03» (минимум трения, §2)."""
+        assert parse_archive_date(raw, TODAY) == date(2025, 3, 1)
+
+    def test_single_digit_short_date(self) -> None:
+        assert parse_archive_date("1.3", TODAY) == date(2025, 3, 1)
+
+    def test_today_ok(self) -> None:
+        assert parse_archive_date("20.03.2025", TODAY) == date(2025, 3, 20)
+
+    @pytest.mark.parametrize(
+        "raw",
+        ["2025-03-12", "12/03/2025", "абырвалг", "", "   ", "12.03.2025 08:00"],
+    )
+    def test_bad_format(self, raw: str) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_date(raw, TODAY)
+        assert str(exc_info.value) == texts.ARCHIVE_DATE_FORMAT_HINT
+
+    def test_impossible_calendar_date(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_date("31.02.2025", TODAY)
+        assert str(exc_info.value) == texts.ARCHIVE_DATE_FORMAT_HINT
+
+    def test_future_rejected(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_date("21.03.2025", TODAY)
+        assert str(exc_info.value) == texts.ARCHIVE_FUTURE_ERROR
+
+    def test_future_short_date_rejected(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_date("25.12", TODAY)
+        assert str(exc_info.value) == texts.ARCHIVE_FUTURE_ERROR
+
+
+class TestCombineMoment:
+    """Момент архива: дата + время в таймзоне пользователя, ≤ текущего (§9)."""
+
+    def test_combines_in_user_timezone(self) -> None:
+        moment = combine_moment(date(2025, 3, 12), time(8, 30), "Europe/Minsk", now=NOW)
+        assert (moment.year, moment.month, moment.day) == (2025, 3, 12)
+        assert (moment.hour, moment.minute) == (8, 30)
+        assert moment.utcoffset() == timedelta(hours=3)
+
+    def test_past_ok(self) -> None:
+        combine_moment(date(2025, 3, 12), time(23, 59), "Europe/Minsk", now=NOW)
+
+    def test_equal_to_now_ok(self) -> None:
+        combine_moment(NOW.date(), time(12, 0), "Europe/Minsk", now=NOW)
+
+    def test_future_raises(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            combine_moment(date(2025, 3, 21), time(8, 0), "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.ARCHIVE_FUTURE_ERROR
+
+    def test_future_time_same_day_raises(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            combine_moment(NOW.date(), time(13, 0), "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.ARCHIVE_FUTURE_ERROR
+
+    def test_naive_now_treated_as_local(self) -> None:
+        moment = combine_moment(
+            date(2025, 3, 12), time(8, 0), "Europe/Minsk", now=datetime(2025, 3, 20, 12, 0)
+        )
+        assert moment.day == 12
+
+    def test_naive_now_before_moment_raises(self) -> None:
+        with pytest.raises(ValueError):
+            combine_moment(
+                date(2025, 3, 21), time(8, 0), "Europe/Minsk",
+                now=datetime(2025, 3, 20, 12, 0),
+            )
+
+
+class TestParseArchiveQuick:
+    """Быстрый ввод `ДД.ММ[.ГГГГ] ЧЧ:ММ САД/ДАД [пульс]` (§6.10)."""
+
+    def test_full_row(self) -> None:
+        parsed = parse_archive_quick("12.03.2025 08:30 135/85 72", "Europe/Minsk", now=NOW)
+        assert isinstance(parsed, ArchiveQuick)
+        assert (parsed.moment.day, parsed.moment.hour, parsed.moment.minute) == (12, 8, 30)
+        assert (parsed.systolic, parsed.diastolic, parsed.pulse) == (135, 85, 72)
+
+    def test_short_date_and_no_pulse(self) -> None:
+        parsed = parse_archive_quick("12.03 08:30 135/85", "Europe/Minsk", now=NOW)
+        assert parsed.moment.date() == date(2025, 3, 12)
+        assert parsed.pulse is None
+
+    def test_extra_spaces_between_parts(self) -> None:
+        parsed = parse_archive_quick("12.03.2025  08:30  135/85  72", "Europe/Minsk", now=NOW)
+        assert (parsed.systolic, parsed.diastolic, parsed.pulse) == (135, 85, 72)
+
+    def test_single_digit_time(self) -> None:
+        """«8:30» — то же, что «08:30» (минимум трения, §2)."""
+        parsed = parse_archive_quick("12.03.2025 8:30 135/85", "Europe/Minsk", now=NOW)
+        assert (parsed.moment.hour, parsed.moment.minute) == (8, 30)
+
+    def test_single_digit_everywhere(self) -> None:
+        """«2.3 2:30 120/80» = «02.03 02:30 120/80» — ввод как в чате."""
+        parsed = parse_archive_quick("2.3 2:30 120/80", "Europe/Minsk", now=NOW)
+        assert parsed.moment.date() == date(2025, 3, 2)
+        assert (parsed.moment.hour, parsed.moment.minute) == (2, 30)
+        assert (parsed.systolic, parsed.diastolic, parsed.pulse) == (120, 80, None)
+
+    @pytest.mark.parametrize(
+        "raw",
+        [
+            "12.03.2025 08:30",  # без давления
+            "12.03.2025 08:30 135",  # без диастолического
+            "12.03 08:30 135/85 72 5",  # лишнее поле
+            "абырвалг",
+            "",
+        ],
+    )
+    def test_bad_format(self, raw: str) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick(raw, "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.ARCHIVE_QUICK_FORMAT_HINT
+
+    def test_impossible_calendar_date(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick("31.02.2025 08:30 135/85", "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.ARCHIVE_QUICK_FORMAT_HINT
+
+    def test_future_moment(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick("21.03.2025 08:30 135/85", "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.ARCHIVE_FUTURE_ERROR
+
+    def test_moment_checked_before_values(self) -> None:
+        """Будущий момент важнее ошибок диапазона (порядок проверок §6.10)."""
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick("21.03.2025 08:30 300/200", "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.ARCHIVE_FUTURE_ERROR
+
+    def test_systolic_out_of_range(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick("12.03 08:30 300/85", "Europe/Minsk", now=NOW)
+        assert "систолическое" in str(exc_info.value)
+
+    def test_pair_validation(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick("12.03 08:30 120/130", "Europe/Minsk", now=NOW)
+        assert str(exc_info.value) == texts.DIA_NOT_LOWER
+
+    def test_pulse_out_of_range(self) -> None:
+        with pytest.raises(ValueError) as exc_info:
+            parse_archive_quick("12.03 08:30 135/85 5", "Europe/Minsk", now=NOW)
+        assert "пульс" in str(exc_info.value)

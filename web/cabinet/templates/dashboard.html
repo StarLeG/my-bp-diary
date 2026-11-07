@@ -39,12 +39,18 @@
       <p class="alert alert-error">Не удалось сохранить лекарство: проверьте название, дозировку и слот.</p>
     {% elif error == "reminder" %}
       <p class="alert alert-error">Не удалось сохранить напоминания: проверьте время (ЧЧ:ММ).</p>
+    {% elif error == "measurement" %}
+      <p class="alert alert-error">Не удалось сохранить измерение: проверьте дату, время и значения.</p>
+    {% elif error == "duplicate" %}
+      <p class="alert alert-error">Это давление уже записано.</p>
     {% elif saved == "profile" %}
       <p class="alert alert-ok">Профиль сохранён.</p>
     {% elif saved == "medication" %}
       <p class="alert alert-ok">Лекарства обновлены.</p>
     {% elif saved == "reminder" %}
       <p class="alert alert-ok">Напоминания сохранены.</p>
+    {% elif saved == "measurement" %}
+      <p class="alert alert-ok">Запись сохранена.</p>
     {% endif %}
 
     <!-- ── Личная карточка ── -->
@@ -167,6 +173,118 @@
     <!-- ── История ── -->
     <section class="card" id="history">
       <h2>История записей</h2>
+
+      <div class="row">
+        <a class="btn" href="/?add=1#history">➕ Добавить измерение</a>
+        <a class="btn btn-ghost" href="/?import=1#history">📥 Импорт CSV</a>
+      </div>
+
+      {% if confirm_delete_id %}
+        <div class="alert alert-error">
+          <p>Удалить запись? Это действие нельзя отменить.</p>
+          <div class="row">
+            <form method="post" action="/measurements/{{ confirm_delete_id }}/delete" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn btn-danger">Удалить</button>
+            </form>
+            <a class="btn btn-ghost" href="/#history">Отмена</a>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if show_add_form %}
+        <h3>{% if edit_measurement %}Изменить запись{% else %}Добавить запись{% endif %}</h3>
+        <form method="post"
+              action="{% if edit_measurement %}/measurements/{{ edit_measurement.id }}{% else %}/measurements{% endif %}"
+              class="stack form-narrow">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <div class="row">
+            <label>
+              Дата
+              <input type="date" name="date" value="{{ form_values.date }}" max="{{ today.isoformat() }}" required>
+            </label>
+            <label>
+              Время
+              <input type="time" name="time" value="{{ form_values.time }}" required>
+            </label>
+          </div>
+          <div class="row">
+            <label>
+              Систолическое
+              <input type="number" name="systolic" min="70" max="260" value="{{ form_values.systolic }}" required>
+            </label>
+            <label>
+              Диастолическое
+              <input type="number" name="diastolic" min="40" max="160" value="{{ form_values.diastolic }}" required>
+            </label>
+            <label>
+              Пульс (необязательно)
+              <input type="number" name="pulse" min="30" max="220" value="{{ form_values.pulse }}">
+            </label>
+          </div>
+          <label class="check">
+            <input type="checkbox" name="medication_taken" value="1"
+                   {% if form_values.medication_taken %}checked{% endif %}>
+            Принял лекарство
+          </label>
+          <label>
+            Самочувствие
+            <select name="feeling">
+              <option value="" {% if not form_values.feeling %}selected{% endif %}>—</option>
+              {% for key, label in feeling_labels.items() %}
+                <option value="{{ key }}" {% if form_values.feeling == key %}selected{% endif %}>{{ label }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Текст для «Другое» (сохранится в заметку)
+            <input type="text" name="feeling_other" maxlength="500" placeholder="Например: лёгкое недомогание">
+          </label>
+          <label>
+            Заметка (до 500 символов)
+            <textarea name="note" maxlength="500" rows="3">{{ form_values.note }}</textarea>
+          </label>
+          <div class="row">
+            <button type="submit" class="btn">
+              {% if edit_measurement %}Сохранить изменения{% else %}Записать{% endif %}
+            </button>
+            <a class="btn btn-ghost" href="/#history">Отмена</a>
+          </div>
+        </form>
+      {% endif %}
+
+      {% if show_import_form %}
+        <h3>Импорт CSV</h3>
+        <p class="muted">
+          Формат как у экспорта: UTF-8, разделитель «;», колонки timestamp_local,
+          systolic, diastolic, pulse, medication_taken, feeling, note. До 5000 строк.
+        </p>
+        {% if import_error %}
+          <p class="alert alert-error">{{ import_error }}</p>
+        {% endif %}
+        {% if import_report %}
+          <p class="alert alert-ok">{{ import_report.text() }}</p>
+          {% if import_report.error_lines %}
+            <ul class="facts">
+              {% for line in import_report.error_lines %}
+                <li>{{ line }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+        {% endif %}
+        <form method="post" action="/import" enctype="multipart/form-data" class="stack form-narrow">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <input type="hidden" name="days" value="{{ days }}">
+          <input type="hidden" name="date_from" value="{{ date_from }}">
+          <input type="hidden" name="date_to" value="{{ date_to }}">
+          <label>
+            Файл CSV
+            <input type="file" name="file" accept=".csv,text/csv" required>
+          </label>
+          <button type="submit" class="btn">Импортировать</button>
+        </form>
+      {% endif %}
+
       {% if not measurements %}
         <p>За этот период записей нет.</p>
       {% else %}
@@ -182,6 +300,7 @@
                 <th>Лекарство</th>
                 <th>Самочувствие</th>
                 <th>Заметка</th>
+                <th>Действия</th>
               </tr>
             </thead>
             <tbody>
@@ -195,6 +314,10 @@
                   <td data-label="Лекарство">{{ medication_cells[m.id] }}</td>
                   <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
                   <td data-label="Заметка" class="note">{{ m.note or "" }}</td>
+                  <td data-label="Действия" class="actions">
+                    <a class="btn btn-ghost" href="/?edit={{ m.id }}#history" title="Изменить">✏️</a>
+                    <a class="btn btn-danger" href="/?confirm_delete={{ m.id }}#history" title="Удалить">🗑</a>
+                  </td>
                 </tr>
               {% endfor %}
             </tbody>

@@ -8,26 +8,30 @@ HTTPS-доступе — по схеме запроса или `CABINET_URL`. П
 HTTP-запрос (`Depends`); модели — из `bot/models.py` (SPEC.md, раздел 16.3).
 
 Содержимое: личная карточка, история с фильтрами, сводка с графиком и CSV,
-CRUD лекарств, настройки напоминаний. Платёжных данных нет — только ссылка
-на внешнюю страницу поддержки из бота.
+CRUD лекарств, настройки напоминаний, добавление/правка/удаление записей и
+импорт CSV архива (§16.2). Платёжных данных нет — только ссылка на внешнюю
+страницу поддержки из бота.
 """
 from __future__ import annotations
 
+import asyncio
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
-from typing import AsyncIterator, Optional
+from typing import AsyncIterator, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from starlette.datastructures import UploadFile  # request.form() возвращает starlette-экземпляр
+from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-from bot import texts
+from bot import schemas, texts
 from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
 from bot.models import Doctor, Measurement, Medication, Reminder, User, WebUser
@@ -35,9 +39,16 @@ from bot.services import csv_export
 from bot.services import doctor as doctor_service
 from bot.services import medications as medications_service
 from bot.services import stats
-from bot.services.measurements import measurements_for_period
+from bot.services.measurements import (
+    DuplicateMeasurementError,
+    delete_measurement,
+    get_measurement,
+    measurements_for_period,
+    save_measurement,
+    update_measurement_values,
+)
 from bot.services.reminders import next_slot_occurrence
-from web.cabinet import auth, doctor_auth
+from web.cabinet import auth, csv_import, doctor_auth
 from web.cabinet.chart_zones import CHART_ZONES
 
 #: Имя сессионной cookie (SPEC.md, раздел 16.2: HTTP-only, 7 дней).
@@ -91,16 +102,17 @@ _templates = Jinja2Templates(directory=str(_BASE_DIR / "templates"))
 # ─────────────────────────── Вспомогательное ───────────────────────────
 
 
-def _valid_hhmm(value: str) -> bool:
-    """Время в формате HH:MM с реальными часами и минутами."""
-    parts = value.split(":")
-    if len(parts) != 2:
-        return False
+def _normalize_hhmm(value: str) -> Optional[str]:
+    """Время слота → нормализованная строка «ЧЧ:ММ»; час — 1–2 цифры («2:30» = «02:30»).
+
+    Та же валидация, что в боте (`bot.schemas.validate_time`).
+    None — не распознано.
+    """
     try:
-        hour, minute = int(parts[0]), int(parts[1])
+        parsed = schemas.validate_time(value)
     except ValueError:
-        return False
-    return len(parts[0]) == 2 and len(parts[1]) == 2 and 0 <= hour <= 23 and 0 <= minute <= 59
+        return None
+    return f"{parsed.hour:02d}:{parsed.minute:02d}"
 
 
 def _client_ip(request: Request) -> str:
@@ -138,6 +150,68 @@ def _chart_payload(measurements: list[Measurement], tz_name: str) -> list[dict]:
         }
         for m in measurements
     ]
+
+
+def _measurement_form_values(
+    edit: Optional[Measurement], tz: ZoneInfo, now: datetime
+) -> dict:
+    """Значения формы записи: правка — из записи, добавление — текущие (§16.2)."""
+    moment = (edit.timestamp if edit is not None else now).astimezone(tz)
+    return {
+        "date": moment.date().isoformat(),
+        "time": moment.strftime("%H:%M"),
+        "systolic": edit.systolic if edit is not None else "",
+        "diastolic": edit.diastolic if edit is not None else "",
+        "pulse": edit.pulse if edit is not None and edit.pulse is not None else "",
+        "medication_taken": edit.medication_taken is True if edit is not None else False,
+        "feeling": (edit.feeling or "") if edit is not None else "",
+        "note": (edit.note or "") if edit is not None else "",
+    }
+
+
+def _parse_measurement_form(form: Mapping[str, str], tz_name: str) -> dict:
+    """Разобрать и проверить форму записи измерения (§9, §16.2).
+
+    Чекбокс «Принял лекарство»: отмечен — True, снят — None («не отмечал»);
+    «Другое» самочувствия — короткий текст в заметку.
+
+    Исключения:
+        ValueError: поле не прошло валидацию. Текст — для отладки: форма
+            редиректится с `?error=measurement`, сообщение на экран не идёт.
+    """
+    try:
+        day = date.fromisoformat(str(form.get("date", "")).strip())
+        moment_time = schemas.validate_time(str(form.get("time", "")))
+        moment = schemas.combine_moment(day, moment_time, tz_name)
+        values = schemas.MeasurementInput(
+            systolic=int(str(form.get("systolic", "")).strip()),
+            diastolic=int(str(form.get("diastolic", "")).strip()),
+            pulse=int(str(form.get("pulse", "")).strip()) if str(form.get("pulse", "")).strip() else None,
+        )
+        schemas.validate_pair(values.systolic, values.diastolic)
+    except (ValidationError, ValueError, TypeError) as exc:
+        raise ValueError("проверьте дату, время и значения") from exc
+    medication_taken = True if form.get("medication_taken") else None
+    feeling = str(form.get("feeling", "")).strip()
+    if feeling not in ("", "normal", "headache", "weakness", "other"):
+        raise ValueError("самочувствие не распознано")
+    note_raw = str(form.get("note", "")).strip()
+    other_raw = str(form.get("feeling_other", "")).strip() if feeling == "other" else ""
+    if other_raw:
+        note_raw = f"{note_raw}\n{other_raw}" if note_raw else other_raw
+    try:
+        note = schemas.validate_note(note_raw) if note_raw else None
+    except ValueError as exc:
+        raise ValueError("заметка длиннее 500 символов") from exc
+    return {
+        "moment": moment,
+        "systolic": values.systolic,
+        "diastolic": values.diastolic,
+        "pulse": values.pulse,
+        "medication_taken": medication_taken,
+        "feeling": feeling or None,
+        "note": note,
+    }
 
 
 # ─────────────────────────── Приложение ───────────────────────────
@@ -534,18 +608,21 @@ def create_app(
 
     # ───────────────────── Дашборд ─────────────────────
 
-    @app.get("/", response_class=HTMLResponse)
-    async def dashboard(
+    async def _dashboard_response(
         request: Request,
-        days: str = Query("7"),
-        date_from: str = Query(""),
-        date_to: str = Query(""),
-        error: str = Query(""),
-        db: AsyncSession = Depends(get_db),
-        web_user: WebUser = Depends(require_user),
+        db: AsyncSession,
+        web_user: WebUser,
+        days: str,
+        date_from: str,
+        date_to: str,
+        error: str = "",
+        saved: str = "",
+        extra: Optional[dict] = None,
     ) -> Response:
-        """Личная карточка, история, сводка, лекарства и напоминания."""
+        """Собрать страницу дашборда; `extra` — контекст форм записи/импорта (§16.2)."""
         user = await load_user(db, web_user)
+        tz = ZoneInfo(user.timezone)
+        now_local = datetime.now(tz)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
@@ -562,36 +639,46 @@ def create_app(
             ).scalars()
         )
         csrf_token = csrf.issue()
-        response = _templates.TemplateResponse(
-            request,
-            "dashboard.html",
-            {
-                "web_user": web_user,
-                "user": user,
-                "user_zone": ZoneInfo(user.timezone),
-                "slot_order": SLOT_ORDER,
-                "med_slot_order": medications_service.SLOTS,
-                "slot_labels": texts.SLOT_LABELS,
-                "feeling_labels": texts.FEELING_LABELS,
-                "medication_cells": medication_cells,
-                "measurements": measurements,
-                "summary": summary,
-                "medications": medications,
-                "reminders": {r.type: r for r in reminders},
-                "doctor_notes": doctor_notes,
-                "chart": _chart_payload(measurements, user.timezone),
-                "chart_zones": CHART_ZONES,
-                "days": days,
-                "date_from": date_from,
-                "date_to": date_to,
-                "start_day": start_day,
-                "end_day": end_day,
-                "error": error,
-                "saved": request.query_params.get("saved", ""),
-                "csrf_token": csrf_token,
-                "today": datetime.now(ZoneInfo(user.timezone)).date(),
-            },
+        context = {
+            "web_user": web_user,
+            "user": user,
+            "user_zone": tz,
+            "slot_order": SLOT_ORDER,
+            "med_slot_order": medications_service.SLOTS,
+            "slot_labels": texts.SLOT_LABELS,
+            "feeling_labels": texts.FEELING_LABELS,
+            "medication_cells": medication_cells,
+            "measurements": measurements,
+            "summary": summary,
+            "medications": medications,
+            "reminders": {r.type: r for r in reminders},
+            "doctor_notes": doctor_notes,
+            "chart": _chart_payload(measurements, user.timezone),
+            "chart_zones": CHART_ZONES,
+            "days": days,
+            "date_from": date_from,
+            "date_to": date_to,
+            "start_day": start_day,
+            "end_day": end_day,
+            "error": error,
+            "saved": saved,
+            "csrf_token": csrf_token,
+            "today": now_local.date(),
+            "now_local": now_local,
+            # формы записи и импорта (§16.2)
+            "show_add_form": False,
+            "edit_measurement": None,
+            "confirm_delete_id": None,
+            "show_import_form": False,
+            "import_report": None,
+            "import_error": "",
+        }
+        if extra:
+            context.update(extra)
+        context["form_values"] = _measurement_form_values(
+            context.get("edit_measurement"), tz, now_local
         )
+        response = _templates.TemplateResponse(request, "dashboard.html", context)
         response.set_cookie(
             CSRF_COOKIE,
             csrf_token,
@@ -602,6 +689,47 @@ def create_app(
             path="/",
         )
         return response
+
+    @app.get("/", response_class=HTMLResponse)
+    async def dashboard(
+        request: Request,
+        days: str = Query("7"),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        error: str = Query(""),
+        saved: str = Query(""),
+        add: str = Query(""),
+        edit: str = Query(""),
+        confirm_delete: str = Query(""),
+        import_form: str = Query("", alias="import"),
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Личная карточка, история, сводка, лекарства и напоминания.
+
+        Параметры `add` / `edit` / `confirm_delete` / `import` управляют
+        формами (§16.2): `?add=1` — форма добавления, `?edit={id}` — правка
+        записи, `?confirm_delete={id}` — подтверждение удаления, `?import=1` —
+        форма импорта CSV.
+        """
+        user = await load_user(db, web_user)
+        extra: dict = {}
+        if add or error in ("measurement", "duplicate"):
+            extra["show_add_form"] = True
+        if edit.isdigit():
+            measurement = await get_measurement(db, user, int(edit))
+            if measurement is not None:
+                extra["show_add_form"] = True
+                extra["edit_measurement"] = measurement
+        if confirm_delete.isdigit():
+            victim = await get_measurement(db, user, int(confirm_delete))
+            if victim is not None:
+                extra["confirm_delete_id"] = victim.id
+        if import_form:
+            extra["show_import_form"] = True
+        return await _dashboard_response(
+            request, db, web_user, days, date_from, date_to, error, saved, extra
+        )
 
     # ───────────────────── Профиль ─────────────────────
 
@@ -717,6 +845,144 @@ def create_app(
         await db.commit()
         return RedirectResponse(url="/?saved=medication#medications", status_code=303)
 
+    # ───────────────────── Записи измерений ─────────────────────
+
+    @app.post("/measurements")
+    async def measurement_add(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Добавить запись измерения из ЛК (§16.2): момент — любой прошедший.
+
+        Дубль за ту же минуту отсекается сервисом; сохранение идемпотентно
+        при двойной отправке формы (§7.2 п.4).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        try:
+            values = _parse_measurement_form(form, user.timezone)
+        except ValueError:
+            return RedirectResponse(url="/?error=measurement#history", status_code=303)
+        try:
+            measurement = await save_measurement(
+                db,
+                user,
+                values["systolic"],
+                values["diastolic"],
+                values["pulse"],
+                timestamp=values["moment"],
+            )
+        except DuplicateMeasurementError:
+            return RedirectResponse(url="/?error=duplicate#history", status_code=303)
+        measurement.medication_taken = values["medication_taken"]
+        measurement.feeling = values["feeling"]
+        measurement.note = values["note"]
+        await db.commit()
+        return RedirectResponse(url="/?saved=measurement#history", status_code=303)
+
+    @app.post("/measurements/{measurement_id}")
+    async def measurement_update(
+        measurement_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Правка записи: меняет и момент, с проверкой дубля за минуту (§16.2)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        try:
+            values = _parse_measurement_form(form, user.timezone)
+        except ValueError:
+            return RedirectResponse(url="/?error=measurement#history", status_code=303)
+        try:
+            measurement = await update_measurement_values(
+                db,
+                user,
+                measurement_id,
+                values["systolic"],
+                values["diastolic"],
+                values["pulse"],
+                timestamp=values["moment"],
+            )
+        except DuplicateMeasurementError:
+            return RedirectResponse(url="/?error=duplicate#history", status_code=303)
+        if measurement is None:
+            return RedirectResponse(url="/?error=measurement#history", status_code=303)
+        measurement.medication_taken = values["medication_taken"]
+        measurement.feeling = values["feeling"]
+        measurement.note = values["note"]
+        await db.commit()
+        return RedirectResponse(url="/?saved=measurement#history", status_code=303)
+
+    @app.post("/measurements/{measurement_id}/delete")
+    async def measurement_delete(
+        measurement_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Удалить запись — только после подтверждения на форме (§16.2).
+
+        Повторная отправка идемпотентна: уже удалённая (или чужая) запись
+        выглядит как отсутствующая, редирект тот же.
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        await delete_measurement(db, user, measurement_id)
+        await db.commit()
+        return RedirectResponse(url="/?saved=measurement#history", status_code=303)
+
+    # ───────────────────── Импорт CSV ─────────────────────
+
+    @app.post("/import")
+    async def import_measurements_csv(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Импорт CSV архива: разбор в потоке, вставка одной транзакцией (§16.2).
+
+        Разбор файла — в `asyncio.to_thread` (§7.2 п.7); двойная отправка
+        формы дублей не создаёт — все строки второго прогона попадают в
+        «Пропущено дублей» (§7.2 п.4). Отчёт рендерится прямо здесь: повторный
+        refresh страницы лишь повторит разбор, ничего не вставив.
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        days = str(form.get("days", "7"))
+        date_from = str(form.get("date_from", ""))
+        date_to = str(form.get("date_to", ""))
+        extra: dict = {"show_import_form": True}
+        upload = form.get("file")
+        data = (
+            await upload.read()
+            if isinstance(upload, UploadFile) and upload.filename
+            else b""
+        )
+        if not data:
+            extra["import_error"] = "Выберите файл."
+            return await _dashboard_response(
+                request, db, web_user, days, date_from, date_to, extra=extra
+            )
+        try:
+            parsed = await asyncio.to_thread(csv_import.parse, data, user.timezone)
+        except ValueError as exc:
+            extra["import_error"] = str(exc)
+            return await _dashboard_response(
+                request, db, web_user, days, date_from, date_to, extra=extra
+            )
+        report = await csv_import.import_rows(db, user, parsed)
+        await db.commit()
+        extra["import_report"] = report
+        return await _dashboard_response(
+            request, db, web_user, days, date_from, date_to, extra=extra
+        )
+
     # ───────────────────── Напоминания ─────────────────────
 
     @app.post("/settings")
@@ -735,9 +1001,9 @@ def create_app(
         user = await load_user(db, web_user)
         now = datetime.now(ZoneInfo("UTC"))
         for slot in SLOT_ORDER:
-            local_time = str(form.get(f"slot_{slot}_time", "")).strip()
+            local_time = _normalize_hhmm(str(form.get(f"slot_{slot}_time", "")).strip())
             enabled = bool(form.get(f"slot_{slot}_enabled"))
-            if enabled and not _valid_hhmm(local_time):
+            if enabled and local_time is None:
                 return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
             reminder = (
                 await db.execute(
@@ -746,7 +1012,7 @@ def create_app(
                     )
                 )
             ).scalar_one_or_none()
-            if enabled:
+            if enabled and local_time is not None:
                 if reminder is None:
                     reminder = Reminder(
                         user_id=user.id,

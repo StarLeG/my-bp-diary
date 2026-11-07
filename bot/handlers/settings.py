@@ -1,4 +1,5 @@
-"""Хендлеры настроек (SPEC.md, §6.6): цели, напоминания, лекарства, часовой пояс.
+"""Хендлеры настроек (SPEC.md, §6.6): цели, напоминания, лекарства, часовой пояс,
+архивные записи (экран раздела, §6.10).
 
 Inline-меню: каждая опция редактирует сообщение (`edit_message_text`), ответы
 на свободный ввод — новыми сообщениями. Слоты вкл/выкл и время идут через
@@ -432,6 +433,22 @@ async def msg_tz(message: Message, state: FSMContext, session: AsyncSession) -> 
     user = await measurements_service.get_or_create_user(session, tg_user.id)
     await state.clear()
     await _saved_timezone(message, session, user, tz_name, via_message=True)
+
+
+# ─────────────────── Архивные записи (SPEC.md, §6.10) ───────────────────
+
+
+@router.callback_query(F.data == "set:archive")
+async def cb_archive(callback: CallbackQuery) -> None:
+    """«Архивные записи» — экран с двумя действиями (§6.6, §6.10).
+
+    Шаги ввода живут в `bot/handlers/measure.py` (кнопки `set:archive:add`,
+    `set:archive:quick`); здесь — только корневой экран раздела.
+    """
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.ARCHIVE_MENU, reply_markup=keyboards.archive_menu_kb()
+    )
+    await callback.answer()
 
 
 # ─────────────────────────── Экспорт CSV ───────────────────────────

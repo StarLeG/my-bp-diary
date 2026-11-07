@@ -145,6 +145,35 @@ MED_REMEASURE_PLANNED = "Напомню повторить измерение ч
 MED_REMEASURE_DISABLED = "Повтор измерения после лекарства выключен — включите в настройках, если нужен."
 MED_REMEASURE_CANCELLED = "Хорошо, повторно напоминать не буду."
 
+# ─────────────────── Архивные записи (SPEC.md, §6.10) ───────────────────
+
+BTN_ARCHIVE = "Архивные записи"
+ARCHIVE_MENU = (
+    "Перенесите прошлые измерения — например, из блокнота.\n"
+    "Можно добавить по одной записи или быстро — одной строкой."
+)
+BTN_ARCHIVE_ADD = "Добавить запись"
+BTN_ARCHIVE_QUICK = "Быстрый ввод"
+ARCHIVE_DATE_ASK = "Когда было измерение?"
+ARCHIVE_DATE_OTHER_PROMPT = "Введите дату в формате ДД.ММ.ГГГГ или ДД.ММ, например 12.03.2025."
+ARCHIVE_DATE_FORMAT_HINT = "Нужна дата в формате ДД.ММ.ГГГГ или ДД.ММ (например, 12.03.2025)"
+ARCHIVE_TIME_ASK = "Во сколько было измерение?"
+ARCHIVE_TIME_OTHER_PROMPT = "Введите время в формате ЧЧ:ММ, например 08:30."
+ARCHIVE_FUTURE_ERROR = "Время измерения не может быть в будущем"
+ARCHIVE_QUICK_PROMPT = (
+    "Введите измерение одной строкой: ДД.ММ ЧЧ:ММ САД/ДАД пульс "
+    "(пульс можно не указывать).\nНапример: 12.03 08:30 135/85 72"
+)
+ARCHIVE_QUICK_FORMAT_HINT = "Не понял формат. Пример: 12.03 08:30 135/85 72"
+ARCHIVE_SAVED = "✅ Записано за {moment}"
+
+BTN_ARCHIVE_TODAY = "Сегодня"
+BTN_ARCHIVE_YESTERDAY = "Вчера"
+BTN_ARCHIVE_3D = "3 дня назад"
+BTN_ARCHIVE_WEEK = "Неделю назад"
+BTN_ARCHIVE_OTHER_DATE = "Другая дата"
+BTN_ARCHIVE_MORE = "➕ Ещё запись"
+
 # ─────────────────────────── Дневник ───────────────────────────
 
 DIARY_EMPTY = "Сегодня записей ещё нет"
@@ -189,6 +218,16 @@ def fmt_saved(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str
 def fmt_updated(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
     """Сводка после обновления записи правки (SPEC.md, раздел 6.3)."""
     return _fmt_summary(MEASUREMENT_UPDATED, systolic, diastolic, pulse)
+
+
+def fmt_archive_saved(
+    moment: str, systolic: int, diastolic: int, pulse: Optional[int] = None
+) -> str:
+    """Сводка архивной записи: «✅ Записано за 12.03.2025, 08:00» (SPEC.md, §6.10).
+
+    `moment` — уже отформатированный момент измерения («ДД.ММ.ГГГГ, ЧЧ:ММ»).
+    """
+    return _fmt_summary(ARCHIVE_SAVED.format(moment=moment), systolic, diastolic, pulse)
 
 
 def fmt_keypad_prompt(question: str, buffer: str) -> str:

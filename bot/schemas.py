@@ -6,7 +6,8 @@ CHECK-ограничениями БД (см. `bot/models.py`).
 from __future__ import annotations
 
 import re
-from datetime import time
+from dataclasses import dataclass
+from datetime import date, datetime, time
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -17,10 +18,30 @@ from bot import texts
 #: Допустимые значения самочувствия (SPEC.md, раздел 4.2).
 FeelingLiteral = Literal["normal", "headache", "weakness", "other"]
 
-#: Время строго в формате ЧЧ:ММ (SPEC.md, раздел 9).
-_TIME_RE = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
+#: Время в формате ЧЧ:ММ (SPEC.md, раздел 9); час — 1–2 цифры: «2:30» = «02:30».
+_TIME_RE = re.compile(r"^([01]?\d|2[0-3]):([0-5]\d)$")
+
+#: Дата архива `ДД.ММ[.ГГГГ]` (SPEC.md, раздел 9, §6.10); день и месяц — 1–2 цифры.
+_DATE_RE = re.compile(r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?$")
+
+#: Строка быстрого ввода архива `ДД.ММ[.ГГГГ] ЧЧ:ММ САД/ДАД [пульс]` (§6.10);
+#: день, месяц и час — 1–2 цифры: «2.3 2:30 120/80» = «02.03 02:30 120/80».
+_QUICK_RE = re.compile(
+    r"^(\d{1,2})\.(\d{1,2})(?:\.(\d{4}))?\s+([01]?\d|2[0-3]):([0-5]\d)"
+    r"\s+(\d{1,3})/(\d{1,3})(?:\s+(\d{1,3}))?$"
+)
 
 TIME_FORMAT_HINT = "Нужно время в формате ЧЧ:ММ (например, 08:30)"
+
+
+@dataclass(frozen=True)
+class ArchiveQuick:
+    """Разобранная строка быстрого ввода архива (SPEC.md, §6.10)."""
+
+    moment: datetime  # осведомлённый момент, в таймзоне пользователя
+    systolic: int
+    diastolic: int
+    pulse: Optional[int]
 
 
 class MeasurementInput(BaseModel):
@@ -214,3 +235,82 @@ def validate_dosage(raw: str) -> str:
         return DosageInput(dosage=raw).dosage
     except ValidationError as exc:
         raise ValueError(_clean_error(exc)) from exc
+
+
+def parse_archive_date(raw: str, today: date) -> date:
+    """Дата архива `ДД.ММ[.ГГГГ]` (год — текущий), не позже сегодняшней (§9).
+
+    Исключения:
+        ValueError: не дата — «Нужна дата в формате…»; будущее —
+            «Время измерения не может быть в будущем».
+    """
+    match = _DATE_RE.match(str(raw).strip())
+    if not match:
+        raise ValueError(texts.ARCHIVE_DATE_FORMAT_HINT)
+    day_s, month_s, year_s = match.groups()
+    year = int(year_s) if year_s else today.year
+    try:
+        day = date(year, int(month_s), int(day_s))
+    except ValueError as exc:
+        raise ValueError(texts.ARCHIVE_DATE_FORMAT_HINT) from exc
+    if day > today:
+        raise ValueError(texts.ARCHIVE_FUTURE_ERROR)
+    return day
+
+
+def combine_moment(
+    day: date, moment_time: time, tz_name: str, *, now: Optional[datetime] = None
+) -> datetime:
+    """Момент измерения (дата + время в таймзоне пользователя), ≤ текущего (§9).
+
+    Исключения:
+        ValueError: будущее — «Время измерения не может быть в будущем».
+    """
+    tz = ZoneInfo(tz_name)
+    moment = datetime(
+        day.year, day.month, day.day, moment_time.hour, moment_time.minute, tzinfo=tz
+    )
+    current = now if now is not None else datetime.now(tz)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=tz)
+    if moment > current:
+        raise ValueError(texts.ARCHIVE_FUTURE_ERROR)
+    return moment
+
+
+def parse_archive_quick(
+    raw: str, tz_name: str, *, now: Optional[datetime] = None
+) -> ArchiveQuick:
+    """Строка быстрого ввода архива: `ДД.ММ[.ГГГГ] ЧЧ:ММ САД/ДАД [пульс]` (§6.10).
+
+    Порядок проверок — как в пошаговом вводе: сначала момент (дата, время,
+    запрет будущего), затем значения (диапазоны §9 и пара давлений).
+
+    Исключения:
+        ValueError: не распознано — «Не понял формат…»; иначе — сообщения
+            валидации полей (§9).
+    """
+    match = _QUICK_RE.match(str(raw).strip())
+    if not match:
+        raise ValueError(texts.ARCHIVE_QUICK_FORMAT_HINT)
+    day_s, month_s, year_s, hour_s, minute_s, sys_s, dia_s, pulse_s = match.groups()
+    tz = ZoneInfo(tz_name)
+    current = now if now is not None else datetime.now(tz)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=tz)
+    else:
+        current = current.astimezone(tz)
+    year = int(year_s) if year_s else current.date().year
+    try:
+        day = date(year, int(month_s), int(day_s))
+        moment_time = time(int(hour_s), int(minute_s))
+    except ValueError as exc:
+        raise ValueError(texts.ARCHIVE_QUICK_FORMAT_HINT) from exc
+    moment = combine_moment(day, moment_time, tz_name, now=current)
+    systolic = validate_int(sys_s, 70, 260, "систолическое")
+    diastolic = validate_int(dia_s, 40, 160, "диастолическое")
+    validate_pair(systolic, diastolic)
+    pulse = validate_int(pulse_s, 30, 220, "пульс") if pulse_s else None
+    return ArchiveQuick(
+        moment=moment, systolic=systolic, diastolic=diastolic, pulse=pulse
+    )

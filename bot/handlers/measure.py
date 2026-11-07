@@ -19,11 +19,20 @@
 (`M_SYS`/`M_DIA`/`M_PULSE`/`M_BUF`/`M_MED_CHECKED`), id сохранённой записи —
 в `M_ID`, id правки — в `M_EDIT_ID`: чужие id через callback_data сюда
 не попадают без проверки владельца.
+
+Архивные записи (SPEC.md, §6.10) — тот же числовой поток, но с явным
+моментом измерения в `M_ARCH_TS` (канон `m_edit_id`): дата и время
+собираются шагами «Когда?» / «Во сколько?» (`ArchiveInput`) до калькулятора,
+INSERT идёт с указанным `timestamp`. Для архива повторный замер после
+лекарства и `medication_logs` не планируются, строка «обсудить с врачом» не
+показывается; сводка — кнопки `m:arch:*` с «➕ Ещё запись».
 """
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta, timezone
 from typing import Any, Optional
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.fsm.context import FSMContext
@@ -54,6 +63,13 @@ M_MED_CHECKED = "m_med_checked"
 M_ID = "m_id"
 #: Id редактируемой записи («последняя» фиксируется в момент входа в правку, §6.3).
 M_EDIT_ID = "m_edit_id"
+#: Момент архивного измерения (ISO 8601, UTC); режим архива — по наличию ключа
+#: (канон `m_edit_id`, §8): финальное сохранение делает INSERT с этим `timestamp`.
+M_ARCH_TS = "m_arch_ts"
+#: Момент архивной записи для сводки («12.03.2025, 08:00», §6.10).
+M_ARCH_LABEL = "m_arch_label"
+#: Дата шага «Когда?» до выбора времени (ISO, §6.10).
+A_DATE = "arch_date"
 
 
 class MeasureInput(StatesGroup):
@@ -64,6 +80,14 @@ class MeasureInput(StatesGroup):
     pulse_input = State()
     note_input = State()
     feeling_other = State()
+
+
+class ArchiveInput(StatesGroup):
+    """FSM-состояния архивного ввода (§8): дата, время, быстрая строка."""
+
+    date = State()
+    time = State()
+    quick = State()
 
 
 @dataclass(frozen=True)
@@ -130,13 +154,30 @@ async def _show_keypad(
     )
 
 
-async def _hub(message: Message, data: dict[str, Any], *, via_message: bool = False) -> None:
-    """Вернуть «✅ Записано/Обновлено» с кнопками опциональных шагов (повторное открытие)."""
+def _summary_screen(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+    """Экран сводки: обычный режим или архив (§6.3, §6.10).
+
+    Архив (`M_ARCH_TS`) — заголовок «✅ Записано за …» и кнопки `m:arch:*`;
+    правка (`M_EDIT_ID`) — «✅ Обновлено»; у архивной правки остаются кнопки
+    архива («➕ Ещё запись» и «В меню» — свои).
+    """
+    is_archive = data.get(M_ARCH_TS) is not None
+    markup = keyboards.archive_saved_kb() if is_archive else keyboards.saved_kb()
     if data.get(M_EDIT_ID) is not None:
         text = texts.fmt_updated(data[M_SYS], data[M_DIA], data.get(M_PULSE))
+    elif is_archive:
+        text = texts.fmt_archive_saved(
+            data.get(M_ARCH_LABEL, ""), data[M_SYS], data[M_DIA], data.get(M_PULSE)
+        )
     else:
         text = texts.fmt_saved(data[M_SYS], data[M_DIA], data.get(M_PULSE))
-    await _send(message, text, keyboards.saved_kb(), via_message=via_message)
+    return text, markup
+
+
+async def _hub(message: Message, data: dict[str, Any], *, via_message: bool = False) -> None:
+    """Вернуть сводку с кнопками опциональных шагов (повторное открытие)."""
+    text, markup = _summary_screen(data)
+    await _send(message, text, markup, via_message=via_message)
 
 
 async def _to_menu(callback: CallbackQuery) -> None:
@@ -359,6 +400,8 @@ async def _save(
     Сначала commit записи, FSM обновляется после (§7.2: ничего человеческого
     внутри транзакции); дубль за минуту — «Это давление уже записано» (только
     для новой записи); правка — UPDATE без дедупа и без смены времени записи.
+    Архив (`M_ARCH_TS`) — INSERT с указанным `timestamp` (§6.10); строка
+    «обсудить с врачом» для архива не показывается.
     """
     data = await state.get_data()
     if M_SYS not in data or M_DIA not in data:
@@ -369,10 +412,12 @@ async def _save(
     sys_v, dia_v, pulse = data[M_SYS], data[M_DIA], data.get(M_PULSE)
     user = await measurements_service.get_or_create_user(session, telegram_id)
     edit_id = data.get(M_EDIT_ID)
+    arch_ts = data.get(M_ARCH_TS)
     if edit_id is None:
+        timestamp = datetime.fromisoformat(arch_ts) if arch_ts else None
         try:
             measurement = await measurements_service.save_measurement(
-                session, user, sys_v, dia_v, pulse
+                session, user, sys_v, dia_v, pulse, timestamp=timestamp
             )
         except measurements_service.DuplicateMeasurementError:
             await state.clear()
@@ -383,7 +428,6 @@ async def _save(
                 via_message=via_message,
             )
             return
-        text = texts.fmt_saved(sys_v, dia_v, pulse)
     else:
         measurement = await measurements_service.update_measurement_values(
             session, user, edit_id, sys_v, dia_v, pulse
@@ -394,12 +438,12 @@ async def _save(
                 message, texts.NOT_YOUR_RECORD, keyboards.back_to_menu(), via_message=via_message
             )
             return
-        text = texts.fmt_updated(sys_v, dia_v, pulse)
     await session.commit()
     await state.update_data(**{M_ID: measurement.id, M_BUF: ""})
-    if sys_v >= HIGH_SYSTOLIC or dia_v >= HIGH_DIASTOLIC:
+    text, markup = _summary_screen(data)
+    if arch_ts is None and (sys_v >= HIGH_SYSTOLIC or dia_v >= HIGH_DIASTOLIC):
         text = f"{text}\n{texts.HIGH_PRESSURE_WARNING}"
-    await _send(message, text, keyboards.saved_kb(), via_message=via_message)
+    await _send(message, text, markup, via_message=via_message)
 
 
 # ─────────────────────────── Заметка ───────────────────────────
@@ -430,7 +474,12 @@ async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -
     await measurements_service.add_note(session, user, data[M_ID], note)
     await session.commit()
     await state.set_state(None)
-    await message.answer(texts.NOTE_SAVED, reply_markup=keyboards.saved_kb())
+    markup = (
+        keyboards.archive_saved_kb()
+        if data.get(M_ARCH_TS) is not None
+        else keyboards.saved_kb()
+    )
+    await message.answer(texts.NOTE_SAVED, reply_markup=markup)
 
 
 # ─────────────────────────── «Приняли лекарство?» ───────────────────────────
@@ -695,7 +744,12 @@ async def msg_feeling_other(
     )
     await session.commit()
     await state.set_state(None)
-    await message.answer(texts.NOTE_SAVED, reply_markup=keyboards.saved_kb())
+    markup = (
+        keyboards.archive_saved_kb()
+        if data.get(M_ARCH_TS) is not None
+        else keyboards.saved_kb()
+    )
+    await message.answer(texts.NOTE_SAVED, reply_markup=markup)
 
 
 # ─────────────────────────── «Не надо» (отмена повтора) ───────────────────────────
@@ -722,5 +776,345 @@ async def cb_no_remeasure(
     await reminders.cancel_remeasure_for_measurement(user.id, measurement_id)
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.MED_REMEASURE_CANCELLED, reply_markup=keyboards.saved_kb()
+    )
+    await callback.answer()
+
+
+# ─────────────────── Архивные записи (SPEC.md, §6.10) ───────────────────
+
+
+async def _archive_begin(
+    message: Message, state: FSMContext, *, via_message: bool
+) -> None:
+    """Начать проход архива с шага «Когда?» (§6.10); прошлый черновик сбрасывается."""
+    await state.clear()
+    await state.set_state(ArchiveInput.date)
+    await _send(
+        message, texts.ARCHIVE_DATE_ASK, keyboards.archive_date_kb(), via_message=via_message
+    )
+
+
+@router.callback_query(F.data.in_({"set:archive:add", "m:arch:more"}))
+async def cb_archive_begin(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Добавить запись» / «➕ Ещё запись» — новый проход с шага «Когда?» (§6.10)."""
+    await _archive_begin(callback.message, state, via_message=False)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set:archive:date:"))
+async def cb_archive_date(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Шаг «Когда?»: пресеты дат или «Другая дата» (свободный ввод, §6.10).
+
+    Даты считаются в таймзоне пользователя; пресет фиксируется в `A_DATE`,
+    дальше — шаг «Во сколько?».
+    """
+    action = callback.data.split(":", 3)[3]  # type: ignore[union-attr]
+    if action == "other":
+        await state.set_state(ArchiveInput.date)
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.ARCHIVE_DATE_OTHER_PROMPT, reply_markup=keyboards.note_cancel_kb()
+        )
+        await callback.answer()
+        return
+    offset = keyboards.ARCHIVE_DATE_PRESETS.get(action)
+    if offset is None:  # устаревшие кнопки — экран не трогаем
+        await callback.answer()
+        return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    today = datetime.now(ZoneInfo(user.timezone)).date()
+    await state.update_data(**{A_DATE: (today - timedelta(days=offset)).isoformat()})
+    await _archive_ask_time(callback.message, state, via_message=False)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.message(ArchiveInput.date)
+async def msg_archive_date(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Другая дата»: `ДД.ММ[.ГГГГ]` (год — текущий), не позже сегодняшней (§9)."""
+    user = await measurements_service.get_or_create_user(
+        session, message.from_user.id  # type: ignore[union-attr]
+    )
+    today = datetime.now(ZoneInfo(user.timezone)).date()
+    try:
+        day = schemas.parse_archive_date(message.text or "", today)
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=keyboards.note_cancel_kb())
+        return
+    await state.update_data(**{A_DATE: day.isoformat()})
+    await _archive_ask_time(message, state, via_message=True)
+
+
+async def _archive_ask_time(
+    message: Message, state: FSMContext, *, via_message: bool
+) -> None:
+    """Шаг «Во сколько?» (§6.10)."""
+    await state.set_state(ArchiveInput.time)
+    await _send(
+        message, texts.ARCHIVE_TIME_ASK, keyboards.archive_time_kb(), via_message=via_message
+    )
+
+
+async def _archive_set_moment(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    telegram_id: int,
+    moment_time: time,
+    *,
+    via_message: bool,
+) -> Optional[str]:
+    """Зафиксировать момент архива (дата + время) и открыть калькулятор (§6.10).
+
+    Возвращает текст ошибки (будущее время) — экран не меняется; при успехе —
+    None, показан шаг систолического. Без даты в черновике (устаревшие кнопки) —
+    выход в главное меню.
+    """
+    data = await state.get_data()
+    raw_day = data.get(A_DATE)
+    if raw_day is None:
+        await _send(
+            message, texts.MAIN_MENU, keyboards.main_menu(), via_message=via_message
+        )
+        return None
+    user = await measurements_service.get_or_create_user(session, telegram_id)
+    try:
+        moment = schemas.combine_moment(
+            date.fromisoformat(raw_day), moment_time, user.timezone
+        )
+    except ValueError as exc:
+        return str(exc)
+    await state.set_state(MeasureInput.sys_input)
+    await state.update_data(
+        **{
+            M_ARCH_TS: moment.astimezone(timezone.utc).isoformat(),
+            M_ARCH_LABEL: moment.strftime("%d.%m.%Y, %H:%M"),
+            M_BUF: "",
+        }
+    )
+    await _show_keypad(message, state, via_message=via_message)
+    return None
+
+
+@router.callback_query(F.data.startswith("set:archive:time:"))
+async def cb_archive_time(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Шаг «Во сколько?»: пресеты «08:00…» / «Другое» (§6.10).
+
+    Будущее время — «Время измерения не может быть в будущем» (тост), повтор.
+    """
+    action = callback.data.split(":", 3)[3]  # type: ignore[union-attr]
+    if action == "other":
+        await state.set_state(ArchiveInput.time)
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.ARCHIVE_TIME_OTHER_PROMPT, reply_markup=keyboards.note_cancel_kb()
+        )
+        await callback.answer()
+        return
+    try:
+        moment_time = schemas.validate_time(action)
+    except ValueError as exc:
+        await callback.answer(str(exc))  # экран не меняется
+        return
+    error = await _archive_set_moment(
+        callback.message,  # type: ignore[arg-type]
+        state,
+        session,
+        callback.from_user.id,
+        moment_time,
+        via_message=False,
+    )
+    if error is not None:
+        await callback.answer(error)  # экран не меняется
+        return
+    await callback.answer()
+
+
+@router.message(ArchiveInput.time)
+async def msg_archive_time(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Другое» времени: `ЧЧ:ММ`; будущее — ошибка и повтор ввода (§6.10)."""
+    try:
+        moment_time = schemas.validate_time(message.text or "")
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=keyboards.note_cancel_kb())
+        return
+    error = await _archive_set_moment(
+        message,
+        state,
+        session,
+        message.from_user.id,  # type: ignore[union-attr]
+        moment_time,
+        via_message=True,
+    )
+    if error is not None:
+        await message.answer(error, reply_markup=keyboards.note_cancel_kb())
+
+
+@router.callback_query(F.data == "set:archive:quick")
+async def cb_archive_quick(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Быстрый ввод» — строка `ДД.ММ[.ГГГГ] ЧЧ:ММ САД/ДАД [пульс]` (§6.10)."""
+    await state.clear()
+    await state.set_state(ArchiveInput.quick)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.ARCHIVE_QUICK_PROMPT, reply_markup=keyboards.note_cancel_kb()
+    )
+    await callback.answer()
+
+
+@router.message(ArchiveInput.quick)
+async def msg_archive_quick(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """Быстрый ввод: разбор строки и INSERT с указанным моментом (§6.10).
+
+    Не распознано — «Не понял формат…» + «Отмена»; дальше — та же сводка
+    с кнопками опциональных шагов.
+    """
+    tg_id = message.from_user.id  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, tg_id)
+    try:
+        parsed = schemas.parse_archive_quick(message.text or "", user.timezone)
+    except ValueError as exc:
+        await message.answer(str(exc), reply_markup=keyboards.note_cancel_kb())
+        return
+    await state.clear()
+    await state.update_data(
+        **{
+            M_SYS: parsed.systolic,
+            M_DIA: parsed.diastolic,
+            M_PULSE: parsed.pulse,
+            M_ARCH_TS: parsed.moment.astimezone(timezone.utc).isoformat(),
+            M_ARCH_LABEL: parsed.moment.strftime("%d.%m.%Y, %H:%M"),
+        }
+    )
+    await _save(message, state, session, tg_id, via_message=True)
+
+
+@router.callback_query(F.data == "m:arch:edit")
+async def cb_arch_edit(callback: CallbackQuery, state: FSMContext) -> None:
+    """«✏️ Изменить» архива — правка только что созданной записи (§6.10).
+
+    Цель правки — id из контекста сохранения (`M_ID`), а не «последняя» по
+    `timestamp`: архив можно вносить не в хронологическом порядке.
+    """
+    data = await state.get_data()
+    measurement_id = data.get(M_ID)
+    if measurement_id is None:
+        await _to_menu(callback)
+        return
+    await state.clear()
+    await state.set_state(MeasureInput.sys_input)
+    await state.update_data(
+        **{
+            M_EDIT_ID: measurement_id,
+            M_ID: measurement_id,
+            M_BUF: "",
+            M_ARCH_TS: data.get(M_ARCH_TS),
+            M_ARCH_LABEL: data.get(M_ARCH_LABEL),
+        }
+    )
+    await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:arch:note")
+async def cb_arch_note(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Добавить заметку» архива — тот же экран, что в §6.3."""
+    if await _measurement_id(callback, state) is None:
+        return
+    await state.set_state(MeasureInput.note_input)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.PROMPT_NOTE, reply_markup=keyboards.note_cancel_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:arch:med")
+async def cb_arch_med(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Приняли лекарство?» архива — только исторический флаг (§6.10)."""
+    if await _measurement_id(callback, state) is None:
+        return
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.MED_ASK, reply_markup=keyboards.archive_medication_taken_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"m:arch:med:yes", "m:arch:med:no"}))
+async def cb_arch_med_set(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    """«Да» / «Нет»: только флаг `medication_taken` (§6.10).
+
+    Повторный замер не планируется, выбор лекарств и `medication_logs` не
+    создаются — момент приёма в прошлом.
+    """
+    measurement_id = await _measurement_id(callback, state)
+    if measurement_id is None:
+        return
+    value = callback.data == "m:arch:med:yes"  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await measurements_service.set_medication_taken(session, user, measurement_id, value)
+    await session.commit()
+    data = await state.get_data()
+    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:arch:feel")
+async def cb_arch_feel(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Самочувствие» архива — тот же экран, что в §6.3 (кнопки `m:arch:feel:*`)."""
+    if await _measurement_id(callback, state) is None:
+        return
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.FEELING_ASK, reply_markup=keyboards.archive_feeling_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(
+    F.data.in_({"m:arch:feel:normal", "m:arch:feel:headache", "m:arch:feel:weakness"})
+)
+async def cb_arch_feel_set(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    if await _measurement_id(callback, state) is None:
+        return
+    data = await state.get_data()
+    feeling = callback.data.split(":", 3)[3]  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await measurements_service.set_feeling(session, user, data[M_ID], feeling)  # type: ignore[arg-type]
+    await session.commit()
+    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:arch:feel:other")
+async def cb_arch_feel_other(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Другое» — короткий текст в заметку (§6.3, §6.10)."""
+    if await _measurement_id(callback, state) is None:
+        return
+    await state.set_state(MeasureInput.feeling_other)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.PROMPT_FEELING_OTHER, reply_markup=keyboards.note_cancel_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:arch:menu")
+async def cb_arch_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """«В меню» архива — сброс черновика и FSM, главное меню (§6.10)."""
+    await state.clear()
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.MAIN_MENU, reply_markup=keyboards.main_menu()
     )
     await callback.answer()

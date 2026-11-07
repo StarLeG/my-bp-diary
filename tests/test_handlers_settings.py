@@ -1426,3 +1426,15 @@ class TestDeleteAccount:
         )
         reminders.remove_user_jobs.assert_not_awaited()
         assert edit.call_args.args[0] == texts.DELETE_ACCOUNT_DONE
+
+
+class TestArchiveSection:
+    """Экран раздела «Архивные записи» (SPEC.md, §6.10)."""
+
+    async def test_menu_shows_archive_screen(self, session, edit, cb_answer) -> None:
+        await call(
+            settings.cb_archive,
+            callback=make_callback("set:archive", make_message()),
+        )
+        assert edit.call_args.args[0] == texts.ARCHIVE_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_menu_kb()

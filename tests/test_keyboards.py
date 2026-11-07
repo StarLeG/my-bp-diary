@@ -46,6 +46,12 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("feeling_kb", keyboards.feeling_kb()),
         ("note_cancel_kb", keyboards.note_cancel_kb()),
         ("input_cancel_kb", keyboards.input_cancel_kb()),
+        ("archive_menu_kb", keyboards.archive_menu_kb()),
+        ("archive_date_kb", keyboards.archive_date_kb()),
+        ("archive_time_kb", keyboards.archive_time_kb()),
+        ("archive_saved_kb", keyboards.archive_saved_kb()),
+        ("archive_medication_taken_kb", keyboards.archive_medication_taken_kb()),
+        ("archive_feeling_kb", keyboards.archive_feeling_kb()),
         ("no_remeasure_kb", keyboards.no_remeasure_kb(5)),
         ("meds_ask_kb", keyboards.meds_ask_kb()),
         ("diary_kb", keyboards.diary_kb()),
@@ -349,6 +355,7 @@ class TestSettingsKeyboards:
             "set:targets",
             "set:reminders",
             "set:meds",
+            "set:archive",
             "set:doctor",
             "set:tz",
             "set:csv",
@@ -649,3 +656,72 @@ class TestAdminKeyboards:
             button.callback_data for button in callback_buttons(keyboards.admin_search_card_kb(42))
         }
         assert data == {"adm:test:42", "adm:back"}
+
+
+class TestArchiveKeyboards:
+    """Клавиатуры архивных записей (SPEC.md, §6.10, §8)."""
+
+    def test_archive_menu_actions(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.archive_menu_kb())}
+        assert data == {"set:archive:add", "set:archive:quick", "set:back"}
+
+    def test_archive_date_presets(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.archive_date_kb())}
+        assert data == {
+            "set:archive:date:today",
+            "set:archive:date:yesterday",
+            "set:archive:date:3d",
+            "set:archive:date:week",
+            "set:archive:date:other",
+            "m:cancel",
+        }
+        assert keyboards.ARCHIVE_DATE_PRESETS == {
+            "today": 0, "yesterday": 1, "3d": 3, "week": 7,
+        }
+
+    def test_archive_time_presets(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.archive_time_kb())}
+        assert data == {
+            "set:archive:time:08:00",
+            "set:archive:time:13:00",
+            "set:archive:time:21:00",
+            "set:archive:time:other",
+            "m:cancel",
+        }
+        assert keyboards.ARCHIVE_TIME_PRESETS == ("08:00", "13:00", "21:00")
+
+    def test_archive_saved_actions(self) -> None:
+        data = {button.callback_data for button in callback_buttons(keyboards.archive_saved_kb())}
+        assert data == {
+            "m:arch:edit",
+            "m:arch:note",
+            "m:arch:med",
+            "m:arch:feel",
+            "m:arch:more",
+            "m:arch:menu",
+        }
+
+    def test_archive_medication_taken_actions(self) -> None:
+        data = {
+            button.callback_data
+            for button in callback_buttons(keyboards.archive_medication_taken_kb())
+        }
+        assert data == {"m:arch:med:yes", "m:arch:med:no", "m:arch:menu"}
+
+    def test_archive_feeling_actions(self) -> None:
+        data = {
+            button.callback_data for button in callback_buttons(keyboards.archive_feeling_kb())
+        }
+        assert data == {
+            "m:arch:feel:normal",
+            "m:arch:feel:headache",
+            "m:arch:feel:weakness",
+            "m:arch:feel:other",
+            "m:arch:menu",
+        }
+
+    def test_settings_menu_has_archive_entry(self) -> None:
+        pairs = {
+            (button.text, button.callback_data) for button in callback_buttons(keyboards.settings_kb())
+        }
+        assert (texts.BTN_ARCHIVE, "set:archive") in pairs

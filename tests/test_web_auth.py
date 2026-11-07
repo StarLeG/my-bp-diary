@@ -1052,6 +1052,27 @@ class TestDashboardRoutes:
         assert response.status_code == 303
         assert "error=reminder" in response.headers["location"]
 
+    def test_settings_single_digit_hour_normalized(self, app_client, settings) -> None:
+        """«2:30» — то же, что «02:30»: принимается и сохраняется нормализованным (§2)."""
+        client, user_id = app_client
+        _register(client)
+        response = client.post(
+            "/settings",
+            data={
+                "csrf_token": _csrf(client),
+                "slot_morning_enabled": "1",
+                "slot_morning_time": "8:30",
+                "med_remeasure_delay": "60",
+            },
+        )
+        assert response.status_code == 303
+        rows = self._sql(
+            settings,
+            "SELECT local_time FROM reminders WHERE user_id = ?",
+            (user_id,),
+        )
+        assert rows == [("08:30",)]
+
     def test_history_and_csv_export(self, app_client, settings) -> None:
         client, user_id = app_client
         _register(client)

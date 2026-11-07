@@ -242,22 +242,64 @@ async def update_measurement_values(
     systolic: int,
     diastolic: int,
     pulse: Optional[int],
+    timestamp: Optional[datetime] = None,
 ) -> Optional[Measurement]:
     """Обновить значения записи правки (по id, с проверкой владельца; §6.3).
 
     Чужая/удалённая запись выглядит как отсутствующая (None).
-    `timestamp` не меняется — дедуп за минуту не применяется; `pulse`
-    записывается как есть (None — «Пропустить», полная перезапись).
+    `pulse` записывается как есть (None — «Пропустить», полная перезапись).
+    Новый момент (`timestamp`) передаётся только из личного кабинета (§16.2:
+    правка меняет момент записи) — с проверкой дубля за минуту по другим
+    записям; в боте момент правки не меняется (§6.3) и дедуп не применяется.
     Валидация диапазонов — на уровне схем/хендлеров (§9), CHECK БД — вторым эшелоном.
+
+    Исключения:
+        DuplicateMeasurementError: новый момент занят другой записью за минуту.
     """
     measurement = await get_measurement(session, user, measurement_id)
     if measurement is None:
         return None
+    if timestamp is not None:
+        ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
+        ts = ts.astimezone(timezone.utc)
+        minute_start = ts.replace(second=0, microsecond=0)
+        minute_end = minute_start + DEDUP_WINDOW
+        duplicate = (
+            await session.execute(
+                select(Measurement.id).where(
+                    Measurement.user_id == user.id,
+                    Measurement.id != measurement_id,
+                    Measurement.timestamp >= minute_start,
+                    Measurement.timestamp < minute_end,
+                )
+            )
+        ).first()
+        if duplicate is not None:
+            raise DuplicateMeasurementError(
+                f"измерение за {minute_start.isoformat()} уже записано"
+            )
+        measurement.timestamp = ts
     measurement.systolic = systolic
     measurement.diastolic = diastolic
     measurement.pulse = pulse
     await session.flush()
     return measurement
+
+
+async def delete_measurement(
+    session: AsyncSession, user: User, measurement_id: int
+) -> bool:
+    """Удалить запись по id с проверкой владельца (§16.2).
+
+    Связи `measurement_medications` удаляются каскадом (FK ON DELETE CASCADE),
+    `medication_logs` не затрагиваются. Чужая или уже удалённая запись — False.
+    """
+    measurement = await get_measurement(session, user, measurement_id)
+    if measurement is None:
+        return False
+    await session.delete(measurement)
+    await session.flush()
+    return True
 
 
 async def add_note(

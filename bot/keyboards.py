@@ -235,6 +235,139 @@ def input_cancel_kb(callback: str = "m:cancel") -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+# ─────────────────── Архивные записи (SPEC.md, §6.10) ───────────────────
+
+
+#: Пресеты времени шага «Во сколько?» архива (§6.10).
+ARCHIVE_TIME_PRESETS = ("08:00", "13:00", "21:00")
+
+#: Относительные даты шага «Когда?»: callback-суффикс → дней назад (§6.10).
+ARCHIVE_DATE_PRESETS = {"today": 0, "yesterday": 1, "3d": 3, "week": 7}
+
+
+def archive_menu_kb() -> InlineKeyboardMarkup:
+    """Экран «Архивные записи»: по одной / быстрый ввод / назад (§6.10)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ARCHIVE_ADD, callback_data="set:archive:add")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_QUICK, callback_data="set:archive:quick"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def archive_date_kb() -> InlineKeyboardMarkup:
+    """Шаг «Когда?»: сегодня / вчера / 3 дня / неделя / другая дата (§6.10)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_TODAY, callback_data="set:archive:date:today"
+        ),
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_YESTERDAY, callback_data="set:archive:date:yesterday"
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_3D, callback_data="set:archive:date:3d"
+        ),
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_WEEK, callback_data="set:archive:date:week"
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_OTHER_DATE, callback_data="set:archive:date:other"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+    return builder.as_markup()
+
+
+def archive_time_kb() -> InlineKeyboardMarkup:
+    """Шаг «Во сколько?»: 08:00 / 13:00 / 21:00 / «Другое» (§6.10)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        *[
+            InlineKeyboardButton(text=t, callback_data=f"set:archive:time:{t}")
+            for t in ARCHIVE_TIME_PRESETS
+        ]
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_OTHER, callback_data="set:archive:time:other"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+    return builder.as_markup()
+
+
+def archive_saved_kb() -> InlineKeyboardMarkup:
+    """Кнопки после сохранения архивной записи (§6.10), «Ещё запись» вместо «В меню»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_EDIT, callback_data="m:arch:edit"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ADD_NOTE, callback_data="m:arch:note")
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_TOOK_MED, callback_data="m:arch:med")
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_FEELING, callback_data="m:arch:feel")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_ARCHIVE_MORE, callback_data="m:arch:more"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu")
+    )
+    return builder.as_markup()
+
+
+def archive_medication_taken_kb() -> InlineKeyboardMarkup:
+    """«Приняли лекарство?» архива: Да / Нет — только исторический флаг (§6.10)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_MED_YES, callback_data="m:arch:med:yes"),
+        InlineKeyboardButton(text=texts.BTN_MED_NO, callback_data="m:arch:med:no"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu")
+    )
+    return builder.as_markup()
+
+
+def archive_feeling_kb() -> InlineKeyboardMarkup:
+    """Самочувствие архива: те же варианты, кнопки `m:arch:feel:*` (§6.10)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_FEEL_NORMAL, callback_data="m:arch:feel:normal"
+        ),
+        InlineKeyboardButton(
+            text=texts.BTN_FEEL_HEADACHE, callback_data="m:arch:feel:headache"
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_FEEL_WEAKNESS, callback_data="m:arch:feel:weakness"
+        ),
+        InlineKeyboardButton(
+            text=texts.BTN_FEEL_OTHER, callback_data="m:arch:feel:other"
+        ),
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu")
+    )
+    return builder.as_markup()
+
+
 # ─────────────────────────── Дневник ───────────────────────────
 
 
@@ -293,6 +426,9 @@ def settings_kb() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_MEDS, callback_data="set:meds"))
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_DOCTOR, callback_data="set:doctor"))
     builder.row(InlineKeyboardButton(text=texts.BTN_TIMEZONE, callback_data="set:tz"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ARCHIVE, callback_data="set:archive")
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_CSV, callback_data="set:csv"))
     builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
