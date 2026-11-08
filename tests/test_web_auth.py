@@ -539,6 +539,17 @@ class TestLoginRoutes:
         assert "Max-Age=604800" in raw_cookie
 
 
+class TestRobotsTxt:
+    """Кабинет закрыт от индексации (SPEC.md, §16.2)."""
+
+    def test_disallow_all_without_auth(self, app_client) -> None:
+        client, _ = app_client
+        response = client.get("/robots.txt")
+        assert response.status_code == 200
+        assert response.headers["content-type"].startswith("text/plain")
+        assert response.text == "User-agent: *\nDisallow: /\n"
+
+
 class TestSecureCookieFlag:
     """Secure-флаг cookie следует схеме доступа (§16.2, локальный деплой по HTTP)."""
 

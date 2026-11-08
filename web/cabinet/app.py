@@ -22,7 +22,7 @@ from typing import AsyncIterator, Mapping, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
-from fastapi.responses import HTMLResponse, RedirectResponse, Response
+from fastapi.responses import HTMLResponse, PlainTextResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData, UploadFile  # request.form() возвращает starlette-экземпляр
@@ -278,6 +278,10 @@ def _parse_measurement_form(form: FormData, tz_name: str) -> dict:
 # ─────────────────────────── Приложение ───────────────────────────
 
 
+#: robots.txt кабинета: страницы входа и данных не индексируются (SPEC.md, §16.2).
+ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
+
+
 def create_app(
     settings: Optional[Settings] = None,
     session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
@@ -505,6 +509,11 @@ def create_app(
         response = RedirectResponse(url="/", status_code=303)
         set_auth_cookies(request, response, session_token, csrf.issue())
         return response
+
+    @app.get("/robots.txt", response_class=PlainTextResponse)
+    async def robots_txt() -> str:
+        """Закрыть кабинет от индексации поисковиками (SPEC.md, §16.2)."""
+        return ROBOTS_TXT
 
     @app.get("/login", response_class=HTMLResponse)
     async def login_page(
