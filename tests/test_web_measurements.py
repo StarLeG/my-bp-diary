@@ -1116,5 +1116,6 @@ class TestHistoryZonesRender:
     def test_css_colors_row_and_card(self, app_client) -> None:
         """Одно правило — фон строки и строки-карточки на узких экранах (Z6 А)."""
         client, _ = app_client
-        css = client.get("/static/style.css").text
+        # Окончания строк зависят от checkout (CRLF на Windows) — сравниваем без них.
+        css = client.get("/static/style.css").text.replace("\r\n", "\n")
         assert ".stacked-table tr.zone-row {\n  background: var(--zone-fill);" in css
