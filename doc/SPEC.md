@@ -690,7 +690,7 @@ SemVer (`MAJOR.MINOR.PATCH`): MAJOR — ломающие изменения, MIN
     - `FAQPage` — вопросы и ответы дословно из видимого FAQ;
     - `SoftwareApplication` — `applicationCategory` HealthApplication, `operatingSystem` «Telegram, Web», `offers.price` 0, ссылка на бота;
     - `Person` — автор, контакты как в `#support`.
-  - **Подтверждение вебмастеров**: `<meta name="yandex-verification">` и `<meta name="google-site-verification">`. В репозитории — плейсхолдеры `YOUR_YANDEX_CODE` / `YOUR_GOOGLE_CODE`, реальные коды автор вставляет перед деплоем. Счётчиков аналитики (Яндекс.Метрика и т. п.) нет: это противоречило бы обещанию «не передаются третьим лицам».
+  - **Подтверждение вебмастеров**: `<meta name="yandex-verification">` и `<meta name="google-site-verification">`. Коды публичные и хранятся в репозитории; для Яндекса дополнительно — файл подтверждения `yandex_<код>.html` в корне лендинга. Счётчиков аналитики (Яндекс.Метрика и т. п.) нет: это противоречило бы обещанию «не передаются третьим лицам».
   - **Иконки**: `favicon.svg` (по логотипу шапки), `favicon.ico`, `apple-touch-icon.png`, `<meta name="theme-color" content="#2563eb">`.
   - **Индексация**:
     - `robots.txt` (`Allow: /`, `Sitemap:`) и `sitemap.xml` (`/`, `/privacy.html`, `lastmod`);

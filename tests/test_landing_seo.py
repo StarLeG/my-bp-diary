@@ -85,12 +85,15 @@ class TestHead:
         assert _meta(head, "name", "theme-color") == "#2563eb"
 
     @pytest.mark.parametrize(
-        ("name", "placeholder"),
-        [("yandex-verification", "YOUR_YANDEX_CODE"), ("google-site-verification", "YOUR_GOOGLE_CODE")],
+        ("name", "code"),
+        [
+            ("yandex-verification", "4226e1494c17becc"),
+            ("google-site-verification", "24aynkrzAAHuvuKTeP_e1_sIW3PmG8p8UyLilwAjniw"),
+        ],
     )
-    def test_webmaster_placeholders(self, head: str, name: str, placeholder: str) -> None:
-        """В репозитории — плейсхолдеры; реальные коды автор вставляет перед деплоем."""
-        assert _meta(head, "name", name) == placeholder
+    def test_webmaster_codes(self, head: str, name: str, code: str) -> None:
+        """Коды подтверждения Яндекс.Вебмастера и Google Search Console."""
+        assert _meta(head, "name", name) == code
 
     @pytest.mark.parametrize("counter", ["mc.yandex.ru", "googletagmanager", "google-analytics"])
     def test_no_analytics(self, html: str, counter: str) -> None:
@@ -327,3 +330,9 @@ class TestGenerators:
         assert page.count("data:image/webp;base64,") == 2
         assert "data:image/svg+xml;base64," in page
         assert "file://" not in page
+
+
+def test_yandex_verification_file() -> None:
+    """Файл подтверждения Яндекс.Вебмастера (способ «HTML-файл») с тем же кодом, что в метатеге."""
+    page = (LANDING / "yandex_4226e1494c17becc.html").read_text(encoding="utf-8")
+    assert "Verification: 4226e1494c17becc" in page

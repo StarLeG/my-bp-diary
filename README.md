@@ -110,9 +110,9 @@ uv run python -m bot
   медленно, скачайте `tailwindcss-<платформа>` вручную и положите туда как
   `tailwindcss-3.4.17-<платформа>`.
   Иконки: `uv run --group qa python tools/landing/make_icons.py`; превью ссылки (`img/og.png`):
-  `uv run --group qa python -m qa.screenshots.make_og`. Перед деплоем замените в
-  `index.html` плейсхолдеры `YOUR_YANDEX_CODE` / `YOUR_GOOGLE_CODE` кодами подтверждения
-  Яндекс.Вебмастера и Google Search Console.
+  `uv run --group qa python -m qa.screenshots.make_og`. Права на сайт в Яндекс.Вебмастере и
+  Google Search Console подтверждены метатегами в `index.html` (и файлом
+  `yandex_4226e1494c17becc.html` для Яндекса).
 - `web/cabinet/` — личный кабинет (FastAPI + Jinja2): вход по одноразовой ссылке из бота
   (15 минут) или e-mail + пароль (хранится только хеш Argon2id); сессии 7 дней, CSRF,
   ограничение попыток входа. Прямой регистрации «с улицы» нет — привязка только через бота.
