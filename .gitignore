@@ -22,3 +22,4 @@ coverage.xml
 
 # Артефакты QA-прогонов (скриншоты, HTML-отчёты, telethon.session, diag-скрипты)
 qa/reports/
+.cache/

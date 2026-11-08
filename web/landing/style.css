@@ -43,6 +43,18 @@ body {
   line-height: 1.2;
 }
 
+/* Ссылка «← На главную» над заголовком (белая на синем фоне). */
+.back-link {
+  color: #ffffff;
+  opacity: 0.9;
+  text-decoration: none;
+}
+
+.back-link:hover {
+  opacity: 1;
+  text-decoration: underline;
+}
+
 .hero-sub {
   margin: 0 auto 32px;
   max-width: 560px;

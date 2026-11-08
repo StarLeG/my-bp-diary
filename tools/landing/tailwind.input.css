@@ -1,0 +1,9 @@
+/* Входной CSS лендинга: Tailwind + собственные правила (SPEC.md, §16.1). */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Не прячем якоря под sticky-шапкой при прокрутке. */
+html {
+  scroll-padding-top: 5.5rem;
+}

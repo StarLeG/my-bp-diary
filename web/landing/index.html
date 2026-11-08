@@ -3,26 +3,110 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Дневник гипертоника — дневник давления в Telegram</title>
-  <meta name="description" content="Личный дневник давления в Telegram: быстрая запись, напоминания о лекарствах, сводка для врача. Бесплатно, без рекламы.">
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 100 100'><text y='.9em' font-size='90'>💓</text></svg>">
+  <title>Дневник артериального давления в Telegram — Дневник гипертоника</title>
+  <meta name="description" content="Бесплатный дневник давления в Telegram: запись давления и пульса кнопками, напоминания о лекарствах, графики и отчёт для врача в PDF. Без рекламы.">
+  <link rel="canonical" href="https://bp-diary.electroman.by/">
+  <meta name="theme-color" content="#2563eb">
+  <!-- Подтверждение прав в Яндекс.Вебмастере и Google Search Console: автор заменяет плейсхолдеры перед деплоем. -->
+  <meta name="yandex-verification" content="YOUR_YANDEX_CODE">
+  <meta name="google-site-verification" content="YOUR_GOOGLE_CODE">
+
+  <!-- Превью ссылки (Open Graph / Twitter Card) -->
+  <meta property="og:type" content="website">
+  <meta property="og:site_name" content="Дневник гипертоника">
+  <meta property="og:locale" content="ru_RU">
+  <meta property="og:url" content="https://bp-diary.electroman.by/">
+  <meta property="og:title" content="Дневник гипертоника — дневник давления в Telegram">
+  <meta property="og:description" content="Записывайте давление и пульс за пару секунд, получайте напоминания о лекарствах и показывайте врачу сводку. Бесплатно, без рекламы.">
+  <meta property="og:image" content="https://bp-diary.electroman.by/img/og.png">
+  <meta property="og:image:width" content="1200">
+  <meta property="og:image:height" content="630">
+  <meta property="og:image:alt" content="Дневник гипертоника: бот в Telegram и личный кабинет с графиками давления">
+  <meta name="twitter:card" content="summary_large_image">
+
+  <link rel="icon" href="favicon.ico" sizes="32x32">
+  <link rel="icon" href="favicon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="apple-touch-icon.png">
+
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-  <script src="https://cdn.tailwindcss.com"></script>
-  <script>
-    tailwind.config = {
-      theme: {
-        extend: {
-          fontFamily: { sans: ["Inter", "system-ui", "-apple-system", "sans-serif"] },
-        },
+  <!-- Tailwind собран заранее: tools/landing/build_css.py (SPEC.md, §16.1). -->
+  <link rel="stylesheet" href="css/tailwind.css">
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@graph": [
+      {
+        "@type": "Person",
+        "@id": "https://bp-diary.electroman.by/#author",
+        "name": "Старинский Олег Григорьевич",
+        "email": "mailto:info@electroman.by",
+        "sameAs": [
+          "https://t.me/ElectroManBY"
+        ]
       },
-    };
+      {
+        "@type": "SoftwareApplication",
+        "@id": "https://bp-diary.electroman.by/#app",
+        "name": "Дневник гипертоника",
+        "url": "https://bp-diary.electroman.by/",
+        "installUrl": "https://t.me/my_bp_diary_bot?start=landing",
+        "applicationCategory": "HealthApplication",
+        "operatingSystem": "Telegram, Web",
+        "inLanguage": "ru",
+        "description": "Бесплатный дневник давления в Telegram: запись давления и пульса кнопками, напоминания о лекарствах, графики и отчёт для врача в PDF. Без рекламы.",
+        "offers": {
+          "@type": "Offer",
+          "price": "0",
+          "priceCurrency": "BYN"
+        },
+        "author": {
+          "@id": "https://bp-diary.electroman.by/#author"
+        }
+      },
+      {
+        "@type": "FAQPage",
+        "@id": "https://bp-diary.electroman.by/#faq",
+        "mainEntity": [
+          {
+            "@type": "Question",
+            "name": "Нужна ли регистрация?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Нет. И отдельное приложение ставить не нужно: достаточно открыть бота в Telegram и нажать «Старт» — дальше всё кнопками."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Можно ли экспортировать данные?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Да. В боте есть экспорт журнала измерений в CSV за 7 дней, 30 дней или всё время — таблица открывается в Excel и подходит для врача."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Как удалить аккаунт и данные?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Сделать это можно самому, прямо в боте: «Настройки» → «Удалить аккаунт» — с подтверждением. Все записи, лекарства и напоминания удаляются без остатка."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Это медицинское изделие?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Нет. Бот — удобный дневник наблюдений, он не ставит диагнозов и не заменяет консультацию врача."
+            }
+          }
+        ]
+      }
+    ]
+  }
   </script>
-  <style>
-    /* Не прячем якоря под sticky-шапкой при прокрутке. */
-    html { scroll-padding-top: 5.5rem; }
-  </style>
 </head>
 <body class="bg-white text-slate-800 font-sans antialiased">
 
@@ -65,15 +149,15 @@
         <!-- Текст -->
         <div>
           <p class="inline-flex items-center gap-2 bg-blue-100/70 text-blue-800 text-sm font-medium px-4 py-1.5 rounded-full mb-6">
-            <span aria-hidden="true">🩺</span> Дневник давления в Telegram
+            <span aria-hidden="true">🩺</span> Дневник артериального давления в Telegram
           </p>
           <h1 class="text-4xl md:text-5xl lg:text-6xl font-extrabold tracking-tight text-slate-900 leading-[1.1]">
             Дневник давления,<br>
             который <span class="text-transparent bg-clip-text bg-gradient-to-r from-blue-600 to-sky-500">не мешает жить</span>
           </h1>
           <p class="mt-6 text-lg md:text-xl text-slate-600 leading-relaxed max-w-xl">
-            Запись давления — цифрой в чат или набором как на калькуляторе.
-            Напоминания о лекарствах и повторных замерах. Сводка и CSV для врача.
+            Запись артериального давления и пульса — цифрой в чат или набором как на калькуляторе.
+            Напоминания о лекарствах и повторных замерах. Графики, сводка и CSV для врача.
           </p>
           <div class="mt-8 flex flex-wrap items-center gap-4">
             <a class="inline-flex items-center gap-2.5 bg-blue-600 hover:bg-blue-700 text-white text-lg font-semibold px-8 py-4 rounded-full shadow-xl shadow-blue-600/30 transition hover:-translate-y-0.5"
@@ -184,7 +268,7 @@
             <span class="absolute top-6 right-6 text-5xl font-extrabold text-blue-100 leading-none select-none" aria-hidden="true">1</span>
             <span class="inline-flex w-12 h-12 rounded-2xl bg-blue-600 text-white items-center justify-center text-2xl shadow-lg shadow-blue-600/30 mb-5">✍️</span>
             <h3 class="text-lg font-semibold text-slate-900 mb-2">Записывайте</h3>
-            <p class="text-slate-600 leading-relaxed">Систолическое, диастолическое, пульс — набором цифр как на калькуляторе или числом в чат, за пару секунд.</p>
+            <p class="text-slate-600 leading-relaxed">Артериальное давление и пульс — набором цифр как на калькуляторе или числом в чат, за пару секунд.</p>
           </li>
 
           <li class="relative bg-white rounded-2xl border border-slate-100 shadow-sm p-7">
@@ -198,7 +282,7 @@
             <span class="absolute top-6 right-6 text-5xl font-extrabold text-blue-100 leading-none select-none" aria-hidden="true">3</span>
             <span class="inline-flex w-12 h-12 rounded-2xl bg-blue-600 text-white items-center justify-center text-2xl shadow-lg shadow-blue-600/30 mb-5">📊</span>
             <h3 class="text-lg font-semibold text-slate-900 mb-2">Покажите врачу</h3>
-            <p class="text-slate-600 leading-relaxed">Сводка и выгрузка CSV за период — чтобы приём прошёл по делу, а не по памяти.</p>
+            <p class="text-slate-600 leading-relaxed">Журнал измерений, сводка и выгрузка CSV за период — чтобы приём прошёл по делу, а не по памяти.</p>
           </li>
 
         </ol>
@@ -239,17 +323,17 @@
           <figure class=""><button type="button" class="screen-open group block w-full text-left cursor-zoom-in focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-300 rounded-[1.75rem]" data-full="img/screens/doctor-pdf.webp" data-title="PDF-отчёт" data-text="Средние значения и таблица измерений за период — распечатать или приложить к карте."><div class="overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-lg shadow-slate-900/10 transition duration-300 group-hover:-translate-y-1 group-hover:shadow-xl"><div class="flex items-center gap-2 border-b border-slate-100 bg-slate-50 px-3 py-2" aria-hidden="true"><span class="h-2.5 w-2.5 rounded-full bg-rose-300"></span><span class="h-2.5 w-2.5 rounded-full bg-amber-300"></span><span class="h-2.5 w-2.5 rounded-full bg-emerald-300"></span><span class="ml-2 flex-1 truncate rounded-md bg-white border border-slate-200 px-2 py-0.5 text-[11px] text-slate-400">🔒 cabinet.electroman.by</span></div><div class="relative overflow-hidden max-h-[440px] bg-white"><img src="img/screens/doctor-pdf.webp" width="1191" height="1684" loading="lazy" decoding="async" alt="PDF-отчёт" class="w-full h-auto"><div class="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white to-transparent" aria-hidden="true"></div></div></div></button><figcaption class="mt-4 px-1"><h3 class="font-semibold text-slate-900">PDF-отчёт</h3><p class="mt-1 text-sm text-slate-600 leading-relaxed">Средние значения и таблица измерений за период — распечатать или приложить к карте.</p></figcaption></figure>
           <figure><button type="button" class="screen-open group block w-full text-left cursor-zoom-in focus:outline-none focus-visible:ring-4 focus-visible:ring-blue-300 rounded-[1.75rem]" data-full="img/screens/doctor-card-mobile.webp" data-title="Кабинет врача с телефона" data-text="Сводку и графики удобно смотреть со смартфона."><div class="mx-auto max-w-[300px] rounded-[1.75rem] bg-slate-900 p-2 shadow-xl shadow-slate-900/20 transition duration-300 group-hover:-translate-y-1 group-hover:shadow-2xl"><div class="mx-auto mb-1.5 mt-0.5 h-1.5 w-16 rounded-full bg-slate-700" aria-hidden="true"></div><div class="relative overflow-hidden rounded-[1.25rem] bg-white max-h-[520px]"><img src="img/screens/doctor-card-mobile.webp" width="780" height="1829" loading="lazy" decoding="async" alt="Кабинет врача с телефона" class="w-full h-auto"><div class="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-white to-transparent" aria-hidden="true"></div></div></div></button><figcaption class="mt-4 px-1"><h3 class="font-semibold text-slate-900">Кабинет врача с телефона</h3><p class="mt-1 text-sm text-slate-600 leading-relaxed">Сводку и графики удобно смотреть со смартфона.</p></figcaption></figure>
         </div>
-        <p class="mt-10 text-center text-sm text-slate-400">Нажмите на экран, чтобы рассмотреть целиком.</p>
+        <p class="mt-10 text-center text-sm text-slate-500">Нажмите на экран, чтобы рассмотреть целиком.</p>
       </div>
       <dialog id="screen-lightbox" class="screen-lightbox m-auto w-[min(1100px,calc(100vw-2rem))] max-h-[calc(100vh-2rem)] rounded-2xl bg-white p-0 shadow-2xl backdrop:bg-slate-900/70 backdrop:backdrop-blur-sm" aria-labelledby="screen-lightbox-title">
         <div class="sticky top-0 z-10 flex items-start gap-4 border-b border-slate-100 bg-white/95 px-5 py-3">
           <div class="flex-1">
-            <h3 id="screen-lightbox-title" class="font-semibold text-slate-900"></h3>
+            <p id="screen-lightbox-title" class="font-semibold text-slate-900"></p>
             <p id="screen-lightbox-text" class="text-sm text-slate-600"></p>
           </div>
           <button type="button" class="screen-close rounded-full p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-900" aria-label="Закрыть">✕</button>
         </div>
-        <img id="screen-lightbox-img" class="mx-auto block h-auto max-w-full" src="" alt="">
+        <img id="screen-lightbox-img" class="mx-auto block h-auto max-w-full" alt="">
       </dialog>
     </section>
 
@@ -298,7 +382,7 @@
               Нужна ли регистрация?
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
-            <p class="px-6 pb-5 text-slate-600 leading-relaxed">Нет. Достаточно открыть бота в Telegram и нажать «Старт» — дальше всё кнопками.</p>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">Нет. И отдельное приложение ставить не нужно: достаточно открыть бота в Telegram и нажать «Старт» — дальше всё кнопками.</p>
           </details>
 
           <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
@@ -307,8 +391,8 @@
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
             <p class="px-6 pb-5 text-slate-600 leading-relaxed">
-              Да. В боте есть экспорт в CSV за 7 дней, 30 дней или всё время —
-              файл открывается в Excel и подходит для врача.
+              Да. В боте есть экспорт журнала измерений в CSV за 7 дней, 30 дней или всё время —
+              таблица открывается в Excel и подходит для врача.
             </p>
           </details>
 
