@@ -950,6 +950,12 @@ async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
     finally:
         scheduler.shutdown(wait=False)
         await app.engine.dispose()
+        # Глобальный роутер aiogram подключается к одному Dispatcher: отвязываем,
+        # чтобы следующий тест сессии мог собрать приложение заново (как в
+        # tests/test_main.py).
+        from bot.handlers import router
+
+        router._parent_router = None
 
 
 # ─────────────── Исполнитель конкурентных операций (burst и гонки) ───────────────

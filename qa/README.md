@@ -37,7 +37,7 @@ uv sync --group load                      # Locust, pytest-html, Playwright
 uv run playwright install chromium        # для скриншотов (один раз)
 ```
 
-Важно: `uv sync` без `--group load` удалит эти пакеты из `.venv`.
+Важно: `uv sync` без `--group load` удалит эти пакеты из `.venv`. Под Windows Locust без `PYTHONUTF8=1` пишет CSV в системной кодировке. Регрессия читает оба варианта, но UTF-8 удобнее.
 
 ## Запуск
 
@@ -54,7 +54,7 @@ LOAD_TEST=1 uv run pytest qa/ -v -s --ignore=qa/locustfile.py
 
 # 4. HTTP-нагрузка кабинета: сначала кабинет на стенде, затем Locust
 DB_PATH=data/test-stand.sqlite3 uv run uvicorn web.cabinet.app:app --port 8000
-LOAD_PASSWORD='<пароль стенда>' \
+LOAD_PASSWORD='<пароль стенда>' PYTHONUTF8=1 \
     uv run locust -f qa/locustfile.py --host=http://127.0.0.1:8000 \
     -u 20 -r 2 -t 5m --headless --csv=qa/reports/load/locust
 
@@ -74,9 +74,9 @@ LOAD_TEST=1 uv run pytest qa/test_load_regression.py -v
 | `test_load_backup.py` | бэкап во время burst, `integrity_check`, event loop не стоит дольше 5 с | готово |
 | `test_load_concurrent.py` | гонки §7.2 в масштабе: 20 × 10 на гонку, повтор замера — на прод-планировщике | готово |
 | `test_load_admin.py` | статистика на полном объёме (только агрегаты), поиск, рассылка с Semaphore(20) и заблокировавшими | готово |
-| `locustfile.py` | HTTP-кабинет пациента, 20 VU | есть, дорабатывается |
-| `test_load_screenshots.py` | 3 скриншота стенда | план |
-| `test_load_regression.py` | критерии приёмки по артефактам | план |
+| `locustfile.py` | HTTP-кабинет пациента, 20 VU, веса SPEC §22, проверка трёх графиков | готово |
+| `test_load_screenshots.py` | 3 скриншота стенда (Playwright, анимация графиков выключена) | готово |
+| `test_load_regression.py` | критерии приёмки по артефактам, Locust CSV и БД стенда (всегда в конце сессии) | готово |
 
 ## Критерии приёмки
 
