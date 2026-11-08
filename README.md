@@ -93,6 +93,26 @@ uv run python -m bot
 ## Веб-части
 
 - `web/landing/` — статический лендинг: как работает бот, FAQ, кнопка «Открыть в Telegram».
+  Отдаётся контейнером `nginx:alpine` с конфигом `deploy/landing-nginx.conf` (кеш, gzip):
+
+  ```bash
+  docker rm -f bp-landing
+  docker run -d --name bp-landing --restart unless-stopped -p 127.0.0.1:8081:80 \
+    -v "$PWD/web/landing:/usr/share/nginx/html:ro" \
+    -v "$PWD/deploy/landing-nginx.conf:/etc/nginx/conf.d/default.conf:ro" \
+    nginx:alpine
+  docker network connect nginx-proxy-manager_default bp-landing   # если перед ним NPM
+  ```
+
+  Tailwind CSS собран заранее в `web/landing/css/tailwind.css`. После правки классов в
+  разметке пересоберите его: `uv run python tools/landing/build_css.py`. Скрипт скачивает
+  Tailwind CLI v3.4.17 в `.cache/tailwind/` и сверяет SHA-256. Если GitHub отдаёт файл
+  медленно, скачайте `tailwindcss-<платформа>` вручную и положите туда как
+  `tailwindcss-3.4.17-<платформа>`.
+  Иконки: `uv run --group qa python tools/landing/make_icons.py`; превью ссылки (`img/og.png`):
+  `uv run --group qa python -m qa.screenshots.make_og`. Перед деплоем замените в
+  `index.html` плейсхолдеры `YOUR_YANDEX_CODE` / `YOUR_GOOGLE_CODE` кодами подтверждения
+  Яндекс.Вебмастера и Google Search Console.
 - `web/cabinet/` — личный кабинет (FastAPI + Jinja2): вход по одноразовой ссылке из бота
   (15 минут) или e-mail + пароль (хранится только хеш Argon2id); сессии 7 дней, CSRF,
   ограничение попыток входа. Прямой регистрации «с улицы» нет — привязка только через бота.

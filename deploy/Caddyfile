@@ -12,5 +12,9 @@
 landing.example.org {
 	encode gzip
 	root * /srv/landing
+	# Кеш — как в deploy/landing-nginx.conf (SPEC.md, §16.1, «SEO и скорость»).
+	@static path *.webp *.png *.ico *.svg *.css *.js
+	header @static Cache-Control "public, max-age=2592000"
+	header !@static Cache-Control "no-cache"
 	file_server
 }
