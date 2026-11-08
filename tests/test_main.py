@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from bot.config import Settings
 from bot.handlers import router
-from bot.main import App, build_app, build_scheduler, main, run
+from bot.main import App, build_app, build_scheduler, jobs_db_path, main, run
 from bot.middlewares import DbSessionMiddleware, DebounceMiddleware, ThrottleMiddleware
 from bot.services.admin import AdminService, ErrorCounter
 from bot.services.backup import BACKUP_JOB_ID, BackupService, fire_backup
@@ -77,13 +77,70 @@ def make_app(mocker, order: list[str]) -> App:
 
 
 class TestBuildScheduler:
-    """Планировщик: job store — та же SQLite, дефолты job'ов и UTC."""
+    """Планировщик: job store — отдельный файл SQLite, дефолты job'ов и UTC."""
 
-    def test_jobstore_is_sqlite(self, tmp_path: Path) -> None:
+    def test_jobstore_is_separate_sqlite(self, tmp_path: Path) -> None:
+        """Job store — свой файл рядом с основной БД, не она сама (§6.7, U1)."""
         scheduler = build_scheduler(str(tmp_path / "bot.sqlite3"))
         jobstore = scheduler._jobstores["default"]
         assert isinstance(jobstore, SQLAlchemyJobStore)
-        assert str(jobstore.engine.url).endswith("bot.sqlite3")
+        assert jobstore.engine.url.database == str(tmp_path / "bot.jobs.sqlite3")
+
+    @pytest.mark.parametrize(
+        ("db_path", "expected"),
+        [
+            ("data/bot.sqlite3", "bot.jobs.sqlite3"),
+            ("data/test-stand.sqlite3", "test-stand.jobs.sqlite3"),
+            ("data/bot", "bot.jobs.sqlite3"),
+        ],
+    )
+    def test_jobs_db_path(self, db_path: str, expected: str) -> None:
+        assert jobs_db_path(db_path) == str(Path(db_path).with_name(expected))
+
+    def test_jobs_db_path_memory(self) -> None:
+        assert jobs_db_path(":memory:") == ":memory:"
+
+    async def test_jobs_not_in_backup(self, tmp_path: Path) -> None:
+        """Job'ы живут в своём файле: бэкап основной БД (§20) их не содержит."""
+        import sqlite3
+        from datetime import datetime, timezone
+
+        from bot.db import create_engine, init_db
+        from bot.services.backup import decrypt_file, derive_key
+
+        db_path = tmp_path / "bot.sqlite3"
+        engine = create_engine(str(db_path))
+        await init_db(engine)
+        await engine.dispose()
+        scheduler = build_scheduler(str(db_path))
+        scheduler.start()
+        try:
+            scheduler.add_job(
+                fire_reminder,
+                "date",
+                run_date=datetime(2099, 1, 1, tzinfo=timezone.utc),
+                id="reminder:1",
+                args=[1, "slot"],
+            )
+        finally:
+            scheduler.shutdown(wait=False)
+        jobs = sqlite3.connect(jobs_db_path(str(db_path)))
+        try:
+            assert jobs.execute("SELECT id FROM apscheduler_jobs").fetchall() == [("reminder:1",)]
+        finally:
+            jobs.close()
+
+        backup = BackupService(str(db_path), tmp_path / "backups", "test-key")
+        result = await backup.create_backup()
+        restored = tmp_path / "restored.sqlite3"
+        decrypt_file(tmp_path / "backups" / result.name, restored, derive_key("test-key"))
+        copy = sqlite3.connect(restored)
+        try:
+            tables = {row[0] for row in copy.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        finally:
+            copy.close()
+        assert "measurements" in tables
+        assert "apscheduler_jobs" not in tables
 
     def test_defaults_and_timezone(self, tmp_path: Path) -> None:
         scheduler = build_scheduler(str(tmp_path / "bot.sqlite3"))

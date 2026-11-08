@@ -12,6 +12,7 @@ import asyncio
 import logging
 import sys
 from dataclasses import dataclass
+from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -67,15 +68,35 @@ class App:
     """Счётчик ошибок логов за 24 часа для экрана здоровья (§18.4)."""
 
 
+def jobs_db_path(db_path: str) -> str:
+    """Файл job store рядом с основной БД: `data/bot.sqlite3` → `data/bot.jobs.sqlite3`.
+
+    Отдельный файл обязателен (SPEC.md, §6.7): `SQLAlchemyJobStore` пишет
+    синхронно, в потоке event loop. В общей с данными БД такая запись ждёт
+    чужую незакоммиченную запись aiosqlite, а та не может закоммитить, пока
+    loop стоит, — бот замирает до `busy_timeout` и падает с `database is
+    locked`. `:memory:` (тесты) остаётся как есть.
+    """
+    if db_path == ":memory:":
+        return db_path
+    path = Path(db_path)
+    return str(path.with_name(f"{path.stem}.jobs{path.suffix or '.sqlite3'}"))
+
+
 def build_scheduler(db_path: str) -> AsyncIOScheduler:
-    """Создать планировщик: job store — та же SQLite, всё строго в UTC.
+    """Создать планировщик: job store — отдельный файл SQLite, всё строго в UTC.
+
+    `db_path` — путь основной БД; job'ы живут в `jobs_db_path(db_path)`.
+    Строки `reminders` основной БД — источник истины: при старте
+    `RemindersService.startup()` пересоздаёт job'ы из них, поэтому файл
+    job'ов — кэш планировщика и в бэкап (§20) не входит.
 
     Job defaults: `coalesce=True`, `max_instances=1`, `misfire_grace_time=300`
     (SPEC.md, §6.7). Таймзоны в APScheduler не передаются (DST-ловушка
     ZoneInfo): локальное время конвертируется в UTC в `RemindersService`.
     """
     return AsyncIOScheduler(
-        jobstores={"default": SQLAlchemyJobStore(url=f"sqlite:///{db_path}")},
+        jobstores={"default": SQLAlchemyJobStore(url=f"sqlite:///{jobs_db_path(db_path)}")},
         job_defaults={"coalesce": True, "max_instances": 1, "misfire_grace_time": 300},
         timezone="UTC",
     )
