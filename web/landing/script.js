@@ -27,3 +27,52 @@ document.addEventListener("click", (event) => {
     history.pushState(null, "", hash);
   }
 });
+
+/* «Как это выглядит»: вкладки (стрелки ←/→ переключают) и лайтбокс на <dialog>. */
+(() => {
+  const tabs = [...document.querySelectorAll("#screens .screens-tab")];
+  const select = (tab) => {
+    for (const other of tabs) {
+      const active = other === tab;
+      other.setAttribute("aria-selected", String(active));
+      other.tabIndex = active ? 0 : -1;
+      const panel = document.getElementById(other.getAttribute("aria-controls"));
+      panel.hidden = !active;
+      panel.classList.toggle("hidden", !active);
+    }
+  };
+  tabs.forEach((tab, index) => {
+    tab.addEventListener("click", () => select(tab));
+    tab.addEventListener("keydown", (event) => {
+      const step = { ArrowRight: 1, ArrowLeft: -1 }[event.key];
+      if (!step) {
+        return;
+      }
+      const next = tabs[(index + step + tabs.length) % tabs.length];
+      select(next);
+      next.focus();
+    });
+  });
+
+  const box = document.getElementById("screen-lightbox");
+  if (!box || typeof box.showModal !== "function") {
+    return;
+  }
+  const image = document.getElementById("screen-lightbox-img");
+  document.addEventListener("click", (event) => {
+    const opener = event.target.closest(".screen-open");
+    if (opener) {
+      image.src = opener.dataset.full;
+      image.alt = opener.dataset.title;
+      document.getElementById("screen-lightbox-title").textContent = opener.dataset.title;
+      document.getElementById("screen-lightbox-text").textContent = opener.dataset.text;
+      box.showModal();
+      box.scrollTop = 0;
+      return;
+    }
+    /* Клик по кнопке «✕» или по затемнению вокруг окна закрывает лайтбокс. */
+    if (event.target.closest(".screen-close") || event.target === box) {
+      box.close();
+    }
+  });
+})();

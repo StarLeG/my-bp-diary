@@ -123,3 +123,66 @@ class TestManualSync:
     )
     def test_stale_phrase_absent(self, html: str, stale: str) -> None:
         assert stale not in html
+
+
+#: Кадры секции «Как это выглядит» и их заголовки — утверждены дословно
+#: (doc/LANDING-SCREENS-QUESTIONS.md, третий раунд).
+SCREENS = {
+    "bot-menu": "Главное меню",
+    "bot-keypad": "Ввод как на калькуляторе",
+    "bot-saved": "Запись сохранена",
+    "bot-reminder": "Напоминание по расписанию",
+    "bot-meds": "Какие лекарства приняли",
+    "bot-stats": "Статистика за 7 дней",
+    "cabinet-charts": "Графики с цветными зонами",
+    "cabinet-history": "История записей",
+    "cabinet-add-form": "Добавить измерение",
+    "cabinet-medications": "Лекарства",
+    "cabinet-import": "Импорт из блокнота",
+    "cabinet-history-mobile": "С телефона",
+    "doctor-list": "Пациенты",
+    "doctor-card": "Карточка пациента",
+    "doctor-pdf": "PDF-отчёт",
+    "doctor-card-mobile": "Кабинет врача с телефона",
+}
+
+SCREENS_DIR = LANDING.parent / "img" / "screens"
+
+
+class TestScreensSection:
+    """Секция «Как это выглядит» (#screens, SPEC.md §16.1)."""
+
+    def test_after_how_before_trust(self, html: str) -> None:
+        assert html.index('id="how"') < html.index('id="screens"') < html.index('id="trust"')
+
+    def test_title_and_subtitle(self, html: str) -> None:
+        assert "Как это выглядит</h2>" in html
+        assert "Настоящие экраны бота и кабинетов. Данные на скриншотах — вымышленные." in html
+
+    @pytest.mark.parametrize("tab", ["Telegram-бот", "Личный кабинет", "Кабинет врача"])
+    def test_tab_present(self, html: str, tab: str) -> None:
+        assert re.search(rf'role="tab"[^>]*>.*?{tab}</button>', html)
+
+    @pytest.mark.parametrize(("name", "title"), SCREENS.items())
+    def test_frame_with_caption(self, html: str, name: str, title: str) -> None:
+        assert (SCREENS_DIR / f"{name}.webp").is_file()
+        tag = re.search(rf'<img src="img/screens/{name}\.webp"[^>]*>', html)
+        assert tag, name
+        for attr in ('loading="lazy"', "width=", "height=", f'alt="{title}"'):
+            assert attr in tag.group(0)
+        assert f">{title}</h3>" in html
+
+    def test_no_extra_frames(self) -> None:
+        assert {p.stem for p in SCREENS_DIR.glob("*.webp")} == set(SCREENS)
+
+    def test_frames_weight_budget(self) -> None:
+        total = sum(p.stat().st_size for p in SCREENS_DIR.glob("*.webp"))
+        assert total <= 1_500_000
+
+    def test_nav_link(self, html: str) -> None:
+        assert 'href="#screens"' in html
+
+    def test_lightbox(self, html: str) -> None:
+        assert '<dialog id="screen-lightbox"' in html
+        js = (LANDING.parent / "script.js").read_text(encoding="utf-8")
+        assert "showModal" in js and "screens-tab" in js
