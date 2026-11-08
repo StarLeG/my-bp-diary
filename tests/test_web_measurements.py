@@ -611,3 +611,411 @@ class TestImportCsv:
         )
         assert response.status_code == 200
         assert '<option value="30" selected>' in response.text
+
+
+# ─────────────────────── Выбор лекарств в форме записи (§16.2) ───────────────────────
+
+
+def _add_medication(client: TestClient, settings: Settings, name: str, *slots: str) -> dict[str, int]:
+    """Добавить лекарство формой кабинета; {слот: id строки}."""
+    data = {"csrf_token": _csrf(client), "name": name, "dosage": "50 мг"}
+    data.update({f"slot_{slot}": "1" for slot in slots})
+    response = client.post("/medications", data=data)
+    assert response.headers["location"] == "/?saved=medication#medications"
+    rows = _sql(settings, "SELECT slot, id FROM medications WHERE name = ?", (name,))
+    return {str(slot): int(med_id) for slot, med_id in rows}
+
+
+def _set_reminder(settings: Settings, user_id: int, slot: str, local_time: str, enabled: bool) -> None:
+    """Строка напоминания слота (источник времени предотметки, §16.2)."""
+    con = sqlite3.connect(settings.db_path)
+    con.execute(
+        "INSERT INTO reminders (user_id, type, local_time, next_trigger_time, enabled)"
+        " VALUES (?, ?, ?, '2030-01-01 00:00:00.000000', ?)",
+        (user_id, slot, local_time, int(enabled)),
+    )
+    con.commit()
+    con.close()
+
+
+def _links(settings: Settings) -> list[tuple[int, int]]:
+    return sorted(
+        (int(a), int(b))
+        for a, b in _sql(settings, "SELECT measurement_id, medication_id FROM measurement_medications")
+    )
+
+
+def _med_logs(settings: Settings) -> list[tuple[int, str, str, str]]:
+    """(medication_id, timestamp, status, slot) журнала по порядку."""
+    return [
+        (int(row[0]), str(row[1]), str(row[2]), str(row[3]))
+        for row in _sql(
+            settings,
+            "SELECT medication_id, timestamp, status, slot FROM medication_logs"
+            " ORDER BY timestamp, medication_id",
+        )
+    ]
+
+
+def _checked_ids(html: str) -> set[int]:
+    """Id отмеченных чекбоксов `medication_ids` в разметке формы."""
+    import re
+
+    return {
+        int(match.group(1))
+        for match in re.finditer(
+            r'name="medication_ids" value="(\d+)"\s+data-slot="\w+"\s+checked', html
+        )
+    }
+
+
+def _hhmm_shift(hours: int) -> str:
+    """Текущее локальное время пользователя со сдвигом, «ЧЧ:ММ»."""
+    return (datetime.now(ZoneInfo(TZ)) + timedelta(hours=hours)).strftime("%H:%M")
+
+
+class TestPrefillSlot:
+    """Ближайший слот в пределах ±2 ч (§16.2, N1) — та же логика, что в inline-скрипте."""
+
+    SLOTS = [("morning", "08:00"), ("noon", "13:00"), ("evening", "21:00")]
+
+    @pytest.mark.parametrize(
+        ("hhmm", "expected"),
+        [
+            ("08:00", "morning"),
+            ("06:00", "morning"),  # граница окна включительно
+            ("05:59", None),  # за окном
+            ("11:30", "noon"),  # обед в окне (1:30), утро — нет (3:30)
+            ("16:00", None),  # между обедом и вечером — ни одного в окне
+            ("23:00", "evening"),
+            ("02:00", None),
+        ],
+    )
+    def test_nearest_in_window(self, hhmm: str, expected) -> None:
+        from web.cabinet.app import prefill_slot
+
+        assert prefill_slot(hhmm, self.SLOTS) == expected
+
+    def test_window_wraps_midnight(self) -> None:
+        """Расстояние — по кругу суток: 00:30 — час до вечернего слота в 23:30."""
+        from web.cabinet.app import prefill_slot
+
+        assert prefill_slot("00:30", [("morning", "08:00"), ("evening", "23:30")]) == "evening"
+
+    def test_tie_prefers_earlier_slot(self) -> None:
+        from web.cabinet.app import prefill_slot
+
+        assert prefill_slot("09:00", [("morning", "08:00"), ("noon", "10:00")]) == "morning"
+
+    def test_slot_times_fallback_to_defaults(self) -> None:
+        """Время включённого напоминания; выключенное или отсутствующее — умолчание."""
+        from types import SimpleNamespace
+
+        from web.cabinet.app import _slot_times
+
+        reminders = {
+            "morning": SimpleNamespace(enabled=True, local_time="07:15"),
+            "noon": SimpleNamespace(enabled=False, local_time="11:40"),
+        }
+        assert _slot_times(reminders) == [
+            ("morning", "07:15"),
+            ("noon", "13:00"),
+            ("evening", "21:00"),
+        ]
+
+
+class TestMedicationPickerRender:
+    def test_groups_by_slot(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        losartan = _add_medication(client, settings, "Лозартан", "morning", "evening")
+        crisis = _add_medication(client, settings, "Каптоприл", "crisis")
+        html = client.get("/?add=1#history").text
+        picker = html[html.index('class="med-picker"'):html.index("Самочувствие")]
+        for slot_label in ("Утро", "Вечер", "Кризис"):
+            assert f'<legend class="med-group-title">{slot_label}</legend>' in picker
+        assert "Обед" not in picker, "пустые группы не показываются"
+        for med_id in (*losartan.values(), *crisis.values()):
+            assert f'name="medication_ids" value="{med_id}"' in picker
+        assert "Лозартан (50 мг)" in picker
+
+    def test_no_medications_hint(self, app_client) -> None:
+        client, _ = app_client
+        _register(client)
+        html = client.get("/?add=1#history").text
+        assert "У вас пока нет добавленных лекарств." in html
+        assert '<a href="#medications">Перейти в Управление лекарствами</a>' in html
+
+    def test_hidden_without_flag_css(self, app_client) -> None:
+        """Блок скрывается CSS :has(), пока галочка «Принял лекарство» снята."""
+        client, _ = app_client
+        css = client.get("/static/style.css").text
+        assert 'form:not(:has(input[name="medication_taken"]:checked)) .med-picker' in css
+
+    def test_prefill_by_current_slot(self, app_client, settings) -> None:
+        """Форма добавления: отмечены лекарства слота, чьё время совпадает с текущим."""
+        client, user_id = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning", "noon", "crisis")
+        _set_reminder(settings, user_id, "morning", _hhmm_shift(0), enabled=True)
+        html = client.get("/?add=1#history").text
+        assert _checked_ids(html) == {meds["morning"]}, "только утро; «Кризис» — никогда"
+        assert "data-prefill=" in html and "data-prefill-window=\"120\"" in html
+        assert 'getElementById("measurement-form")' in html, "inline-скрипт пересчёта"
+
+    def test_no_prefill_outside_window(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        _add_medication(client, settings, "Лозартан", "morning", "noon", "evening")
+        for slot, shift in (("morning", 5), ("noon", 10), ("evening", 15)):
+            _set_reminder(settings, user_id, slot, _hhmm_shift(shift), enabled=True)
+        html = client.get("/?add=1#history").text
+        assert _checked_ids(html) == set()
+
+    def test_disabled_reminder_uses_default_time(self, app_client, settings) -> None:
+        """Выключенное напоминание не даёт своего времени для предотметки (умолчание)."""
+        client, user_id = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _set_reminder(settings, user_id, "morning", _hhmm_shift(0), enabled=False)
+        html = client.get("/?add=1#history").text
+        from web.cabinet.app import prefill_slot
+
+        default_slot = prefill_slot(
+            _hhmm_shift(0), [("morning", "08:00"), ("noon", "13:00"), ("evening", "21:00")]
+        )
+        expected = {meds["morning"]} if default_slot == "morning" else set()
+        assert _checked_ids(html) == expected
+
+    def test_edit_shows_current_links_without_prefill(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning", "evening")
+        _set_reminder(settings, user_id, "morning", _hhmm_shift(0), enabled=True)
+        _add(client, medication_taken="1", medication_ids=[str(meds["evening"])])
+        measurement_id = _ids(settings)[0][0]
+        html = client.get(f"/?edit={measurement_id}#history").text
+        assert _checked_ids(html) == {meds["evening"]}
+        assert "data-prefill=" not in html
+        assert 'getElementById("measurement-form")' not in html
+
+    def test_missing_error_message(self, app_client) -> None:
+        client, _ = app_client
+        _register(client)
+        html = client.get("/?error=medication_missing#history").text
+        assert "Лекарство не найдено." in html
+        assert "Добавить запись" in html, "форма добавления открыта снова"
+
+
+class TestMedicationPickerAdd:
+    def test_links_and_log_at_measurement_moment(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning", "crisis")
+        _add(
+            client,
+            medication_taken="1",
+            medication_ids=[str(meds["morning"]), str(meds["crisis"])],
+        )
+        ((measurement_id, moment),) = _ids(settings)
+        assert _links(settings) == sorted(
+            [(measurement_id, meds["morning"]), (measurement_id, meds["crisis"])]
+        )
+        assert _med_logs(settings) == sorted(
+            [
+                (meds["crisis"], moment, "taken", "crisis"),
+                (meds["morning"], moment, "taken", "morning"),
+            ],
+            key=lambda row: (row[1], row[0]),
+        )
+        flag = _sql(settings, "SELECT medication_taken FROM measurements")
+        assert flag == [(1,)]
+        history = client.get("/?days=7#history").text
+        assert "Принято: Лозартан 50 мг, Лозартан 50 мг" in history
+
+    def test_selection_ignored_without_flag(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _add(client, medication_ids=[str(meds["morning"])])
+        assert _links(settings) == [] and _med_logs(settings) == []
+        assert _sql(settings, "SELECT medication_taken FROM measurements") == [(None,)]
+
+    def test_flag_without_selection(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        _add_medication(client, settings, "Лозартан", "morning")
+        _add(client, medication_taken="1")
+        assert _links(settings) == [] and _med_logs(settings) == []
+        assert _sql(settings, "SELECT medication_taken FROM measurements") == [(1,)]
+
+    @pytest.mark.parametrize("bad_id", ["987654", "абв", "foreign"])
+    def test_foreign_or_bad_id_rejected(self, app_client, settings, bad_id) -> None:
+        client, _ = app_client
+        _register(client)
+        if bad_id == "foreign":
+            con = sqlite3.connect(settings.db_path)
+            con.execute(
+                "INSERT INTO users (telegram_id, timezone, target_systolic, target_diastolic,"
+                " med_remeasure_delay, onboarded, created_at)"
+                " VALUES (222222, ?, 130, 80, 60, 1, '2026-01-01 00:00:00')",
+                (TZ,),
+            )
+            other_id = con.execute("SELECT id FROM users WHERE telegram_id = 222222").fetchone()[0]
+            con.execute(
+                "INSERT INTO medications (user_id, name, dosage, slot, created_at)"
+                " VALUES (?, 'Чужое', '', 'morning', '2026-01-01 00:00:00')",
+                (other_id,),
+            )
+            con.commit()
+            bad_id = str(con.execute("SELECT id FROM medications").fetchone()[0])
+            con.close()
+        form = _form(csrf_token=_csrf(client), medication_taken="1", medication_ids=[bad_id])
+        response = client.post("/measurements", data=form)
+        assert response.headers["location"] == "/?error=medication_missing#history"
+        assert _ids(settings) == [] and _med_logs(settings) == []
+
+    def test_double_submit_logs_once(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        form = _form(csrf_token=_csrf(client), medication_taken="1", medication_ids=[str(meds["morning"])])
+        first = client.post("/measurements", data=form)
+        second = client.post("/measurements", data=form)
+        assert first.headers["location"] == "/?saved=measurement#history"
+        assert second.headers["location"] == "/?error=duplicate#history"
+        assert len(_med_logs(settings)) == 1 and len(_links(settings)) == 1
+
+
+class TestMedicationPickerEdit:
+    def _edit(self, client: TestClient, measurement_id: int, **overrides):
+        form = _form(**overrides)
+        form["csrf_token"] = _csrf(client)
+        return client.post(f"/measurements/{measurement_id}", data=form)
+
+    def test_replace_selection(self, app_client, settings) -> None:
+        """Добавленные галочки — связь и журнал; снятые — связь и журнал записи уходят."""
+        client, _ = app_client
+        _register(client)
+        losartan = _add_medication(client, settings, "Лозартан", "morning")
+        amlodipine = _add_medication(client, settings, "Амлодипин", "morning")
+        _add(client, medication_taken="1", medication_ids=[str(losartan["morning"])])
+        ((measurement_id, moment),) = _ids(settings)
+        response = self._edit(
+            client, measurement_id, medication_taken="1", medication_ids=[str(amlodipine["morning"])]
+        )
+        assert response.headers["location"] == "/?saved=measurement#history"
+        assert _links(settings) == [(measurement_id, amlodipine["morning"])]
+        assert _med_logs(settings) == [(amlodipine["morning"], moment, "taken", "morning")]
+
+    def test_time_change_moves_log(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _add(client, medication_taken="1", medication_ids=[str(meds["morning"])])
+        ((measurement_id, _),) = _ids(settings)
+        two_days_ago = (datetime.now(ZoneInfo(TZ)).date() - timedelta(days=2)).isoformat()
+        self._edit(
+            client, measurement_id, date=two_days_ago, time="09:15",
+            medication_taken="1", medication_ids=[str(meds["morning"])],
+        )
+        ((_, new_moment),) = _ids(settings)
+        assert new_moment.startswith(f"{two_days_ago} 06:15:00")
+        assert _med_logs(settings) == [(meds["morning"], new_moment, "taken", "morning")]
+        assert _links(settings) == [(measurement_id, meds["morning"])]
+
+    def test_unchecked_flag_removes_all(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning", "evening")
+        _add(client, medication_taken="1", medication_ids=[str(m) for m in meds.values()])
+        ((measurement_id, _),) = _ids(settings)
+        # Чекбоксы лекарств остались отмеченными в скрытом блоке — сервер их не учитывает.
+        self._edit(client, measurement_id, medication_ids=[str(m) for m in meds.values()])
+        assert _links(settings) == [] and _med_logs(settings) == []
+        assert _sql(settings, "SELECT medication_taken FROM measurements") == [(None,)]
+
+    def test_bot_log_untouched(self, app_client, settings) -> None:
+        """Журнал бота (момент «Готово», не момент записи) снятие связи не удаляет (N3 А)."""
+        client, user_id = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _add(client)
+        ((measurement_id, _),) = _ids(settings)
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO medication_logs (user_id, medication_id, timestamp, status, slot)"
+            " VALUES (?, ?, '2026-01-02 03:04:05.000000', 'taken', 'morning')",
+            (user_id, meds["morning"]),
+        )
+        con.execute(
+            "INSERT INTO measurement_medications (measurement_id, medication_id) VALUES (?, ?)",
+            (measurement_id, meds["morning"]),
+        )
+        con.commit()
+        con.close()
+        self._edit(client, measurement_id, medication_taken="1")
+        assert _links(settings) == []
+        assert _med_logs(settings) == [
+            (meds["morning"], "2026-01-02 03:04:05.000000", "taken", "morning")
+        ]
+
+    def test_foreign_id_back_to_edit(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _add(client, medication_taken="1", medication_ids=[str(meds["morning"])])
+        ((measurement_id, moment),) = _ids(settings)
+        response = self._edit(
+            client, measurement_id, systolic="150", medication_taken="1", medication_ids=["987654"]
+        )
+        assert (
+            response.headers["location"]
+            == f"/?edit={measurement_id}&error=medication_missing#history"
+        )
+        assert _sql(settings, "SELECT systolic FROM measurements") == [(135,)]
+        assert _med_logs(settings) == [(meds["morning"], moment, "taken", "morning")]
+
+    def test_duplicate_keeps_links(self, app_client, settings) -> None:
+        """Дубль момента при правке: ничего не меняется, журнал на месте."""
+        client, _ = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _add(client, time="07:00")
+        _add(client, medication_taken="1", medication_ids=[str(meds["morning"])])
+        second_id, moment = _ids(settings)[1]
+        response = self._edit(client, second_id, time="07:00", medication_taken="1")
+        assert response.headers["location"] == f"/?edit={second_id}&error=duplicate#history"
+        assert _links(settings) == [(second_id, meds["morning"])]
+        assert _med_logs(settings) == [(meds["morning"], moment, "taken", "morning")]
+
+    def test_missing_record(self, app_client, settings) -> None:
+        client, _ = app_client
+        _register(client)
+        response = self._edit(client, 987_654)
+        assert response.headers["location"] == "/?error=measurement#history"
+
+
+class TestMedicationPickerDelete:
+    def test_delete_removes_own_log(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        meds = _add_medication(client, settings, "Лозартан", "morning")
+        _add(client, medication_taken="1", medication_ids=[str(meds["morning"])])
+        ((measurement_id, _),) = _ids(settings)
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO medication_logs (user_id, medication_id, timestamp, status, slot)"
+            " VALUES (?, ?, '2026-01-02 03:04:05.000000', 'taken', 'morning')",
+            (user_id, meds["morning"]),
+        )
+        con.commit()
+        con.close()
+        response = client.post(
+            f"/measurements/{measurement_id}/delete", data={"csrf_token": _csrf(client)}
+        )
+        assert response.headers["location"] == "/?saved=measurement#history"
+        assert _ids(settings) == [] and _links(settings) == []
+        assert _med_logs(settings) == [
+            (meds["morning"], "2026-01-02 03:04:05.000000", "taken", "morning")
+        ]

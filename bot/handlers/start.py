@@ -24,12 +24,9 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import keyboards, schemas, texts
 from bot.config import DEFAULT_TIMEZONE
 from bot.services import measurements as measurements_service
-from bot.services.reminders import RemindersService
+from bot.services.reminders import DEFAULT_SLOT_TIMES, RemindersService
 
 router = Router(name="start")
-
-#: Дефолтное время слотов при «Пропустить» (середина пресетов, §6.1).
-DEFAULT_SLOT_TIMES = {"morning": "08:00", "noon": "13:00", "evening": "21:00"}
 
 #: Дефолт целевых значений при «Пропустить» (§6.1, §4.1).
 DEFAULT_TARGET = (130, 80)

@@ -400,6 +400,33 @@ td.actions {
   font-size: 0.85rem;
 }
 
+/* Выбор лекарств в форме записи (§16.2): виден при отмеченной «Принял
+   лекарство». Без поддержки :has() блок виден всегда — сервер всё равно
+   учитывает выбор только при отмеченной галочке. */
+.med-picker {
+  display: grid;
+  gap: 8px;
+}
+
+.med-pick-group {
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  margin: 0;
+  display: grid;
+  gap: 4px;
+}
+
+.med-pick-group .check {
+  margin-right: 0;
+}
+
+@supports selector(:has(*)) {
+  form:not(:has(input[name="medication_taken"]:checked)) .med-picker {
+    display: none;
+  }
+}
+
 .med-list {
   margin: 2px 0 0;
   padding-left: 18px;

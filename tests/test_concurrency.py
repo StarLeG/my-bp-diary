@@ -823,6 +823,143 @@ class TestMedsDoneLockOrder:
         assert (logs, links) == (1, 1), "журнал и связь — в одной транзакции"
 
 
+class TestCabinetIntakeLockOrder:
+    """Форма записи кабинета берёт лок приёмов до первой записи в БД (§16.2, §7.2).
+
+    Добавление, правка и удаление пишут запись, связи и журнал одной
+    транзакцией под `intake_lock`. Если бы хендлер успел записать (например,
+    измерение) и только потом встал в очередь лока, он держал бы запись
+    SQLite, пока лок у другой операции, — шаблон T1. Проверка
+    детерминирована: тест держит лок, хендлер (в том же event loop, через
+    `httpx.ASGITransport`) встаёт в очередь, и постороннее соединение
+    обязано сразу получить `BEGIN IMMEDIATE`.
+    """
+
+    @staticmethod
+    def _can_take_write_lock(db_path: str) -> bool:
+        import sqlite3
+
+        con = sqlite3.connect(db_path, timeout=0.2)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.rollback()
+            return True
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            con.close()
+
+    @staticmethod
+    async def _cabinet(engine, session_factory):
+        """Кабинет на той же БД, клиент с сессией и CSRF, лекарство и запись с журналом."""
+        import httpx
+
+        from bot.config import Settings
+        from web.cabinet import auth
+        from web.cabinet.app import CSRF_COOKIE, SESSION_COOKIE, create_app
+
+        async with session_factory() as session:
+            owner = DbUser(telegram_id=TG_ID, timezone="Europe/Minsk")
+            session.add(owner)
+            await session.flush()
+            web_user = WebUser(
+                user_id=owner.id, email="user@example.org", password_hash="not-used"
+            )
+            session.add(web_user)
+            await session.flush()
+            token = await auth.create_web_session(session, web_user.id)
+            meds = await medications_service.add_medication(
+                session, owner, "Лозартан", "50 мг", ["morning"]
+            )
+            moment = datetime.now(timezone.utc).replace(second=0, microsecond=0) - timedelta(days=2)
+            measurement = await measurements_service.save_measurement(
+                session, owner, 130, 85, timestamp=moment
+            )
+            await medications_service.sync_medication_logs(
+                session, owner, measurement.id, measurement.timestamp, meds
+            )
+            await session.commit()
+        settings = Settings(
+            bot_token=f"123456:{'A' * 35}",
+            web_secret_key="test-secret",
+            db_path=engine.url.database,
+        )
+        app = create_app(settings, session_factory=session_factory)
+        csrf_token = app.state.csrf.issue()
+        client = httpx.AsyncClient(
+            transport=httpx.ASGITransport(app=app),
+            base_url="https://testserver",
+            follow_redirects=False,
+            cookies={SESSION_COOKIE: token, CSRF_COOKIE: csrf_token},
+        )
+        return client, csrf_token, meds[0].id, measurement.id
+
+    @staticmethod
+    def _form(csrf_token: str, med_id: int, days_ago: int, hhmm: str) -> dict:
+        from zoneinfo import ZoneInfo
+
+        day = datetime.now(ZoneInfo("Europe/Minsk")).date() - timedelta(days=days_ago)
+        return {
+            "csrf_token": csrf_token,
+            "date": day.isoformat(),
+            "time": hhmm,
+            "systolic": "135",
+            "diastolic": "85",
+            "medication_taken": "1",
+            "medication_ids": str(med_id),
+        }
+
+    @pytest.mark.parametrize("action", ["add", "edit", "delete"])
+    async def test_no_write_while_waiting_for_lock(self, engine, session_factory, action) -> None:
+        client, csrf_token, med_id, measurement_id = await self._cabinet(engine, session_factory)
+        url, data = {
+            "add": ("/measurements", self._form(csrf_token, med_id, 1, "08:30")),
+            "edit": (f"/measurements/{measurement_id}", self._form(csrf_token, med_id, 3, "09:00")),
+            "delete": (f"/measurements/{measurement_id}/delete", {"csrf_token": csrf_token}),
+        }[action]
+        lock = medications_service.intake_lock()
+        await lock.acquire()
+        task = asyncio.create_task(client.post(url, data=data))
+        try:
+            for _ in range(300):  # хендлер дошёл до лока (очередь непуста)
+                if lock._waiters:
+                    break
+                await asyncio.sleep(0.01)
+            assert lock._waiters, "хендлер не дошёл до лока приёмов"
+            assert self._can_take_write_lock(engine.url.database), (
+                f"{action}: хендлер ждёт лок приёмов, держа запись SQLite (§7.2, T1)"
+            )
+        finally:
+            lock.release()
+        response = await asyncio.wait_for(task, timeout=5)
+        await client.aclose()
+        assert response.status_code == 303
+        assert "saved=measurement" in response.headers["location"]
+
+    async def test_parallel_adds_log_intake_once_per_day(self, engine, session_factory) -> None:
+        """Две записи за одни сутки с одним лекарством: две связи, одна строка журнала (§7.2)."""
+        client, csrf_token, med_id, _ = await self._cabinet(engine, session_factory)
+        responses = await asyncio.gather(
+            client.post("/measurements", data=self._form(csrf_token, med_id, 1, "08:00")),
+            client.post("/measurements", data=self._form(csrf_token, med_id, 1, "08:30")),
+        )
+        await client.aclose()
+        assert [r.headers["location"] for r in responses] == ["/?saved=measurement#history"] * 2
+        async with session_factory() as session:
+            yesterday_logs = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(MedicationLog)
+                    .where(MedicationLog.timestamp > datetime.now(timezone.utc) - timedelta(days=1.9))
+                )
+            ).scalar_one()
+            links = (
+                await session.execute(select(func.count()).select_from(MeasurementMedication))
+            ).scalar_one()
+        assert yesterday_logs == 1, "приём за сутки отмечается один раз"
+        assert links == 3, "запись из сида + две новые, у каждой — своя связь"
+
+
 class TestGetOrCreateReleasesWrite:
     """`get_or_create_user` не оставляет открытой запись SQLite (U2, §7.2).
 

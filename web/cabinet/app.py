@@ -25,7 +25,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from starlette.datastructures import UploadFile  # request.form() возвращает starlette-экземпляр
+from starlette.datastructures import FormData, UploadFile  # request.form() возвращает starlette-экземпляр
 from pydantic import ValidationError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -47,7 +47,8 @@ from bot.services.measurements import (
     save_measurement,
     update_measurement_values,
 )
-from bot.services.reminders import enable_slot_row, next_slot_occurrence
+from bot.services.medications import MedicationNotFoundError
+from bot.services.reminders import DEFAULT_SLOT_TIMES, enable_slot_row, next_slot_occurrence
 from web.cabinet import auth, csv_import, doctor_auth
 from web.cabinet.chart_zones import CHART_ZONES
 
@@ -66,6 +67,9 @@ CSV_EXPORT_LIMIT = 5000
 
 #: Слоты напоминаний, как в боте (SPEC.md, раздел 4.3).
 SLOT_ORDER = ("morning", "noon", "evening")
+
+#: Окно предотметки лекарств в форме записи: слот не дальше 2 ч от времени (§16.2).
+PREFILL_WINDOW_MINUTES = 120
 
 #: Человекочитаемые отметки приёма лекарства в истории.
 MEDICATION_TAKEN_LABELS = {True: "Принято", False: "Пропущено", None: "—"}
@@ -169,15 +173,60 @@ def _measurement_form_values(
     }
 
 
-def _parse_measurement_form(form: Mapping[str, str], tz_name: str) -> dict:
+def _slot_times(reminders: Mapping[str, Reminder]) -> list[tuple[str, str]]:
+    """Время слотов «Утро» / «Обед» / «Вечер» для предотметки лекарств (§16.2).
+
+    Время включённого напоминания слота; напоминание выключено или его нет —
+    умолчание `DEFAULT_SLOT_TIMES`. Пары в порядке `SLOT_ORDER` (он же —
+    порядок выбора при равном расстоянии).
+    """
+    result: list[tuple[str, str]] = []
+    for slot in SLOT_ORDER:
+        reminder = reminders.get(slot)
+        if reminder is not None and reminder.enabled and reminder.local_time:
+            result.append((slot, reminder.local_time))
+        else:
+            result.append((slot, DEFAULT_SLOT_TIMES[slot]))
+    return result
+
+
+def _day_minutes(hhmm: str) -> int:
+    """«ЧЧ:ММ» → минуты от начала суток."""
+    parsed = schemas.validate_time(hhmm)
+    return parsed.hour * 60 + parsed.minute
+
+
+def prefill_slot(hhmm: str, slot_times: list[tuple[str, str]]) -> Optional[str]:
+    """Слот предотметки лекарств для времени измерения (§16.2).
+
+    Среди слотов, чьё время в пределах ±2 ч от `hhmm`, — ближайший; ни
+    одного — None. Расстояние считается по кругу суток (00:30 и 23:30 — час),
+    при равенстве побеждает ранний слот. «Кризис» не предотмечается никогда:
+    его нет в `slot_times`. Та же логика — в inline-скрипте формы.
+    """
+    moment = _day_minutes(hhmm)
+    best: Optional[tuple[int, str]] = None
+    for slot, local_time in slot_times:
+        gap = abs(moment - _day_minutes(local_time))
+        gap = min(gap, 24 * 60 - gap)
+        if gap <= PREFILL_WINDOW_MINUTES and (best is None or gap < best[0]):
+            best = (gap, slot)
+    return best[1] if best is not None else None
+
+
+def _parse_measurement_form(form: FormData, tz_name: str) -> dict:
     """Разобрать и проверить форму записи измерения (§9, §16.2).
 
     Чекбокс «Принял лекарство»: отмечен — True, снят — None («не отмечал»);
-    «Другое» самочувствия — короткий текст в заметку.
+    «Другое» самочувствия — короткий текст в заметку. Выбор лекарств
+    (`medication_ids`) учитывается только при отмеченной галочке; без неё —
+    пустой набор.
 
     Исключения:
         ValueError: поле не прошло валидацию. Текст — для отладки: форма
             редиректится с `?error=measurement`, сообщение на экран не идёт.
+        MedicationNotFoundError: id лекарства — не число («Лекарство не
+            найдено»; чужие и удалённые id отсекает `resolve_medications`).
     """
     try:
         day = date.fromisoformat(str(form.get("date", "")).strip())
@@ -192,6 +241,13 @@ def _parse_measurement_form(form: Mapping[str, str], tz_name: str) -> dict:
     except (ValidationError, ValueError, TypeError) as exc:
         raise ValueError("проверьте дату, время и значения") from exc
     medication_taken = True if form.get("medication_taken") else None
+    medication_ids: set[int] = set()
+    if medication_taken:
+        for raw in form.getlist("medication_ids"):
+            raw_id = str(raw).strip()
+            if not raw_id.isdigit():
+                raise MedicationNotFoundError(raw_id)
+            medication_ids.add(int(raw_id))
     feeling = str(form.get("feeling", "")).strip()
     if feeling not in ("", "normal", "headache", "weakness", "other"):
         raise ValueError("самочувствие не распознано")
@@ -209,6 +265,7 @@ def _parse_measurement_form(form: Mapping[str, str], tz_name: str) -> dict:
         "diastolic": values.diastolic,
         "pulse": values.pulse,
         "medication_taken": medication_taken,
+        "medication_ids": medication_ids,
         "feeling": feeling or None,
         "note": note,
     }
@@ -695,6 +752,20 @@ def create_app(
         context["form_values"] = _measurement_form_values(
             context.get("edit_measurement"), tz, now_local
         )
+        # Выбор лекарств в форме записи (§16.2): правка — текущие связи,
+        # добавление — предотметка ближайшего слота по времени формы.
+        context["slot_times"] = _slot_times(context["reminders"])
+        context["prefill_window"] = PREFILL_WINDOW_MINUTES
+        context["form_medication_ids"] = set()
+        if context["show_add_form"]:
+            edit_measurement = context.get("edit_measurement")
+            if edit_measurement is not None:
+                context["form_medication_ids"] = await medications_service.measurement_intake_ids(
+                    db, user, edit_measurement.id
+                )
+            else:
+                slot = prefill_slot(context["form_values"]["time"], context["slot_times"])
+                context["form_medication_ids"] = {m.id for m in medications if m.slot == slot}
         response = _templates.TemplateResponse(request, "dashboard.html", context)
         response.set_cookie(
             CSRF_COOKIE,
@@ -731,7 +802,7 @@ def create_app(
         """
         user = await load_user(db, web_user)
         extra: dict = {}
-        if add or error in ("measurement", "duplicate"):
+        if add or error in ("measurement", "duplicate", "medication_missing"):
             extra["show_add_form"] = True
         if edit.isdigit():
             measurement = await get_measurement(db, user, int(edit))
@@ -874,30 +945,43 @@ def create_app(
         """Добавить запись измерения из ЛК (§16.2): момент — любой прошедший.
 
         Дубль за ту же минуту отсекается сервисом; сохранение идемпотентно
-        при двойной отправке формы (§7.2 п.4).
+        при двойной отправке формы (§7.2 п.4). Выбранные лекарства — связи и
+        журнал на момент записи, в той же транзакции; лок приёмов берётся до
+        первой записи в БД и держится до коммита (§7.2).
         """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
         try:
             values = _parse_measurement_form(form, user.timezone)
+            medications = await medications_service.resolve_medications(
+                db, user, values["medication_ids"]
+            )
+        except MedicationNotFoundError:
+            return RedirectResponse(url="/?error=medication_missing#history", status_code=303)
         except ValueError:
             return RedirectResponse(url="/?error=measurement#history", status_code=303)
-        try:
-            measurement = await save_measurement(
-                db,
-                user,
-                values["systolic"],
-                values["diastolic"],
-                values["pulse"],
-                timestamp=values["moment"],
-            )
-        except DuplicateMeasurementError:
-            return RedirectResponse(url="/?error=duplicate#history", status_code=303)
-        measurement.medication_taken = values["medication_taken"]
-        measurement.feeling = values["feeling"]
-        measurement.note = values["note"]
-        await db.commit()
+        async with medications_service.intake_lock():
+            try:
+                measurement = await save_measurement(
+                    db,
+                    user,
+                    values["systolic"],
+                    values["diastolic"],
+                    values["pulse"],
+                    timestamp=values["moment"],
+                )
+            except DuplicateMeasurementError:
+                await db.rollback()
+                return RedirectResponse(url="/?error=duplicate#history", status_code=303)
+            measurement.medication_taken = values["medication_taken"]
+            measurement.feeling = values["feeling"]
+            measurement.note = values["note"]
+            if medications:
+                await medications_service.sync_medication_logs(
+                    db, user, measurement.id, measurement.timestamp, medications
+                )
+            await db.commit()
         return RedirectResponse(url="/?saved=measurement#history", status_code=303)
 
     @app.post("/measurements/{measurement_id}")
@@ -910,40 +994,63 @@ def create_app(
         """Правка записи: меняет и момент, с проверкой дубля за минуту (§16.2).
 
         Ошибка валидации или дубль — назад на форму правки этой же записи
-        (`?edit={id}`), а не на форму добавления.
+        (`?edit={id}`), а не на форму добавления. Лекарства (§16.2): журнал
+        записи переносится на новый момент, затем связи и журнал приводятся к
+        выбору формы (снятая галочка «Принял лекарство» снимает всё) — одной
+        транзакцией под локом приёмов, взятым до первой записи (§7.2).
         """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
         try:
             values = _parse_measurement_form(form, user.timezone)
+            medications = await medications_service.resolve_medications(
+                db, user, values["medication_ids"]
+            )
+        except MedicationNotFoundError:
+            return RedirectResponse(
+                url=f"/?edit={measurement_id}&error=medication_missing#history", status_code=303
+            )
         except ValueError:
             return RedirectResponse(
                 url=f"/?edit={measurement_id}&error=measurement#history", status_code=303
             )
-        try:
-            measurement = await update_measurement_values(
-                db,
-                user,
-                measurement_id,
-                values["systolic"],
-                values["diastolic"],
-                values["pulse"],
-                timestamp=values["moment"],
+        async with medications_service.intake_lock():
+            current = await get_measurement(db, user, measurement_id)
+            if current is None:
+                return RedirectResponse(url="/?error=measurement#history", status_code=303)
+            old_moment = current.timestamp
+            try:
+                measurement = await update_measurement_values(
+                    db,
+                    user,
+                    measurement_id,
+                    values["systolic"],
+                    values["diastolic"],
+                    values["pulse"],
+                    timestamp=values["moment"],
+                )
+            except DuplicateMeasurementError:
+                await db.rollback()
+                return RedirectResponse(
+                    url=f"/?edit={measurement_id}&error=duplicate#history", status_code=303
+                )
+            if measurement is None:  # pragma: no cover — удалена между чтением и UPDATE под локом
+                await db.rollback()
+                return RedirectResponse(url="/?error=measurement#history", status_code=303)
+            # Чекбокс двузначен, флаг — трёхзначен: снятый чекбокс не затирает
+            # ответ «нет» из бота (False), а только снимает «да».
+            if not (values["medication_taken"] is None and measurement.medication_taken is False):
+                measurement.medication_taken = values["medication_taken"]
+            measurement.feeling = values["feeling"]
+            measurement.note = values["note"]
+            await medications_service.update_medication_log_timestamps(
+                db, user, measurement_id, old_moment, measurement.timestamp
             )
-        except DuplicateMeasurementError:
-            return RedirectResponse(
-                url=f"/?edit={measurement_id}&error=duplicate#history", status_code=303
+            await medications_service.sync_medication_logs(
+                db, user, measurement_id, measurement.timestamp, medications
             )
-        if measurement is None:
-            return RedirectResponse(url="/?error=measurement#history", status_code=303)
-        # Чекбокс двузначен, флаг — трёхзначен: снятый чекбокс не затирает
-        # ответ «нет» из бота (False), а только снимает «да».
-        if not (values["medication_taken"] is None and measurement.medication_taken is False):
-            measurement.medication_taken = values["medication_taken"]
-        measurement.feeling = values["feeling"]
-        measurement.note = values["note"]
-        await db.commit()
+            await db.commit()
         return RedirectResponse(url="/?saved=measurement#history", status_code=303)
 
     @app.post("/measurements/{measurement_id}/delete")
@@ -956,13 +1063,21 @@ def create_app(
         """Удалить запись — только после подтверждения на форме (§16.2).
 
         Повторная отправка идемпотентна: уже удалённая (или чужая) запись
-        выглядит как отсутствующая, редирект тот же.
+        выглядит как отсутствующая, редирект тот же. Сначала удаляется журнал
+        записи (по паре `medication_id + timestamp` её связей), затем запись —
+        связи уходят каскадом (§16.2); под локом приёмов до коммита (§7.2).
         """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
-        await delete_measurement(db, user, measurement_id)
-        await db.commit()
+        async with medications_service.intake_lock():
+            measurement = await get_measurement(db, user, measurement_id)
+            if measurement is not None:
+                await medications_service.delete_medication_logs_for_measurement(
+                    db, user, measurement.id, measurement.timestamp
+                )
+                await delete_measurement(db, user, measurement_id)
+            await db.commit()
         return RedirectResponse(url="/?saved=measurement#history", status_code=303)
 
     # ───────────────────── Импорт CSV ─────────────────────

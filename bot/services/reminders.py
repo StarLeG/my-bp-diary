@@ -42,6 +42,10 @@ from bot.services import medications as medications_service
 
 logger = logging.getLogger(__name__)
 
+#: Время слотов по умолчанию: «Пропустить» онбординга (§6.1) и предотметка
+#: лекарств в форме записи кабинета, если напоминание слота выключено (§16.2).
+DEFAULT_SLOT_TIMES = {"morning": "08:00", "noon": "13:00", "evening": "21:00"}
+
 #: Тип строки `reminders` для одноразового повтора замера (CHECK в БД).
 TYPE_REMEASURE = "med_remeasure"
 

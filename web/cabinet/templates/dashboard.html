@@ -43,6 +43,8 @@
       <p class="alert alert-error">Не удалось сохранить измерение: проверьте дату, время и значения.</p>
     {% elif error == "duplicate" %}
       <p class="alert alert-error">Это давление уже записано.</p>
+    {% elif error == "medication_missing" %}
+      <p class="alert alert-error">Лекарство не найдено.</p>
     {% elif saved == "profile" %}
       <p class="alert alert-ok">Профиль сохранён.</p>
     {% elif saved == "medication" %}
@@ -196,7 +198,7 @@
         <h3>{% if edit_measurement %}Изменить запись{% else %}Добавить запись{% endif %}</h3>
         <form method="post"
               action="{% if edit_measurement %}/measurements/{{ edit_measurement.id }}{% else %}/measurements{% endif %}"
-              class="stack form-narrow">
+              class="stack form-narrow" id="measurement-form">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="row">
             <label>
@@ -227,6 +229,37 @@
                    {% if form_values.medication_taken %}checked{% endif %}>
             Принял лекарство
           </label>
+          {# Выбор лекарств (§16.2): виден при отмеченной галочке (CSS :has),
+             без галочки сервер выбор не учитывает. #}
+          <div class="med-picker"
+               {% if not edit_measurement %}data-prefill="{{ slot_times | tojson | forceescape }}"
+               data-prefill-window="{{ prefill_window }}"{% endif %}>
+            {% if medications %}
+              <div class="med-groups">
+                {% for slot in med_slot_order %}
+                  {% set group = medications | selectattr("slot", "equalto", slot) | list %}
+                  {% if group %}
+                    <fieldset class="med-pick-group">
+                      <legend class="med-group-title">{{ slot_labels[slot] }}</legend>
+                      {% for med in group %}
+                        <label class="check">
+                          <input type="checkbox" name="medication_ids" value="{{ med.id }}"
+                                 data-slot="{{ slot }}"
+                                 {% if med.id in form_medication_ids %}checked{% endif %}>
+                          {{ med.name }}{{ " (" + med.dosage + ")" if med.dosage else "" }}
+                        </label>
+                      {% endfor %}
+                    </fieldset>
+                  {% endif %}
+                {% endfor %}
+              </div>
+            {% else %}
+              <p class="muted">
+                У вас пока нет добавленных лекарств.
+                <a href="#medications">Перейти в Управление лекарствами</a>
+              </p>
+            {% endif %}
+          </div>
           <label>
             Самочувствие
             <select name="feeling">
@@ -251,6 +284,52 @@
             <a class="btn btn-ghost" href="/#history">Отмена</a>
           </div>
         </form>
+        {% if not edit_measurement %}
+          <script>
+            /* Предотметка лекарств при смене времени (§16.2): ближайший слот
+               в пределах окна (по кругу суток, при равенстве — ранний), пока
+               пользователь сам не менял галочки лекарств. Та же логика —
+               prefill_slot в app.py; без JS — только предотметка сервера. */
+            (function () {
+              var form = document.getElementById("measurement-form");
+              var picker = form && form.querySelector(".med-picker[data-prefill]");
+              var timeInput = form && form.querySelector('input[name="time"]');
+              if (!picker || !timeInput) { return; }
+              var slotTimes = JSON.parse(picker.getAttribute("data-prefill"));
+              var windowMinutes = parseInt(picker.getAttribute("data-prefill-window"), 10);
+              var boxes = picker.querySelectorAll('input[name="medication_ids"]');
+              var touched = false;
+              function minutes(hhmm) {
+                var parts = hhmm.split(":");
+                return parseInt(parts[0], 10) * 60 + parseInt(parts[1], 10);
+              }
+              function nearestSlot(hhmm) {
+                var moment = minutes(hhmm), best = null, bestGap = 0;
+                slotTimes.forEach(function (pair) {
+                  var gap = Math.abs(moment - minutes(pair[1]));
+                  gap = Math.min(gap, 24 * 60 - gap);
+                  if (gap <= windowMinutes && (best === null || gap < bestGap)) {
+                    best = pair[0];
+                    bestGap = gap;
+                  }
+                });
+                return best;
+              }
+              function refresh() {
+                if (touched || !/^\d{1,2}:\d{2}/.test(timeInput.value)) { return; }
+                var slot = nearestSlot(timeInput.value);
+                boxes.forEach(function (box) {
+                  box.checked = slot !== null && box.getAttribute("data-slot") === slot;
+                });
+              }
+              boxes.forEach(function (box) {
+                box.addEventListener("change", function () { touched = true; });
+              });
+              timeInput.addEventListener("input", refresh);
+              timeInput.addEventListener("change", refresh);
+            })();
+          </script>
+        {% endif %}
       {% endif %}
 
       {% if show_import_form %}

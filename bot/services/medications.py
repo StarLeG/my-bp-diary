@@ -19,6 +19,10 @@
   измерения (`link_measurement_intake` → `measurement_medications`, §4.11) —
   перечень для «Истории записей» кабинета (§16.2); связь идемпотентна
   (UNIQUE пары «запись–приём»);
+- форма записи кабинета (§16.2) пишет связи и журнал с моментом самой записи
+  (`sync_medication_logs`), переносит журнал при смене момента
+  (`update_medication_log_timestamps`) и удаляет его вместе с записью
+  (`delete_medication_logs_for_measurement`) — по паре `medication_id + timestamp`;
 - детальный трекинг — только здесь: «Приняли лекарство?» → «Да» без выбора
   лекарств в `medication_logs` ничего не пишет (только флаг
   `measurements.medication_taken`, §6.3).
@@ -31,8 +35,9 @@ from datetime import date, datetime, timezone
 from typing import Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, func, insert, literal, select
+from sqlalchemy import delete, exists, func, insert, literal, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
 
 from bot import texts
 from bot.models import Measurement, Medication, MedicationLog, MeasurementMedication, User
@@ -640,6 +645,184 @@ async def intake_labels_by_measurement(
     for measurement_id, name, dosage in rows.all():
         result.setdefault(measurement_id, []).append(texts.fmt_med_item(name, dosage))
     return result
+
+
+# ─────────────── Выбор лекарств в форме записи кабинета (§16.2) ───────────────
+#
+# Журнал записи из кабинета — строки `medication_logs` с моментом самой записи
+# (`measurements.timestamp`) и id связанных с ней лекарств: по паре
+# `medication_id + timestamp` кабинет снимает, переносит и удаляет именно их,
+# не трогая журналы бота и напоминаний (с моментом отметки, §4.11).
+
+
+class MedicationNotFoundError(Exception):
+    """В форме кабинета — чужой или несуществующий id лекарства (§16.2, §7.1)."""
+
+
+def intake_lock() -> asyncio.Lock:
+    """Лок отметок приёма для операций кабинета с журналом (§16.2, §7.2).
+
+    Вызывающий берёт его **до первой записи в БД** и коммитит внутри: так
+    запрос не ждёт лок, держа незакоммиченную запись SQLite, а следующая
+    операция с той же записью читает её связи уже после коммита предыдущей.
+    Функции ниже лок не берут и вызываются только под ним.
+    """
+    return _current_intake_lock()
+
+
+async def resolve_medications(
+    session: AsyncSession, user: User, medication_ids: Iterable[int]
+) -> list[Medication]:
+    """Свои лекарства по id из формы (в порядке `list_medications`).
+
+    Исключения:
+        MedicationNotFoundError: хотя бы один id чужой или не существует.
+    """
+    wanted = set(medication_ids)
+    if not wanted:
+        return []
+    medications = await _user_medications(session, user, wanted)
+    if len(medications) != len(wanted):
+        raise MedicationNotFoundError(sorted(wanted - {m.id for m in medications}))
+    return medications
+
+
+async def measurement_intake_ids(
+    session: AsyncSession, user: User, measurement_id: int
+) -> set[int]:
+    """Id лекарств, связанных с записью (`measurement_medications`, §4.11).
+
+    Чужие связи отсекаются по владельцу лекарства (§7.1).
+    """
+    rows = await session.execute(
+        select(MeasurementMedication.medication_id)
+        .join(Medication, Medication.id == MeasurementMedication.medication_id)
+        .where(
+            MeasurementMedication.measurement_id == measurement_id,
+            Medication.user_id == user.id,
+        )
+    )
+    return set(rows.scalars())
+
+
+async def sync_medication_logs(
+    session: AsyncSession,
+    user: User,
+    measurement_id: int,
+    moment: datetime,
+    medications: list[Medication],
+) -> None:
+    """Привести связи записи и её журнал к выбору формы (§16.2). Только под `intake_lock`.
+
+    Снятые лекарства — удаляются связь и журнал записи (строка этого
+    лекарства с моментом `moment`). Добавленные — связь и журнал
+    (`status='taken'`, слот — из строки лекарства) на `moment`; если приём за
+    эти локальные сутки уже отмечен, строки журнала нет (§7.2), связь есть.
+    Пустой `medications` снимает всё. `medications` — уже проверенные
+    `resolve_medications`.
+    """
+    moment = _as_utc(moment)
+    wanted = {medication.id for medication in medications}
+    current = await measurement_intake_ids(session, user, measurement_id)
+    removed = current - wanted
+    if removed:
+        await session.execute(
+            delete(MeasurementMedication).where(
+                MeasurementMedication.measurement_id == measurement_id,
+                MeasurementMedication.medication_id.in_(removed),
+            )
+        )
+        await session.execute(
+            delete(MedicationLog)
+            .where(
+                MedicationLog.user_id == user.id,
+                MedicationLog.medication_id.in_(removed),
+                MedicationLog.timestamp == moment,
+            )
+            .execution_options(synchronize_session=False)
+        )
+    added = [medication for medication in medications if medication.id not in current]
+    if added:
+        await _insert_manual_logs(session, user, added, moment)
+        await _insert_measurement_links(session, measurement_id, [m.id for m in added])
+    await session.flush()
+
+
+async def update_medication_log_timestamps(
+    session: AsyncSession,
+    user: User,
+    measurement_id: int,
+    old_moment: datetime,
+    new_moment: datetime,
+) -> None:
+    """Перенести журнал записи на её новый момент (§16.2). Только под `intake_lock`.
+
+    Для каждого связанного лекарства строка журнала с моментом `old_moment`
+    получает `new_moment`. Если в новых локальных сутках этот приём уже
+    отмечен другой строкой — перенесённая удаляется (дедуп §7.2): в одних
+    сутках не бывает двух отметок одного приёма. Журналы с другим моментом
+    (бот, напоминания) не трогаются.
+    """
+    old, new = _as_utc(old_moment), _as_utc(new_moment)
+    if old == new:
+        return
+    linked = await measurement_intake_ids(session, user, measurement_id)
+    if not linked:
+        return
+    day_start, day_end = day_bounds_utc(
+        user.timezone, new.astimezone(ZoneInfo(user.timezone)).date()
+    )
+    other = aliased(MedicationLog)
+    for med_id in sorted(linked):
+        own_row = (
+            MedicationLog.user_id == user.id,
+            MedicationLog.medication_id == med_id,
+            MedicationLog.timestamp == old,
+        )
+        logged_that_day = exists(
+            select(literal(1)).where(
+                other.user_id == user.id,
+                other.medication_id == med_id,
+                other.timestamp >= day_start,
+                other.timestamp < day_end,
+                other.timestamp != old,
+            )
+        )
+        await session.execute(
+            delete(MedicationLog)
+            .where(*own_row, logged_that_day)
+            .execution_options(synchronize_session=False)
+        )
+        await session.execute(
+            update(MedicationLog)
+            .where(*own_row)
+            .values(timestamp=new)
+            .execution_options(synchronize_session=False)
+        )
+    await session.flush()
+
+
+async def delete_medication_logs_for_measurement(
+    session: AsyncSession, user: User, measurement_id: int, moment: datetime
+) -> None:
+    """Удалить журнал записи перед её удалением (§16.2). Только под `intake_lock`.
+
+    Строки журнала связанных лекарств с моментом записи; связи удалит каскад
+    вместе с записью.
+    """
+    linked = await measurement_intake_ids(session, user, measurement_id)
+    if not linked:
+        return
+    await session.execute(
+        delete(MedicationLog)
+        .where(
+            MedicationLog.user_id == user.id,
+            MedicationLog.medication_id.in_(linked),
+            MedicationLog.timestamp == _as_utc(moment),
+        )
+        .execution_options(synchronize_session=False)
+    )
+    await session.flush()
 
 
 async def planned_intakes(

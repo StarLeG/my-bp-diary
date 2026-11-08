@@ -1026,3 +1026,255 @@ class TestIntakeLabelsByMeasurement:
             session, user, [foreign_measurement_id]
         )
         assert labels == {}
+
+
+# ─────────────── Выбор лекарств в форме записи кабинета (§16.2) ───────────────
+
+
+async def _logs(session: AsyncSession) -> list[tuple[int, datetime, str]]:
+    """(medication_id, timestamp, status) всех строк журнала по порядку."""
+    rows = (
+        await session.execute(
+            select(MedicationLog.medication_id, MedicationLog.timestamp, MedicationLog.status)
+            .order_by(MedicationLog.timestamp, MedicationLog.medication_id)
+        )
+    ).all()
+    return [(row[0], row[1], row[2]) for row in rows]
+
+
+async def _cabinet_record(
+    session: AsyncSession, user: User, moment: datetime, meds: list[Medication]
+) -> int:
+    """Запись с выбором лекарств, как её сохраняет форма кабинета."""
+    row = Measurement(user_id=user.id, timestamp=moment, systolic=135, diastolic=85)
+    session.add(row)
+    await session.flush()
+    await service.sync_medication_logs(session, user, row.id, moment, meds)
+    return row.id
+
+
+class TestResolveMedications:
+    """Проверка id лекарств из формы кабинета на владельца (§16.2, §7.1)."""
+
+    async def test_empty_selection(self, session: AsyncSession, user: User) -> None:
+        assert await service.resolve_medications(session, user, []) == []
+
+    async def test_own_medications(self, session: AsyncSession, user: User) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        resolved = await service.resolve_medications(session, user, [m.id for m in meds])
+        assert sorted(m.id for m in resolved) == sorted(m.id for m in meds)
+
+    async def test_foreign_medication_rejected(self, session: AsyncSession, user: User) -> None:
+        other = User(telegram_id=222_222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.flush()
+        mine = await _add_med(session, user)
+        foreign = await _add_med(session, other, "Амлодипин")
+        with pytest.raises(service.MedicationNotFoundError):
+            await service.resolve_medications(session, user, [mine[0].id, foreign[0].id])
+
+    async def test_missing_medication_rejected(self, session: AsyncSession, user: User) -> None:
+        with pytest.raises(service.MedicationNotFoundError):
+            await service.resolve_medications(session, user, [987_654])
+
+
+class TestMeasurementIntakeIds:
+    async def test_links_of_record(self, session: AsyncSession, user: User) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "noon")
+        )
+        measurement_id = await _cabinet_record(session, user, aware(2026, 11, 4, 5), meds)
+        assert await service.measurement_intake_ids(session, user, measurement_id) == {
+            m.id for m in meds
+        }
+
+    async def test_foreign_links_hidden(self, session: AsyncSession, user: User) -> None:
+        """Связь с чужим лекарством не видна (отсекается по владельцу, §7.1)."""
+        other = User(telegram_id=222_222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.flush()
+        foreign = await _add_med(session, other, "Амлодипин")
+        measurement_id = await _add_measurement(session, user)
+        session.add(
+            MeasurementMedication(measurement_id=measurement_id, medication_id=foreign[0].id)
+        )
+        await session.flush()
+        assert await service.measurement_intake_ids(session, user, measurement_id) == set()
+
+
+class TestSyncMedicationLogs:
+    """Связи и журнал записи из кабинета — по паре medication_id + timestamp (§16.2)."""
+
+    async def test_links_and_log_at_record_moment(self, session: AsyncSession, user: User) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "crisis")
+        )
+        moment = aware(2026, 3, 12, 5, 30)  # архивная дата: журнал пишется (M1 Б)
+        measurement_id = await _cabinet_record(session, user, moment, meds)
+        await session.commit()
+        assert sorted(await _logs(session)) == sorted((m.id, moment, "taken") for m in meds)
+        assert await service.measurement_intake_ids(session, user, measurement_id) == {
+            m.id for m in meds
+        }
+
+    async def test_already_logged_day_links_without_log(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Приём за эти сутки уже отмечен (бот): связь есть, второй строки журнала нет (§7.2)."""
+        meds = await _add_med(session, user)
+        bot_moment = aware(2026, 11, 4, 5, 10)
+        await service.log_manual_intake(session, user, [meds[0].id], timestamp=bot_moment)
+        measurement_id = await _cabinet_record(session, user, aware(2026, 11, 4, 6), meds)
+        await session.commit()
+        assert await _logs(session) == [(meds[0].id, bot_moment, "taken")]
+        assert await service.measurement_intake_ids(session, user, measurement_id) == {
+            meds[0].id
+        }
+
+    async def test_unchecked_removes_link_and_own_log_only(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Снятая галочка: связь и журнал записи уходят, журнал бота за другой момент — нет."""
+        losartan = await _add_med(session, user)
+        amlodipine = await _add_med(session, user, "Амлодипин")
+        moment = aware(2026, 11, 4, 5)
+        measurement_id = await _cabinet_record(session, user, moment, losartan + amlodipine)
+        bot_moment = aware(2026, 11, 5, 5, 10)
+        await service.log_manual_intake(session, user, [amlodipine[0].id], timestamp=bot_moment)
+        await service.sync_medication_logs(session, user, measurement_id, moment, losartan)
+        await session.commit()
+        assert sorted(await _logs(session)) == sorted(
+            [(losartan[0].id, moment, "taken"), (amlodipine[0].id, bot_moment, "taken")]
+        )
+        assert await service.measurement_intake_ids(session, user, measurement_id) == {
+            losartan[0].id
+        }
+
+    async def test_empty_selection_removes_everything(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        meds = await _add_med(session, user)
+        moment = aware(2026, 11, 4, 5)
+        measurement_id = await _cabinet_record(session, user, moment, meds)
+        await service.sync_medication_logs(session, user, measurement_id, moment, [])
+        await session.commit()
+        assert await _logs(session) == []
+        assert await service.measurement_intake_ids(session, user, measurement_id) == set()
+
+    async def test_repeat_is_idempotent(self, session: AsyncSession, user: User) -> None:
+        """Повторное сохранение того же выбора — ни связей, ни журнала сверху."""
+        meds = await _add_med(session, user)
+        moment = aware(2026, 11, 4, 5)
+        measurement_id = await _cabinet_record(session, user, moment, meds)
+        await service.sync_medication_logs(session, user, measurement_id, moment, meds)
+        await session.commit()
+        assert await _logs(session) == [(meds[0].id, moment, "taken")]
+        links = (await session.execute(select(MeasurementMedication))).scalars().all()
+        assert len(links) == 1
+
+
+class TestUpdateMedicationLogTimestamps:
+    """Перенос журнала записи при смене её момента (§16.2, N4)."""
+
+    async def test_log_follows_new_moment(self, session: AsyncSession, user: User) -> None:
+        meds = await _add_med(session, user)
+        old, new = aware(2026, 11, 4, 5), aware(2026, 11, 2, 6, 15)
+        measurement_id = await _cabinet_record(session, user, old, meds)
+        await service.update_medication_log_timestamps(session, user, measurement_id, old, new)
+        await session.commit()
+        assert await _logs(session) == [(meds[0].id, new, "taken")]
+
+    async def test_same_moment_is_noop(self, session: AsyncSession, user: User) -> None:
+        meds = await _add_med(session, user)
+        moment = aware(2026, 11, 4, 5)
+        measurement_id = await _cabinet_record(session, user, moment, meds)
+        await service.update_medication_log_timestamps(
+            session, user, measurement_id, moment, moment
+        )
+        assert await _logs(session) == [(meds[0].id, moment, "taken")]
+
+    async def test_record_without_links_is_noop(self, session: AsyncSession, user: User) -> None:
+        meds = await _add_med(session, user)
+        moment = aware(2026, 11, 4, 5)
+        await service.log_manual_intake(session, user, [meds[0].id], timestamp=moment)
+        measurement_id = await _add_measurement(session, user)
+        await service.update_medication_log_timestamps(
+            session, user, measurement_id, moment, aware(2026, 11, 1, 5)
+        )
+        assert await _logs(session) == [(meds[0].id, moment, "taken")], "чужой журнал не тронут"
+
+    async def test_move_within_same_day(self, session: AsyncSession, user: User) -> None:
+        """Перенос в пределах суток: своя строка не считается «уже отмеченным» приёмом."""
+        meds = await _add_med(session, user)
+        old, new = aware(2026, 11, 4, 5), aware(2026, 11, 4, 9)
+        measurement_id = await _cabinet_record(session, user, old, meds)
+        await service.update_medication_log_timestamps(session, user, measurement_id, old, new)
+        assert await _logs(session) == [(meds[0].id, new, "taken")]
+
+    async def test_moved_into_logged_day_is_dropped(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """В новых сутках приём уже отмечен — перенесённая строка удаляется (дедуп §7.2)."""
+        meds = await _add_med(session, user)
+        old, new = aware(2026, 11, 4, 5), aware(2026, 11, 2, 6)
+        measurement_id = await _cabinet_record(session, user, old, meds)
+        bot_moment = aware(2026, 11, 2, 5, 10)
+        await service.log_manual_intake(session, user, [meds[0].id], timestamp=bot_moment)
+        await service.update_medication_log_timestamps(session, user, measurement_id, old, new)
+        await session.commit()
+        assert await _logs(session) == [(meds[0].id, bot_moment, "taken")]
+        assert await service.measurement_intake_ids(session, user, measurement_id) == {
+            meds[0].id
+        }
+
+    async def test_bot_log_of_link_stays(self, session: AsyncSession, user: User) -> None:
+        """Связь создал бот (журнал — с моментом «Готово»): перенос его не трогает (N3 А)."""
+        meds = await _add_med(session, user)
+        measurement_id = await _add_measurement(session, user)  # 2026-11-04 08:05 UTC
+        done_moment = aware(2026, 11, 4, 8, 7)
+        await service.record_manual_intake(
+            session, user, measurement_id, [meds[0].id], timestamp=done_moment
+        )
+        await service.update_medication_log_timestamps(
+            session, user, measurement_id, aware(2026, 11, 4, 8, 5), aware(2026, 11, 3, 8)
+        )
+        assert await _logs(session) == [(meds[0].id, done_moment, "taken")]
+
+
+class TestDeleteMedicationLogsForMeasurement:
+    """Удаление записи из кабинета уносит её журнал (§16.2, N5)."""
+
+    async def test_removes_own_log_only(self, session: AsyncSession, user: User) -> None:
+        losartan = await _add_med(session, user)
+        amlodipine = await _add_med(session, user, "Амлодипин")
+        moment = aware(2026, 11, 4, 5)
+        measurement_id = await _cabinet_record(session, user, moment, losartan)
+        other_moment = aware(2026, 11, 5, 5)
+        await service.log_manual_intake(
+            session, user, [losartan[0].id, amlodipine[0].id], timestamp=other_moment
+        )
+        await service.delete_medication_logs_for_measurement(
+            session, user, measurement_id, moment
+        )
+        await session.commit()
+        assert sorted(await _logs(session)) == sorted(
+            [(losartan[0].id, other_moment, "taken"), (amlodipine[0].id, other_moment, "taken")]
+        )
+
+    async def test_record_without_links_is_noop(self, session: AsyncSession, user: User) -> None:
+        meds = await _add_med(session, user)
+        moment = aware(2026, 11, 4, 8, 5)
+        await service.log_manual_intake(session, user, [meds[0].id], timestamp=moment)
+        measurement_id = await _add_measurement(session, user)
+        await service.delete_medication_logs_for_measurement(
+            session, user, measurement_id, moment
+        )
+        assert await _logs(session) == [(meds[0].id, moment, "taken")]
+
+
+class TestIntakeLock:
+    async def test_is_the_intake_lock(self) -> None:
+        """Кабинет и бот делят один лок отметок приёма (§7.2)."""
+        assert service.intake_lock() is service._current_intake_lock()
