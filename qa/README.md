@@ -72,7 +72,7 @@ LOAD_TEST=1 uv run pytest qa/test_load_regression.py -v
 | `test_load_doctor.py` | 20 врачей: magic link, карточка, 5 выгрузок, 3 комментария — 200 запросов | готово |
 | `test_load_reminders.py` | 100 напоминаний на настоящем планировщике, двойной тик | готово |
 | `test_load_backup.py` | бэкап во время burst, `integrity_check`, event loop не стоит дольше 5 с | готово |
-| `test_load_concurrent.py` | гонки §7.2 в масштабе | план |
+| `test_load_concurrent.py` | гонки §7.2 в масштабе: 20 × 10 на гонку, повтор замера — на прод-планировщике | готово |
 | `test_load_admin.py` | статистика на полном объёме, поиск, рассылка | план |
 | `locustfile.py` | HTTP-кабинет пациента, 20 VU | есть, дорабатывается |
 | `test_load_screenshots.py` | 3 скриншота стенда | план |

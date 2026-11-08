@@ -29,7 +29,7 @@ import sqlite3
 import threading
 import time
 import urllib.request
-from typing import Callable, Iterator, Optional
+from typing import Awaitable, Callable, Iterator, Optional
 
 import pytest
 import pytest_asyncio
@@ -940,3 +940,86 @@ async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
     finally:
         scheduler.shutdown(wait=False)
         await app.engine.dispose()
+
+
+# ─────────────── Исполнитель конкурентных операций (burst и гонки) ───────────────
+
+
+class LockCounter(logging.Handler):
+    """Считает повторы `run_with_retry` при «database is locked» (логгер bot.db)."""
+
+    def __init__(self) -> None:
+        super().__init__(level=logging.WARNING)
+        self.retries = 0
+
+    def emit(self, record: logging.LogRecord) -> None:
+        if "заблокирован" in record.getMessage():
+            self.retries += 1
+
+
+@pytest.fixture
+def lock_counter() -> Iterator[LockCounter]:
+    handler = LockCounter()
+    logger = logging.getLogger("bot.db")
+    logger.addHandler(handler)
+    try:
+        yield handler
+    finally:
+        logger.removeHandler(handler)
+
+
+def percentile(values: list[float], share: float) -> float:
+    """Перцентиль по ближайшему рангу (p95 → share=0.95); пустой список → 0."""
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    rank = max(0, min(len(ordered) - 1, round(share * len(ordered) + 0.5) - 1))
+    return ordered[rank]
+
+
+async def run_burst(
+    name: str,
+    operations: list[tuple[int, Callable[[], Awaitable[object]]]],
+    load_log,
+    lock_counter: LockCounter,
+) -> tuple[list[object], dict]:
+    """Запустить операции одним `gather`, замерить и залогировать каждую.
+
+    `operations` — пары (user_id, фабрика корутины). Исключения не теряются:
+    `return_exceptions=True`, упавшие операции считаются в `failures`.
+    """
+    durations: list[float] = []
+
+    from bot.db import run_with_retry
+
+    async def timed(user_id: int, factory: Callable[[], Awaitable[object]]) -> object:
+        started = time.perf_counter()
+        try:
+            return await run_with_retry(factory)
+        finally:
+            elapsed_ms = (time.perf_counter() - started) * 1000
+            durations.append(elapsed_ms)
+            load_log.op(name, user_id=user_id, duration_ms=round(elapsed_ms, 2))
+
+    started = time.perf_counter()
+    results = await asyncio.gather(
+        *(timed(user_id, factory) for user_id, factory in operations), return_exceptions=True
+    )
+    elapsed = time.perf_counter() - started
+    failures = [repr(result) for result in results if isinstance(result, BaseException)]
+    stats = {
+        "operations": len(operations),
+        "failures": len(failures),
+        "failure_samples": failures[:5],
+        "locked_retries": lock_counter.retries,
+        "elapsed_s": round(elapsed, 3),
+        "p50_ms": round(percentile(durations, 0.50), 2),
+        "p95_ms": round(percentile(durations, 0.95), 2),
+    }
+    load_log.summary(
+        f"{name}: {len(operations)} операций за {elapsed:.2f} с, "
+        f"p95 {stats['p95_ms']} мс, ошибок {len(failures)}, повторов {lock_counter.retries}",
+        scenario=name,
+        **stats,
+    )
+    return results, stats
