@@ -107,7 +107,7 @@ Pydantic для валидации, python-dotenv для конфига. Код 
   `pyproject.toml` укажи `license = {text = "PolyForm-Noncommercial-1.0.0"}`. В `README.md`
   добавь раздел «Лицензия» с пояснением: бесплатно для некоммерческого использования, для
   коммерческого — свяжитесь с автором.
-- Лендинг: создай `web/landing/index.html` с использованием Tailwind CSS (CDN). Реализуй
+- Лендинг: создай `web/landing/index.html` с использованием Tailwind CSS (статический CSS). Реализуй
   Hero-секцию с кнопкой на https://t.me/my_bp_diary_bot?start=landing, блоки «Проблема/Решение»,
   «Как это работает», «Сигналы доверия» и FAQ. На первом экране размести 2–3 сигнала доверия.
   Стиль — чистый, медицинский, с мягкими синими и белыми тонами.
@@ -133,7 +133,10 @@ Pydantic для валидации, python-dotenv для конфига. Код 
 - Все транзакции к SQLite должны быть короткими. Не держи сессию открытой во время отправки сообщений в Telegram.
 
 ### 4. Веб-кабинет и лицензия
-- Лендинг должен быть сверстан на Tailwind CSS (через CDN).
+- Лендинг должен быть сверстан на Tailwind CSS. Tailwind собирается в статический CSS скриптом
+  `tools/landing/build_css.py` → `web/landing/css/tailwind.css` (в git); Play CDN
+  (`cdn.tailwindcss.com`) не используется. После правки классов в разметке — пересобрать CSS
+  (тест `tests/test_landing.py` падает, если класса нет в собранном CSS).
 - В секции `#support` на лендинге размести таблицу с реквизитами (ЮMoney, IBAN, СберБанк) и ФИО автора.
 - Лицензия проекта: `PolyForm-Noncommercial-1.0.0`. В `pyproject.toml` укажи именно её.
 
@@ -142,7 +145,7 @@ Pydantic для валидации, python-dotenv для конфига. Код 
   **кабинет** (`web/cabinet`, FastAPI + uvicorn, локально `http://127.0.0.1:8000`),
   **лендинг** (`web/landing`, статический HTML/Tailwind; в compose не входит — и на сервере,
   и локально отдаётся отдельным контейнером nginx:
-  `docker run -d --name bp-local-landing -p 127.0.0.1:8090:80 -v "<путь>/web/landing:/usr/share/nginx/html:ro" nginx:alpine` →
+  `docker run -d --name bp-local-landing -p 127.0.0.1:8090:80 -v "<путь>/web/landing:/usr/share/nginx/html:ro" -v "<путь>/deploy/landing-nginx.conf:/etc/nginx/conf.d/default.conf:ro" nginx:alpine` →
   `http://127.0.0.1:8090` (порт 8081 на машине разработчика занят — используйте 8090).
 - Локальный запуск на машине разработчика: `docker compose -f docker-compose.yml up -d --build`.
   **`-f` обязателен**: без него compose подхватывает `docker-compose.override.yml` с внешней

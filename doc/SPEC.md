@@ -249,7 +249,14 @@ my-bp-diary/
 ├── deploy.sh                 # скрипт развёртывания (Linux/macOS)
 ├── deploy.ps1                # скрипт развёртывания (Windows PowerShell)
 ├── deploy/
-│   └── Caddyfile             # HTTPS (Let's Encrypt) для кабинета и лендинга
+│   ├── Caddyfile             # HTTPS (Let's Encrypt) для кабинета и лендинга
+│   └── landing-nginx.conf    # nginx лендинга: кеш, gzip, 404 (§16.1, «SEO и скорость»)
+├── tools/
+│   └── landing/              # сборка статики лендинга (§16.1, «SEO и скорость»)
+│       ├── tailwind.config.js    # content: web/landing/*.html, script.js
+│       ├── tailwind.input.css    # @tailwind base/components/utilities + свои правила
+│       ├── build_css.py          # Tailwind CLI (standalone, версия и SHA-256 закреплены) → css/tailwind.css
+│       └── make_icons.py         # favicon.svg → favicon.ico, apple-touch-icon.png
 ├── doc/
 │   ├── TZ.md                 # исходное ТЗ
 │   └── SPEC.md               # этот файл
@@ -290,6 +297,13 @@ my-bp-diary/
 │   │   ├── privacy.html      # политика конфиденциальности (ссылка из футера)
 │   │   ├── style.css
 │   │   ├── script.js
+│   │   ├── robots.txt        # Allow: /, ссылка на sitemap.xml
+│   │   ├── sitemap.xml       # / и /privacy.html
+│   │   ├── favicon.svg       # иконка по логотипу (синий квадрат с сердцем)
+│   │   ├── favicon.ico       # 32×32, из favicon.svg
+│   │   ├── apple-touch-icon.png  # 180×180, из favicon.svg
+│   │   ├── css/tailwind.css  # собранный Tailwind (tools/landing/build_css.py), в git
+│   │   ├── img/og.png        # превью ссылки 1200×630 (qa/screenshots/make_og.py)
 │   │   └── img/screens/      # скриншоты секции «Как это выглядит» (WebP, §16.1)
 │   └── cabinet/              # личный кабинет (FastAPI, §16.2)
 │       ├── app.py            # FastAPI-приложение (роуты, шаблоны)
@@ -311,7 +325,7 @@ my-bp-diary/
 │   ├── conftest.py           # фикстуры E2E и нагрузки (шаблонная БД, мок-бот, часы)
 │   ├── test_telegram_e2e.py  # тесты бота через Telethon / aiogram
 │   ├── test_web_e2e.py       # тесты Web UI через Playwright
-│   ├── screenshots/          # съёмка скриншотов лендинга (§16.1): shot_landing.py, демо-данные, README
+│   ├── screenshots/          # съёмка скриншотов лендинга (§16.1): shot_landing.py, демо-данные, make_og.py (превью ссылки), README
 │   ├── seed/                 # сид тестового стенда (только БД с «test-stand» в имени)
 │   │   ├── __init__.py
 │   │   ├── seed_load_users.py        # 20 пациентов + web_users
@@ -645,7 +659,7 @@ SemVer (`MAJOR.MINOR.PATCH`): MAJOR — ломающие изменения, MIN
 
 ### 16.1 Лендинг (`web/landing/`)
 
-Статический сайт (HTML + CSS + минимальный JS): быстрее, безопаснее, не требует БД.
+Статический сайт (HTML + CSS + минимальный JS): быстрее, безопаснее, не требует БД. Вёрстка — Tailwind CSS, собранный заранее в статический `web/landing/css/tailwind.css` (без Play CDN в браузере).
 
 - **Hero-секция**: заголовок «Дневник давления, который не мешает жить»; подзаголовок с ключевой выгодой (быстрая запись давления, напоминания о лекарствах, сводка для врача); большая кнопка «Открыть в Telegram» — `https://t.me/my_bp_diary_bot?start=landing`.
 - **Вход в личный кабинет**: ссылка «Войти в личный кабинет» на `/login` веб-кабинета (вход e-mail + пароль) в трёх местах: шапка (компактная кнопка рядом с «Открыть в Telegram»), финальный CTA и раздел «Личный кабинет» руководства. Адаптивность шапки: <640px — компактные кнопки и только иконка логотипа; 640–1023px — название логотипа и кнопки, навигация скрыта; 1024–1279px — иконка логотипа, навигация и кнопки; ≥1280px — полный вид. Переполнения шапки и горизонтального скролла нет ни на одной ширине.
@@ -661,10 +675,42 @@ SemVer (`MAJOR.MINOR.PATCH`): MAJOR — ломающие изменения, MIN
 - **FAQ**: 3–4 вопроса (нужна ли регистрация, можно ли экспортировать данные, как удалить аккаунт).
 - **Документация** (якорь `#docs`): подробное руководство пользователя простым языком — начало работы, запись давления, напоминания, лекарства, дневник и статистика, личный кабинет, отчёт для врача, данные и настройки. Оформлено аккордеонами (`<details>`) с оглавлением; формулировки кнопок и меню — по текстам бота (`bot/texts.py`), без медицинских советов. Содержание руководства синхронизируется с фактическими функциями бота (правка и удаление лекарств, изменение записи и т.п.) и не описывает несуществующих возможностей.
 - **Футер**: ссылки на политику конфиденциальности, руководство (`#docs`) и контакт автора.
+- **SEO и скорость** (решения — `doc/LANDING-SEO-QUESTIONS.md`). Канонический адрес — `https://bp-diary.electroman.by/`.
+  - **`<head>`**:
+    - title «Дневник артериального давления в Telegram — Дневник гипертоника»;
+    - description «Бесплатный дневник давления в Telegram: запись давления и пульса кнопками, напоминания о лекарствах, графики и отчёт для врача в PDF. Без рекламы.»;
+    - `<link rel="canonical">`.
+  - **Open Graph и Twitter Card**:
+    - `og:title` «Дневник гипертоника — дневник давления в Telegram»;
+    - `og:description` «Записывайте давление и пульс за пару секунд, получайте напоминания о лекарствах и показывайте врачу сводку. Бесплатно, без рекламы.»;
+    - `og:image` — `img/og.png` (1200×630): коллаж из кадров бота и кабинета с названием и слоганом, собирается `qa/screenshots/make_og.py` из `img/screens/`;
+    - `og:url` — канонический адрес; `og:type` website; `og:locale` ru_RU; `og:site_name` «Дневник гипертоника»;
+    - `twitter:card` summary_large_image.
+  - **Структурированные данные (JSON-LD)**:
+    - `FAQPage` — вопросы и ответы дословно из видимого FAQ;
+    - `SoftwareApplication` — `applicationCategory` HealthApplication, `operatingSystem` «Telegram, Web», `offers.price` 0, ссылка на бота;
+    - `Person` — автор, контакты как в `#support`.
+  - **Подтверждение вебмастеров**: `<meta name="yandex-verification">` и `<meta name="google-site-verification">`. В репозитории — плейсхолдеры `YOUR_YANDEX_CODE` / `YOUR_GOOGLE_CODE`, реальные коды автор вставляет перед деплоем. Счётчиков аналитики (Яндекс.Метрика и т. п.) нет: это противоречило бы обещанию «не передаются третьим лицам».
+  - **Иконки**: `favicon.svg` (по логотипу шапки), `favicon.ico`, `apple-touch-icon.png`, `<meta name="theme-color" content="#2563eb">`.
+  - **Индексация**:
+    - `robots.txt` (`Allow: /`, `Sitemap:`) и `sitemap.xml` (`/`, `/privacy.html`, `lastmod`);
+    - кабинет закрыт от индексации: `GET /robots.txt` кабинета отдаёт `Disallow: /` (§16.2).
+  - **Скорость**:
+    - Tailwind — статический CSS, пересборка `tools/landing/build_css.py` после правки разметки. Тест проверяет, что все классы разметки есть в собранном CSS;
+    - шрифт Inter — Google Fonts с `preload`;
+    - кеширование — `deploy/landing-nginx.conf` (картинки, CSS, JS, иконки — `Cache-Control: public, max-age=2592000`; HTML, `robots.txt`, `sitemap.xml` — `no-cache`; gzip для текста). Подключается вторым томом контейнера лендинга. Те же правила — в блоке лендинга `deploy/Caddyfile`.
+  - **Тексты под поисковые запросы**: правки S6 — «артериальное давление», «пульс», «журнал измерений», «приложение», «таблица» — в Hero, «Как это работает» и FAQ, утверждены дословно.
+  - **Доступность**:
+    - подсказка под скриншотами — контраст не ниже 4,5:1;
+    - заголовок лайтбокса — не `<h3>`;
+    - `src` картинки лайтбокса задаётся только при открытии.
+  - **`privacy.html`**: description, canonical и ссылка «← На главную».
 
 ### 16.2 Личный кабинет (`web/cabinet/`)
 
 FastAPI + Jinja2 + uvicorn; зависимости: `fastapi`, `uvicorn`, `jinja2`, `argon2-cffi`, `itsdangerous` (сессии). Предназначен для просмотра и управления данными с компьютера.
+
+Кабинет закрыт от поисковиков: `GET /robots.txt` отдаёт `User-agent: *` / `Disallow: /` (без авторизации, `text/plain`).
 
 **Логика входа и регистрации:**
 
