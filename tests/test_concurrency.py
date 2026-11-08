@@ -620,6 +620,97 @@ class TestMedsIntakeIdempotency:
         assert await count(session_factory, Reminder) == 1
 
 
+class TestMedsDoneLockOrder:
+    """«Готово» мультивыбора не ждёт лок приёмов, держа запись SQLite (T1, §7.2).
+
+    Ошибка, найденная нагрузкой (`qa/test_load_bot.py`): `cb_med_done` писал
+    журнал под `_current_intake_lock`, отпускал лок, не закрыв транзакцию, и
+    ждал тот же лок второй раз для связей с записью. Пока лок у другой
+    операции, а та ждёт запись SQLite, — взаимоблокировка до `busy_timeout`
+    и `database is locked`.
+
+    Порядок здесь детерминирован очередью `asyncio.Lock`: тест держит лок,
+    хендлер встаёт в очередь первым, тест — вторым. Хендлер получает лок,
+    пишет и отпускает; следующим лок получает тест и держит его. Хендлеру,
+    которому лок нужен один раз, это не мешает завершиться; хендлер, который
+    ждёт лок повторно, застревает — тест падает по таймауту.
+    """
+
+    async def test_done_needs_intake_lock_once(
+        self, session_factory, user: DbUser, mocker
+    ) -> None:
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorage
+        from aiogram.types import Chat, Message
+
+        from bot.handlers import measure
+
+        async with session_factory() as session:
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ["morning"]
+            )
+            measurement = await measurements_service.save_measurement(session, user, 130, 85)
+            await session.commit()
+        mocker.patch.object(CallbackQuery, "answer", new_callable=mocker.AsyncMock)
+        mocker.patch.object(Message, "edit_text", new_callable=mocker.AsyncMock)
+        state = FSMContext(
+            storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=TG_ID, user_id=TG_ID)
+        )
+        await state.set_data(
+            {measure.M_ID: measurement.id, measure.M_MED_CHECKED: [meds[0].id]}
+        )
+        callback = CallbackQuery(
+            id="done",
+            from_user=User(id=TG_ID, is_bot=False, first_name="Тест"),
+            chat_instance="ci",
+            data="m:med:done",
+            message=Message(
+                message_id=1,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=TG_ID, type="private"),
+                text="…",
+            ),
+        )
+
+        lock = medications_service._current_intake_lock()
+        await lock.acquire()
+
+        async def done() -> None:
+            async with session_factory() as session:
+                await measure.cb_med_done(callback, state, session)
+
+        task = asyncio.create_task(done())
+        for _ in range(200):  # хендлер дошёл до лока (очередь непуста)
+            if lock._waiters:
+                break
+            await asyncio.sleep(0.01)
+        assert lock._waiters, "хендлер не дошёл до лока приёмов"
+        lock.release()
+        await lock.acquire()  # в очереди сразу за хендлером
+        try:
+            await asyncio.wait_for(asyncio.shield(task), timeout=3)
+        except TimeoutError:
+            pytest.fail(
+                "cb_med_done ждёт _current_intake_lock повторно, держа запись "
+                "SQLite: взаимоблокировка с конкурентной отметкой приёма (T1)"
+            )
+        finally:
+            lock.release()
+            await task
+
+        async with session_factory() as session:
+            logs = (
+                await session.execute(select(func.count()).select_from(MedicationLog))
+            ).scalar_one()
+            links = (
+                await session.execute(
+                    select(func.count()).select_from(MeasurementMedication)
+                )
+            ).scalar_one()
+        assert (logs, links) == (1, 1), "журнал и связь — в одной транзакции"
+
+
 class TestParallelStart:
     """Параллельный /start — ровно одна строка users."""
 

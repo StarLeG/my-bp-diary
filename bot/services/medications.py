@@ -418,6 +418,103 @@ async def logged_intake_ids_today(
     return set(rows)
 
 
+async def _user_medications(
+    session: AsyncSession, user: User, medication_ids: set[int]
+) -> list[Medication]:
+    """Свои строки лекарств из набора id (чужие и удалённые отбрасываются, §7.1)."""
+    return list(
+        (
+            await session.execute(
+                select(Medication)
+                .where(Medication.user_id == user.id, Medication.id.in_(medication_ids))
+                .order_by(Medication.name, Medication.slot)
+            )
+        ).scalars()
+    )
+
+
+async def _own_measurement(session: AsyncSession, user: User, measurement_id: int) -> bool:
+    """Запись измерения существует и принадлежит пользователю (§7.1)."""
+    owner = (
+        await session.execute(
+            select(Measurement.id).where(
+                Measurement.id == measurement_id, Measurement.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+    return owner is not None
+
+
+async def _insert_manual_logs(
+    session: AsyncSession, user: User, medications: list[Medication], moment: datetime
+) -> int:
+    """Вставить недостающие `medication_logs` (`taken`) за локальные сутки момента.
+
+    Вызывается **только под уже захваченным** `_current_intake_lock` и сам его
+    не берёт. Возвращает число новых строк.
+    """
+    local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
+    day_start, day_end = day_bounds_utc(user.timezone, local_day)
+    logged_today = await logged_intake_ids_today(session, user, timestamp=moment)
+    new_logs = 0
+    for medication in medications:
+        if medication.id in logged_today:
+            continue
+        duplicate = exists(
+            select(literal(1)).where(
+                MedicationLog.user_id == user.id,
+                MedicationLog.medication_id == medication.id,
+                MedicationLog.slot == medication.slot,
+                MedicationLog.timestamp >= day_start,
+                MedicationLog.timestamp < day_end,
+            )
+        )
+        stmt = insert(MedicationLog).from_select(
+            ["user_id", "medication_id", "timestamp", "status", "slot"],
+            select(
+                literal(user.id),
+                literal(medication.id),
+                literal(moment),
+                literal("taken"),
+                literal(medication.slot),
+            ).where(~duplicate),
+        )
+        inserted = await session.execute(stmt)
+        if inserted.rowcount:
+            new_logs += 1
+    return new_logs
+
+
+async def _insert_measurement_links(
+    session: AsyncSession, measurement_id: int, medication_ids: list[int]
+) -> None:
+    """Вставить недостающие связи `measurement_medications` записи с лекарствами.
+
+    Вызывается **только под уже захваченным** `_current_intake_lock` и сам его
+    не берёт.
+    """
+    for med_id in medication_ids:
+        duplicate = exists(
+            select(literal(1)).where(
+                MeasurementMedication.measurement_id == measurement_id,
+                MeasurementMedication.medication_id == med_id,
+            )
+        )
+        stmt = insert(MeasurementMedication).from_select(
+            ["measurement_id", "medication_id"],
+            select(literal(measurement_id), literal(med_id)).where(~duplicate),
+        )
+        await session.execute(stmt)
+
+
+def _manual_result(medications: list[Medication], new_logs: int) -> ManualIntakeResult:
+    """Итог ручной отметки: подписи всех отмеченных и «всё уже было отмечено»."""
+    return ManualIntakeResult(
+        taken=[texts.fmt_med_item(m.name, m.dosage) for m in medications],
+        already_logged=new_logs == 0,
+    )
+
+
 async def log_manual_intake(
     session: AsyncSession,
     user: User,
@@ -435,54 +532,20 @@ async def log_manual_intake(
 
     Возвращает подписи всех отмеченных (для «💊 Принято: …») и признак того,
     что всё уже было отмечено (`already_logged`).
+
+    ⚠ После вызова транзакция остаётся открытой с записью: в той же сессии
+    нельзя снова ждать `_current_intake_lock` (взаимоблокировка с конкурентной
+    отметкой). Журнал и связи с записью вместе — `record_manual_intake`.
     """
     wanted = set(medication_ids)
     if not wanted:
         return ManualIntakeResult()
     moment = _as_utc(timestamp)
-    medications = list(
-        (
-            await session.execute(
-                select(Medication)
-                .where(Medication.user_id == user.id, Medication.id.in_(wanted))
-                .order_by(Medication.name, Medication.slot)
-            )
-        ).scalars()
-    )
-    local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
-    day_start, day_end = day_bounds_utc(user.timezone, local_day)
-    result = ManualIntakeResult()
-    new_logs = 0
+    medications = await _user_medications(session, user, wanted)
     async with _current_intake_lock():
-        logged_today = await logged_intake_ids_today(session, user, timestamp=moment)
-        for medication in medications:
-            if medication.id not in logged_today:
-                duplicate = exists(
-                    select(literal(1)).where(
-                        MedicationLog.user_id == user.id,
-                        MedicationLog.medication_id == medication.id,
-                        MedicationLog.slot == medication.slot,
-                        MedicationLog.timestamp >= day_start,
-                        MedicationLog.timestamp < day_end,
-                    )
-                )
-                stmt = insert(MedicationLog).from_select(
-                    ["user_id", "medication_id", "timestamp", "status", "slot"],
-                    select(
-                        literal(user.id),
-                        literal(medication.id),
-                        literal(moment),
-                        literal("taken"),
-                        literal(medication.slot),
-                    ).where(~duplicate),
-                )
-                inserted = await session.execute(stmt)
-                if inserted.rowcount:
-                    new_logs += 1
-            result.taken.append(texts.fmt_med_item(medication.name, medication.dosage))
+        new_logs = await _insert_manual_logs(session, user, medications, moment)
         await session.flush()
-    result.already_logged = new_logs == 0
-    return result
+    return _manual_result(medications, new_logs)
 
 
 async def link_measurement_intake(
@@ -499,42 +562,51 @@ async def link_measurement_intake(
     (measurement_id, medication_id) атомарно под `_current_intake_lock`,
     UNIQUE пары продублирован на уровне БД. Чужие и удалённые id лекарств,
     а также чужая или удалённая запись измерения, тихо игнорируются.
+
+    ⚠ Ждёт `_current_intake_lock`: не вызывать в сессии, где уже есть
+    незакоммиченная запись (см. `record_manual_intake`).
+    """
+    wanted = set(medication_ids)
+    if not wanted or not await _own_measurement(session, user, measurement_id):
+        return  # нечего связывать, или запись чужая/удалённая
+    med_ids = [medication.id for medication in await _user_medications(session, user, wanted)]
+    async with _current_intake_lock():
+        await _insert_measurement_links(session, measurement_id, med_ids)
+        await session.flush()
+
+
+async def record_manual_intake(
+    session: AsyncSession,
+    user: User,
+    measurement_id: int,
+    medication_ids: Iterable[int],
+    *,
+    timestamp: Optional[datetime] = None,
+) -> ManualIntakeResult:
+    """«Готово» мультивыбора: журнал приёмов и связи с записью — одной операцией (§6.3).
+
+    То же, что `log_manual_intake` + `link_measurement_intake`, но под
+    **одним** захватом `_current_intake_lock` и в одной транзакции вызывающего
+    кода (коммитит он). Два отдельных вызова в одной сессии держали бы запись
+    SQLite и ждали лок второй раз — взаимоблокировка с конкурентной отметкой
+    приёма до `busy_timeout` и `database is locked` (найдено нагрузочным
+    `qa/test_load_bot.py`). Чужая или удалённая запись измерения — журнал
+    пишется, связей нет (§4.11: журнал и связи живут независимо).
     """
     wanted = set(medication_ids)
     if not wanted:
-        return
-    owner = (
-        await session.execute(
-            select(Measurement.id).where(
-                Measurement.id == measurement_id, Measurement.user_id == user.id
-            )
-        )
-    ).scalar_one_or_none()
-    if owner is None:
-        return  # чужая или удалённая запись
-    med_ids = list(
-        (
-            await session.execute(
-                select(Medication.id)
-                .where(Medication.user_id == user.id, Medication.id.in_(wanted))
-                .order_by(Medication.name, Medication.slot)
-            )
-        ).scalars()
-    )
+        return ManualIntakeResult()
+    moment = _as_utc(timestamp)
+    medications = await _user_medications(session, user, wanted)
+    own_measurement = await _own_measurement(session, user, measurement_id)
     async with _current_intake_lock():
-        for med_id in med_ids:
-            duplicate = exists(
-                select(literal(1)).where(
-                    MeasurementMedication.measurement_id == measurement_id,
-                    MeasurementMedication.medication_id == med_id,
-                )
+        new_logs = await _insert_manual_logs(session, user, medications, moment)
+        if own_measurement:
+            await _insert_measurement_links(
+                session, measurement_id, [medication.id for medication in medications]
             )
-            stmt = insert(MeasurementMedication).from_select(
-                ["measurement_id", "medication_id"],
-                select(literal(measurement_id), literal(med_id)).where(~duplicate),
-            )
-            await session.execute(stmt)
         await session.flush()
+    return _manual_result(medications, new_logs)
 
 
 async def intake_labels_by_measurement(

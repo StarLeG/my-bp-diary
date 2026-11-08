@@ -688,8 +688,8 @@ async def cb_med_done(
         return
     tg_id = callback.from_user.id
     user = await measurements_service.get_or_create_user(session, tg_id)
-    result = await medications_service.log_manual_intake(session, user, checked)
-    await medications_service.link_measurement_intake(
+    # Журнал и связи — одним захватом лока приёмов и одной транзакцией (T1, §7.2).
+    result = await medications_service.record_manual_intake(
         session, user, data[M_ID], checked
     )
     await session.commit()

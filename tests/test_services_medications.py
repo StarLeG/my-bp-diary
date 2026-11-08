@@ -783,6 +783,99 @@ class TestLogManualIntake:
         assert len(logs) == 1 and logs[0].status == "skipped"
 
 
+class TestRecordManualIntake:
+    """«Готово» мультивыбора: журнал и связи одним захватом лока (§6.3, §7.2, T1)."""
+
+    async def _links(self, session: AsyncSession) -> list[tuple[int, int]]:
+        rows = (
+            await session.execute(
+                select(MeasurementMedication.measurement_id, MeasurementMedication.medication_id)
+            )
+        ).all()
+        return sorted((row[0], row[1]) for row in rows)
+
+    async def test_logs_and_links_together(self, session: AsyncSession, user: User) -> None:
+        meds = await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning", "evening")
+        )
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        result = await service.record_manual_intake(
+            session, user, measurement_id, [m.id for m in meds], timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        assert result.taken == ["Лозартан 50 мг", "Лозартан 50 мг"]
+        assert result.already_logged is False
+        logs = (await session.execute(select(MedicationLog))).scalars().all()
+        assert sorted((log.status, log.slot) for log in logs) == [
+            ("taken", "evening"),
+            ("taken", "morning"),
+        ]
+        assert await self._links(session) == sorted(
+            (measurement_id, med.id) for med in meds
+        )
+
+    async def test_repeat_is_idempotent(self, session: AsyncSession, user: User) -> None:
+        """Повторное «Готово» за те же сутки — ни логов, ни связей сверху (§7.2)."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        moment = aware(2026, 11, 4, 8, 5)
+        await service.record_manual_intake(session, user, measurement_id, [meds[0].id], timestamp=moment)
+        second = await service.record_manual_intake(
+            session, user, measurement_id, [meds[0].id], timestamp=moment
+        )
+        await session.commit()
+        assert second.already_logged is True
+        assert len((await session.execute(select(MedicationLog))).scalars().all()) == 1
+        assert await self._links(session) == [(measurement_id, meds[0].id)]
+
+    async def test_foreign_measurement_logs_without_links(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Чужая запись: журнал пишется, связей нет (§4.11, §7.1)."""
+        other = User(telegram_id=222_222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.flush()
+        foreign_measurement = await _add_measurement(session, other)
+        meds = await _add_med(session, user)
+        await session.flush()
+        result = await service.record_manual_intake(
+            session, user, foreign_measurement, [meds[0].id], timestamp=aware(2026, 11, 4, 8, 5)
+        )
+        await session.commit()
+        assert result.taken == ["Лозартан 50 мг"]
+        assert len((await session.execute(select(MedicationLog))).scalars().all()) == 1
+        assert await self._links(session) == []
+
+    async def test_empty_selection(self, session: AsyncSession, user: User) -> None:
+        measurement_id = await _add_measurement(session, user)
+        result = await service.record_manual_intake(session, user, measurement_id, [])
+        assert result.taken == [] and result.already_logged is False
+        assert (await session.execute(select(MedicationLog))).scalars().all() == []
+
+    async def test_concurrent_duplicate_is_not_counted(
+        self, session: AsyncSession, user: User, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Строку уже вставил конкурент (её нет в «отмечено сегодня»): rowcount=0 (§7.2)."""
+        meds = await _add_med(session, user)
+        await session.flush()
+        measurement_id = await _add_measurement(session, user)
+        moment = aware(2026, 11, 4, 8, 5)
+        await service.log_manual_intake(session, user, [meds[0].id], timestamp=moment)
+
+        async def nothing_logged(*args, **kwargs) -> set[int]:
+            return set()  # снимок «до» конкурентной вставки
+
+        monkeypatch.setattr(service, "logged_intake_ids_today", nothing_logged)
+        result = await service.record_manual_intake(
+            session, user, measurement_id, [meds[0].id], timestamp=moment
+        )
+        await session.commit()
+        assert result.already_logged is True, "дубль отсечён NOT EXISTS, не засчитан"
+        assert len((await session.execute(select(MedicationLog))).scalars().all()) == 1
+
+
 class TestLinkMeasurementIntake:
     """Связи «измерение ↔ отмеченные лекарства» (§4.11, §6.3)."""
 
