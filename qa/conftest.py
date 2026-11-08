@@ -643,6 +643,16 @@ def _test_file(nodeid: str) -> str:
     return nodeid.split("::", 1)[0].replace("\\", "/").rsplit("/", 1)[-1]
 
 
+def pytest_collection_modifyitems(session: pytest.Session, config, items: list) -> None:
+    """Регрессия критериев — в самом конце сессии: она читает артефакты остальных.
+
+    Без этого `test_load_regression.py` (по алфавиту раньше
+    `test_load_reminders.py` и `test_load_screenshots.py`) в общем прогоне
+    `pytest qa/` проверял бы итоги, которых ещё нет.
+    """
+    items.sort(key=lambda item: _test_file(item.nodeid) == _REGRESSION_FILE)
+
+
 def pytest_collection_finish(session: pytest.Session) -> None:
     """Начало полного прогона: убрать JSON прошлого прогона и начать лог заново.
 
