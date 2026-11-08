@@ -121,6 +121,7 @@ def test_stand_screenshots(page, shot, load_report) -> None:
 
     token = DoctorMagicLink(secret).make(doctor_id, user_id)
     page.goto(f"{CABINET_URL}/doctor?token={token}")
+    page.click("text=Открыть дневник")  # страница подтверждения ссылки доступа (§21)
     page.wait_for_url(f"{CABINET_URL}/doctor/patient/{user_id}*", timeout=15_000)
     wait_for_charts(page)
     shot(SHOTS[2])

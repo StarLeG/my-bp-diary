@@ -9,9 +9,22 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
   {% endif %}
 </head>
-<body{% if view == "login" %} class="auth-body"{% endif %}>
+<body{% if view in ("login", "confirm") %} class="auth-body"{% endif %}>
 
-{% if view == "login" %}
+{% if view == "confirm" %}
+  <!-- ── Подтверждение ссылки доступа (§21): списание — по кнопке, не при открытии ── -->
+  <main class="auth-card">
+    <h1>Кабинет врача</h1>
+    <p class="auth-sub">Пациент открыл вам доступ к дневнику давления.</p>
+    <form method="post" action="/doctor/open" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button type="submit" class="btn">Открыть дневник</button>
+    </form>
+    <p class="auth-foot">Дневник гипертоника — кабинет врача</p>
+  </main>
+
+{% elif view == "login" %}
   <!-- ── Вход врача ── -->
   <main class="auth-card">
     <h1>Кабинет врача</h1>
@@ -22,7 +35,7 @@
     {% elif error == "link_expired" %}
       <p class="alert alert-error">
         Ссылка устарела или уже использована. Попросите пациента отправить
-        отчет заново — новая ссылка действует 15 минут.
+        отчет заново — новая ссылка действует 72 часа.
       </p>
     {% elif error == "denied" %}
       <p class="alert alert-error">Пациент отозвал доступ. Попросите добавить вас заново.</p>
@@ -45,7 +58,7 @@
 
     <p class="auth-hint">
       Впервые? Пациент перешлёт вам сообщение со ссылкой — вход по ней
-      без пароля (действует 15 минут).
+      без пароля (действует 72 часа).
     </p>
     <p class="auth-foot">Дневник гипертоника — кабинет врача</p>
   </main>

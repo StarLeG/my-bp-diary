@@ -380,3 +380,49 @@ class DoctorNote(Base):
     __table_args__ = (
         CheckConstraint("length(text) BETWEEN 1 AND 1000", name="ck_doctor_notes_text_length"),
     )
+
+
+class InviteLog(Base):
+    """Учёт приглашений врача — лимиты и админка (SPEC.md, раздел 4.12).
+
+    Письма (`channel='email'`) и приглашения по @username (`channel='telegram'`)
+    — в одной таблице: лимиты 3 в сутки на пациента и 1 в час на `target`
+    считаются по ней для обоих каналов (§21). Строки удаляются вместе с
+    пациентом (§19).
+    """
+
+    __tablename__ = "invite_log"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    target: Mapped[str] = mapped_column(String(255), nullable=False)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    ok: Mapped[bool] = mapped_column(Boolean, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint("channel IN ('email', 'telegram')", name="ck_invite_log_channel"),
+        CheckConstraint("kind IN ('invite', 'report')", name="ck_invite_log_kind"),
+        CheckConstraint("length(target) BETWEEN 1 AND 255", name="ck_invite_log_target"),
+        Index("ix_invite_log_user_created", "user_id", "created_at"),
+        Index("ix_invite_log_target_created", "target", "created_at"),
+    )
+
+
+class UsedToken(Base):
+    """Списанные одноразовые ссылки кабинета врача (SPEC.md, раздел 4.14).
+
+    Списание в БД, а не в памяти процесса: ссылка доступа живёт 72 часа, и
+    перезапуск кабинета (деплой) не должен снова делать её рабочей.
+    Просроченные строки чистятся при старте кабинета.
+    """
+
+    __tablename__ = "used_tokens"
+
+    jti: Mapped[str] = mapped_column(String(64), primary_key=True)
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)

@@ -330,9 +330,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        """Создать таблицы при старте (идемпотентно)."""
+        """Создать таблицы при старте (идемпотентно), убрать просроченные списания ссылок."""
         if engine is not None:
             await init_db(engine)
+            async with session_factory() as session:
+                await doctor_auth.purge_used(session)
+                await session.commit()
         yield
         if engine is not None:
             await engine.dispose()
@@ -1304,27 +1307,48 @@ def create_app(
             path="/",
         )
 
-    async def _doctor_magic_response(
+    async def _doctor_confirm_page(
         request: Request, db: AsyncSession, token: str
     ) -> Response:
-        """Вход по magic link для врача (§21): активация связи и сессия.
+        """Ссылка доступа врача: страница подтверждения, без списания (§21).
 
-        Ссылка одноразовая (`consume`); `revoked`-связь не активируется —
-        пациент отозвал доступ до того, как врач открыл ссылку.
+        GET только показывает кнопку «Открыть дневник»: почтовые сканеры
+        (Outlook Safe Links, антивирусы) открывают ссылки из писем заранее и
+        иначе сжигали бы одноразовую ссылку. Списание — POST `/doctor/open`.
         """
-        payload = doctor_magic.consume(token)
-        if payload is None:
+        access = doctor_magic.load(token)
+        if access is None or await doctor_auth.is_used(db, access.jti):
             return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
-        doctor_id, patient_user_id = payload
+        csrf_token = csrf.issue()
+        response = _templates.TemplateResponse(
+            request,
+            "doctor_dashboard.html",
+            {"view": "confirm", "doctor": None, "token": token, "csrf_token": csrf_token},
+        )
+        set_csrf_cookie(request, response, csrf_token)
+        return response
+
+    @app.post("/doctor/open")
+    async def doctor_open(request: Request, db: AsyncSession = Depends(get_db)) -> Response:
+        """«Открыть дневник»: списать ссылку, активировать связь, войти (§21).
+
+        Списание атомарно (`used_tokens`): из двух нажатий проходит одно.
+        `revoked`-связь не активируется — пациент отозвал доступ раньше.
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        access = doctor_magic.load(str(form.get("token", "")))
+        if access is None:
+            return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
         doctor = (
-            await db.execute(select(Doctor).where(Doctor.id == doctor_id))
+            await db.execute(select(Doctor).where(Doctor.id == access.doctor_id))
         ).scalar_one_or_none()
-        if doctor is None:
+        if doctor is None or not await doctor_auth.consume(db, access):
             return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
-        if not await doctor_service.activate_link(db, doctor.id, patient_user_id):
+        if not await doctor_service.activate_link(db, doctor.id, access.patient_user_id):
             return RedirectResponse(url="/doctor?error=denied", status_code=303)
         response = RedirectResponse(
-            url=f"/doctor/patient/{patient_user_id}", status_code=303
+            url=f"/doctor/patient/{access.patient_user_id}", status_code=303
         )
         set_doctor_cookie(request, response, doctor.id)
         return response
@@ -1337,12 +1361,12 @@ def create_app(
     ) -> Response:
         """Кабинет врача: вход или список пациентов (§21).
 
-        `?token=` — вход по magic link из бота (15 минут, одноразовый):
-        активирует связь и открывает карточку пациента из ссылки.
+        `?token=` — ссылка доступа (72 часа, одноразовая): страница
+        подтверждения, вход и активация связи — по кнопке (POST `/doctor/open`).
         """
         token = request.query_params.get("token", "")
         if token:
-            return await _doctor_magic_response(request, db, token)
+            return await _doctor_confirm_page(request, db, token)
         csrf_token = csrf.issue()
         if doctor is not None:
             patients = await doctor_service.active_links_for_doctor(db, doctor.id)

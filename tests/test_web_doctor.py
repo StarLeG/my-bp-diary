@@ -7,6 +7,7 @@
 """
 from __future__ import annotations
 
+import asyncio
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -15,6 +16,8 @@ from fastapi.testclient import TestClient
 from itsdangerous import URLSafeTimedSerializer
 
 from bot.config import Settings
+from bot.db import create_engine, create_session_factory, init_db
+from bot.models import UsedToken
 from bot.handlers import doctor as doctor_handlers
 from bot.services import pdf_report
 from web.cabinet import auth, doctor_auth
@@ -119,50 +122,76 @@ def _magic_token(doctor_id: int, user_id: int) -> str:
     return doctor_auth.DoctorMagicLink(SECRET).make(doctor_id, user_id)
 
 
+def _open(client: TestClient, token: str):
+    """Открыть ссылку как врач: страница подтверждения → «Открыть дневник»."""
+    page = client.get(f"/doctor?token={token}")
+    if page.status_code != 200:
+        return page
+    return client.post("/doctor/open", data={"csrf_token": _csrf(client), "token": token})
+
+
+def _sql_count(settings: Settings, table: str) -> int:
+    con = sqlite3.connect(settings.db_path)
+    (count,) = con.execute(f"SELECT COUNT(*) FROM {table}").fetchone()
+    con.close()
+    return count
+
+
+def _sql_exec(settings: Settings, query: str) -> None:
+    con = sqlite3.connect(settings.db_path)
+    con.execute(query)
+    con.commit()
+    con.close()
+
+
 # ─────────────────────────── Magic link ───────────────────────────
 
 
 class TestDoctorMagicLink:
-    def test_make_verify_consume(self) -> None:
+    def test_make_and_load(self) -> None:
         magic = doctor_auth.DoctorMagicLink(SECRET)
-        token = magic.make(7, 42)
-        assert magic.verify(token) == (7, 42)  # verify не списывает
-        assert magic.verify(token) == (7, 42)
-        assert magic.consume(token) == (7, 42)
+        access = magic.load(magic.make(7, 42))
+        assert access is not None
+        assert (access.doctor_id, access.patient_user_id) == (7, 42)
+        assert access.jti
+        left = access.expires_at - doctor_auth.utcnow()
+        assert timedelta(hours=71) < left <= timedelta(hours=72)
 
-    def test_consume_is_single_use(self) -> None:
-        magic = doctor_auth.DoctorMagicLink(SECRET)
-        token = magic.make(7, 42)
-        assert magic.consume(token) == (7, 42)
-        assert magic.consume(token) is None
-        assert magic.verify(token) is None  # использованный токен не проверяется
+    def test_access_ttl_is_72_hours(self) -> None:
+        assert doctor_auth.DOCTOR_ACCESS_MAX_AGE == 72 * 3600
 
     def test_expired_token_is_rejected(self, mocker) -> None:
-        """Срок 15 минут проверяется по времени подписи (itsdangerous)."""
+        """Срок 72 часа проверяется по времени подписи (itsdangerous)."""
         magic = doctor_auth.DoctorMagicLink(SECRET)
-        past = int(doctor_auth.utcnow().timestamp()) - (doctor_auth.DOCTOR_LINK_MAX_AGE + 60)
+        past = int(doctor_auth.utcnow().timestamp()) - (doctor_auth.DOCTOR_ACCESS_MAX_AGE + 60)
         mocker.patch("itsdangerous.timed.TimestampSigner.get_timestamp", return_value=past)
         token = magic.make(7, 42)
         mocker.stopall()
-        assert magic.verify(token) is None
-        assert magic.consume(token) is None
+        assert magic.load(token) is None
+
+    def test_token_alive_after_two_days(self, mocker) -> None:
+        magic = doctor_auth.DoctorMagicLink(SECRET)
+        past = int(doctor_auth.utcnow().timestamp()) - 48 * 3600
+        mocker.patch("itsdangerous.timed.TimestampSigner.get_timestamp", return_value=past)
+        token = magic.make(7, 42)
+        mocker.stopall()
+        assert magic.load(token) is not None
 
     def test_foreign_signature_is_rejected(self) -> None:
         token = doctor_auth.DoctorMagicLink(SECRET).make(7, 42)
-        assert doctor_auth.DoctorMagicLink("other-secret").verify(token) is None
+        assert doctor_auth.DoctorMagicLink("other-secret").load(token) is None
 
     def test_garbage_is_rejected(self) -> None:
         magic = doctor_auth.DoctorMagicLink(SECRET)
-        assert magic.verify("просто не токен") is None
-        assert magic.consume("") is None
+        assert magic.load("просто не токен") is None
+        assert magic.load("") is None
 
     def test_non_dict_payload_is_rejected(self) -> None:
         """Payload не-dict отклоняется без ошибки."""
         token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_LOGIN_SALT).dumps(
             ["did", "pid"]
         )
-        magic = doctor_auth.DoctorMagicLink(SECRET)
-        assert magic.verify(token) is None
+        assert doctor_auth.DoctorMagicLink(SECRET).load(token) is None
 
     @pytest.mark.parametrize(
         "payload",
@@ -170,6 +199,7 @@ class TestDoctorMagicLink:
             {"did": "x", "pid": 42, "jti": "j"},  # типы полей
             {"did": 7, "pid": 42},  # нет jti
             {"did": 7, "pid": 42, "jti": 5},  # jti не строка
+            {"did": 7, "pid": 42, "jti": ""},  # пустой jti
             {},
         ],
     )
@@ -177,18 +207,53 @@ class TestDoctorMagicLink:
         token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_LOGIN_SALT).dumps(
             payload
         )
-        magic = doctor_auth.DoctorMagicLink(SECRET)
-        assert magic.verify(token) is None
-        assert magic.consume(token) is None
+        assert doctor_auth.DoctorMagicLink(SECRET).load(token) is None
 
-    def test_used_jti_is_purged_after_expiry(self) -> None:
-        """Память одноразовых токенов чистится по истечении срока."""
+
+class TestUsedTokens:
+    """Одноразовость ссылки — в БД (`used_tokens`, §4.14), а не в памяти."""
+
+    async def test_consume_once(self, session) -> None:
         magic = doctor_auth.DoctorMagicLink(SECRET)
-        magic.consume(magic.make(7, 42))
-        assert len(magic._used) == 1
-        later = doctor_auth.utcnow() + timedelta(seconds=doctor_auth.DOCTOR_LINK_MAX_AGE + 1)
-        magic.verify("что-то", now=later)
-        assert len(magic._used) == 0
+        access = magic.load(magic.make(7, 42))
+        assert not await doctor_auth.is_used(session, access.jti)
+        assert await doctor_auth.consume(session, access) is True
+        assert await doctor_auth.is_used(session, access.jti)
+        assert await doctor_auth.consume(session, access) is False
+
+    async def test_parallel_consume_one_wins(self, tmp_path) -> None:
+        """Два одновременных нажатия «Открыть дневник» — проходит одно (§7.2)."""
+        engine = create_engine(str(tmp_path / "used.sqlite3"))
+        await init_db(engine)
+        factory = create_session_factory(engine)
+        magic = doctor_auth.DoctorMagicLink(SECRET)
+        access = magic.load(magic.make(7, 42))
+
+        async def attempt() -> bool:
+            async with factory() as session:
+                ok = await doctor_auth.consume(session, access)
+                await session.commit()
+                return ok
+
+        try:
+            results = await asyncio.gather(attempt(), attempt())
+        finally:
+            await engine.dispose()
+        assert sorted(results) == [False, True]
+
+    async def test_purge_removes_only_expired(self, session) -> None:
+        now = doctor_auth.utcnow()
+        session.add_all(
+            [
+                UsedToken(jti="old", expires_at=now - timedelta(minutes=1)),
+                UsedToken(jti="fresh", expires_at=now + timedelta(hours=1)),
+            ]
+        )
+        await session.commit()
+        assert await doctor_auth.purge_used(session, now) == 1
+        await session.commit()
+        assert not await doctor_auth.is_used(session, "old")
+        assert await doctor_auth.is_used(session, "fresh")
 
     def test_token_contract_with_bot(self) -> None:
         """Ссылка из бота читается веб-частью: единый salt «doctor-login»."""
@@ -197,7 +262,8 @@ class TestDoctorMagicLink:
         )
         url = doctor_handlers.make_doctor_link(settings, 7, 42)
         token = url.split("token=", 1)[1]
-        assert doctor_auth.DoctorMagicLink(SECRET).verify(token) == (7, 42)
+        access = doctor_auth.DoctorMagicLink(SECRET).load(token)
+        assert (access.doctor_id, access.patient_user_id) == (7, 42)
 
 
 # ─────────────────────────── Сессия врача ───────────────────────────
@@ -228,38 +294,107 @@ class TestDoctorSession:
 
 
 class TestMagicLogin:
-    def test_token_logs_in_and_activates(self, app_client, settings) -> None:
+    """Ссылка доступа: GET — страница подтверждения, списание — POST `/doctor/open` (§21)."""
+
+    def test_get_shows_confirm_and_does_not_consume(self, app_client, settings) -> None:
+        """Почтовый сканер открывает ссылку GET-запросом — она остаётся рабочей."""
         client, user_id, doctor_id = app_client
         _link(settings, doctor_id, user_id, status="pending")
-        response = client.get(f"/doctor?token={_magic_token(doctor_id, user_id)}")
+        token = _magic_token(doctor_id, user_id)
+        for _ in range(2):
+            page = client.get(f"/doctor?token={token}")
+            assert page.status_code == 200
+            assert "Пациент открыл вам доступ к дневнику давления." in page.text
+            assert "Открыть дневник" in page.text
+            assert 'action="/doctor/open"' in page.text
+        assert _status(settings, doctor_id, user_id) == "pending"
+        assert not client.cookies.get(DOCTOR_COOKIE)
+        assert _sql_count(settings, "used_tokens") == 0
+
+    def test_open_logs_in_and_activates(self, app_client, settings) -> None:
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id, status="pending")
+        response = _open(client, _magic_token(doctor_id, user_id))
         assert response.status_code == 303
         assert response.headers["location"] == f"/doctor/patient/{user_id}"
         assert client.cookies.get(DOCTOR_COOKIE)
         assert _status(settings, doctor_id, user_id) == "active"
+        assert _sql_count(settings, "used_tokens") == 1
 
     def test_token_is_single_use(self, app_client, settings) -> None:
         client, user_id, doctor_id = app_client
         _link(settings, doctor_id, user_id)
         token = _magic_token(doctor_id, user_id)
-        assert client.get(f"/doctor?token={token}").status_code == 303
-        response = client.get(f"/doctor?token={token}")
-        assert response.status_code == 303
+        assert _open(client, token).status_code == 303
+        again = client.get(f"/doctor?token={token}")
+        assert again.status_code == 303
+        assert again.headers["location"] == "/doctor?error=link_expired"
+        response = client.post(
+            "/doctor/open", data={"csrf_token": _csrf(client), "token": token}
+        )
+        assert response.headers["location"] == "/doctor?error=link_expired"
+
+    def test_used_token_survives_restart(self, app_client, settings) -> None:
+        """Списание в БД: новый процесс кабинета (рестарт) ссылку не «оживляет»."""
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        token = _magic_token(doctor_id, user_id)
+        assert _open(client, token).headers["location"] == f"/doctor/patient/{user_id}"
+        with TestClient(
+            create_app(settings), base_url="https://testserver", follow_redirects=False
+        ) as restarted:
+            response = restarted.get(f"/doctor?token={token}")
+        assert response.headers["location"] == "/doctor?error=link_expired"
+
+    def test_startup_purges_expired_used_tokens(self, app_client, settings) -> None:
+        _sql_exec(
+            settings,
+            "INSERT INTO used_tokens (jti, expires_at) VALUES ('old', '2020-01-01 00:00:00'),"
+            " ('fresh', '2999-01-01 00:00:00')",
+        )
+        with TestClient(create_app(settings), base_url="https://testserver"):
+            pass
+        assert _sql_count(settings, "used_tokens") == 1
+
+    def test_open_requires_csrf(self, app_client, settings) -> None:
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        response = client.post(
+            "/doctor/open", data={"csrf_token": "bad", "token": _magic_token(doctor_id, user_id)}
+        )
+        assert response.status_code == 403
+
+    def test_open_with_garbage_token(self, app_client) -> None:
+        client, _, _ = app_client
+        client.get("/doctor")
+        response = client.post("/doctor/open", data={"csrf_token": _csrf(client), "token": "x"})
+        assert response.headers["location"] == "/doctor?error=link_expired"
+
+    def test_get_with_garbage_token(self, app_client) -> None:
+        client, _, _ = app_client
+        response = client.get("/doctor?token=x")
         assert response.headers["location"] == "/doctor?error=link_expired"
 
     def test_revoked_link_is_not_activated(self, app_client, settings) -> None:
         """Пациент отозвал доступ до открытия ссылки — статус не меняется."""
         client, user_id, doctor_id = app_client
         _link(settings, doctor_id, user_id, status="revoked")
-        response = client.get(f"/doctor?token={_magic_token(doctor_id, user_id)}")
+        response = _open(client, _magic_token(doctor_id, user_id))
         assert response.status_code == 303
         assert response.headers["location"] == "/doctor?error=denied"
         assert _status(settings, doctor_id, user_id) == "revoked"
 
     def test_unknown_doctor_is_rejected(self, app_client) -> None:
         client, user_id, doctor_id = app_client
-        response = client.get(f"/doctor?token={_magic_token(doctor_id + 99, user_id)}")
+        response = _open(client, _magic_token(doctor_id + 99, user_id))
         assert response.status_code == 303
         assert response.headers["location"] == "/doctor?error=link_expired"
+
+    def test_login_page_mentions_72_hours(self, app_client) -> None:
+        client, _, _ = app_client
+        page = client.get("/doctor?error=link_expired")
+        assert "новая ссылка действует 72 часа" in page.text
+        assert "15 минут" not in page.text
 
 
 # ─────────────────────────── Список пациентов ───────────────────────────
@@ -584,7 +719,7 @@ class TestDoctorLogin:
     def test_logout_clears_cookie(self, app_client, settings) -> None:
         client, user_id, doctor_id = app_client
         _link(settings, doctor_id, user_id)
-        client.get(f"/doctor?token={_magic_token(doctor_id, user_id)}")
+        _open(client, _magic_token(doctor_id, user_id))
         assert client.cookies.get(DOCTOR_COOKIE)
         client.get("/doctor")  # получить CSRF-куку
         response = client.post(
@@ -656,3 +791,8 @@ class TestPatientCardZones:
         assert 'title="САД: 130–139, ДАД: ≥ 90"' in html
         assert "zone-row-elevated" not in html, "128/82 — норма, без подсветки"
         assert "САД ≥ 140 · ДАД ≥ 90" in html
+
+
+def test_doctor_session_rejects_non_dict_payload() -> None:
+    token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_SESSION_SALT).dumps([1])
+    assert doctor_auth.DoctorSession(SECRET).verify(token) is None

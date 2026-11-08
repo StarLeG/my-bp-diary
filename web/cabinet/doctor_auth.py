@@ -2,8 +2,10 @@
 
 Компоненты безопасности:
 
-- вход по magic link из бота — stateless-подпись `itsdangerous`
-  (срок действия 15 минут, одноразовость по `jti` в памяти процесса);
+- ссылка доступа к пациенту — подпись `itsdangerous` (72 часа), одноразовость
+  по `jti` в таблице `used_tokens` (переживает перезапуск); списывается не
+  при открытии, а по кнопке на странице подтверждения — почтовые сканеры,
+  открывающие ссылки из писем, её не сжигают;
 - сессия врача — подписанная cookie (без таблицы в БД), 7 дней;
 - вход e-mail + пароль — для врачей с установленным паролем: Argon2id
   (`argon2-cffi`, переиспользует `auth.hash_password` / `auth.verify_password`)
@@ -17,10 +19,16 @@
 from __future__ import annotations
 
 import secrets
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from itsdangerous import BadSignature, URLSafeTimedSerializer
+from sqlalchemy import delete, select
+from sqlalchemy.dialects.sqlite import insert as sqlite_insert
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from bot.models import UsedToken
 
 #: Соль подписи ссылки для врача — как `DOCTOR_SALT` в `bot/handlers/doctor.py`.
 DOCTOR_LOGIN_SALT = "doctor-login"
@@ -28,8 +36,9 @@ DOCTOR_LOGIN_SALT = "doctor-login"
 #: Соль подписи сессионной cookie врача.
 DOCTOR_SESSION_SALT = "doctor-session"
 
-#: Срок действия ссылки для врача — 15 минут (SPEC.md, раздел 21).
-DOCTOR_LINK_MAX_AGE = 15 * 60
+#: Срок ссылки доступа врача к пациенту — 72 часа (SPEC.md, §21): письмо и
+#: пересылка — один и тот же токен.
+DOCTOR_ACCESS_MAX_AGE = 72 * 3600
 
 #: Время жизни сессии врача — 7 дней (как сессия кабинета).
 DOCTOR_SESSION_MAX_AGE = 7 * 24 * 3600
@@ -40,67 +49,46 @@ def utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class DoctorMagicLink:
-    """Подпись и проверка одноразовых ссылок для врача (SPEC.md, раздел 21).
+@dataclass(frozen=True)
+class AccessToken:
+    """Распакованная ссылка доступа: врач, пациент, `jti` и конец срока."""
 
-    Токен — stateless: подпись и время жизни, отдельная таблица не нужна.
-    Payload — `did` (врач), `pid` (пациент, `users.id`) и `jti` для
-    одноразовости; формат совпадает с `bot/handlers/doctor.py::make_doctor_link`
+    doctor_id: int
+    patient_user_id: int
+    jti: str
+    expires_at: datetime
+
+
+class DoctorMagicLink:
+    """Подпись и проверка ссылок доступа врача к пациенту (SPEC.md, §21).
+
+    Подпись и срок (72 часа) — stateless (`itsdangerous`); одноразовость —
+    по `jti` в таблице `used_tokens` (§4.14): списание переживает перезапуск
+    кабинета. Payload — `did` (врач), `pid` (пациент, `users.id`) и `jti`;
+    формат совпадает с `bot/handlers/doctor.py::make_doctor_link`
     (закреплено контрактным тестом `tests/test_web_doctor.py`).
     """
 
     def __init__(self, secret_key: str) -> None:
         """Секрет подписи — `WEB_SECRET_KEY` из окружения."""
         self._serializer = URLSafeTimedSerializer(secret_key, salt=DOCTOR_LOGIN_SALT)
-        #: Использованные `jti` с моментом истечения (для чистки памяти).
-        self._used: dict[str, datetime] = {}
 
     def make(self, doctor_id: int, patient_user_id: int) -> str:
-        """Подписать ссылку для врача: доступ к данным конкретного пациента."""
+        """Подписать ссылку доступа врача к данным конкретного пациента."""
         return self._serializer.dumps(
             {"did": doctor_id, "pid": patient_user_id, "jti": secrets.token_urlsafe(16)}
         )
 
-    def verify(self, token: str, now: Optional[datetime] = None) -> Optional[tuple[int, int]]:
-        """Проверить токен без списания: подпись и срок 15 минут.
+    def load(self, token: str, now: Optional[datetime] = None) -> Optional[AccessToken]:
+        """Проверить подпись и срок без списания; None — битый или просроченный токен.
 
-        Возвращает `(doctor_id, patient_user_id)` или None (битый/
-        просроченный/уже использованный токен).
+        Списана ли ссылка, решает БД (`is_used` / `consume`).
         """
-        payload = self._load(token, now)
-        if payload is None:
-            return None
-        doctor_id, patient_user_id, jti, _ = payload
-        if jti in self._used:
-            return None
-        return doctor_id, patient_user_id
-
-    def consume(
-        self, token: str, now: Optional[datetime] = None
-    ) -> Optional[tuple[int, int]]:
-        """Проверить токен и списать его (одноразовость — при реальном входе).
-
-        Возвращает `(doctor_id, patient_user_id)` или None. Повторное
-        использование той же ссылки невозможно: `jti` помечается навсегда
-        (в пределах срока действия токена).
-        """
-        payload = self._load(token, now)
-        if payload is None:
-            return None
-        doctor_id, patient_user_id, jti, now = payload
-        if jti in self._used:
-            return None
-        self._used[jti] = now + timedelta(seconds=DOCTOR_LINK_MAX_AGE)
-        return doctor_id, patient_user_id
-
-    def _load(
-        self, token: str, now: Optional[datetime]
-    ) -> Optional[tuple[int, int, str, datetime]]:
-        """Распаковать токен: None, если подпись битая, срок истёк или полей нет."""
         now = now or utcnow()
-        self._purge_used(now)
         try:
-            payload = self._serializer.loads(token, max_age=DOCTOR_LINK_MAX_AGE)
+            payload, signed_at = self._serializer.loads(
+                token, max_age=DOCTOR_ACCESS_MAX_AGE, return_timestamp=True
+            )
         except BadSignature:
             return None
         if not isinstance(payload, dict):
@@ -110,15 +98,40 @@ class DoctorMagicLink:
         jti = payload.get("jti")
         if not isinstance(doctor_id, int) or not isinstance(patient_user_id, int):
             return None
-        if not isinstance(jti, str):
+        if not isinstance(jti, str) or not jti:
             return None
-        return doctor_id, patient_user_id, jti, now
+        expires_at = signed_at.astimezone(timezone.utc) + timedelta(
+            seconds=DOCTOR_ACCESS_MAX_AGE
+        )
+        return AccessToken(doctor_id, patient_user_id, jti, expires_at)
 
-    def _purge_used(self, now: datetime) -> None:
-        """Выбросить истёкшие `jti`: память не растёт бесконечно."""
-        expired = [jti for jti, until in self._used.items() if until <= now]
-        for jti in expired:
-            del self._used[jti]
+
+async def is_used(session: AsyncSession, jti: str) -> bool:
+    """Списана ли ссылка (`used_tokens`, §4.14)."""
+    row = await session.execute(select(UsedToken.jti).where(UsedToken.jti == jti))
+    return row.first() is not None
+
+
+async def consume(session: AsyncSession, token: AccessToken) -> bool:
+    """Списать ссылку атомарно: True — списана сейчас, False — уже была списана.
+
+    `INSERT OR IGNORE` по первичному ключу `jti`: из двух одновременных
+    открытий одной ссылки выигрывает ровно одно (§7.2).
+    """
+    result = await session.execute(
+        sqlite_insert(UsedToken)
+        .values(jti=token.jti, expires_at=token.expires_at)
+        .on_conflict_do_nothing(index_elements=["jti"])
+    )
+    return result.rowcount == 1
+
+
+async def purge_used(session: AsyncSession, now: Optional[datetime] = None) -> int:
+    """Удалить просроченные списания (при старте кабинета); число удалённых строк."""
+    result = await session.execute(
+        delete(UsedToken).where(UsedToken.expires_at < (now or utcnow()))
+    )
+    return result.rowcount or 0
 
 
 class DoctorSession:

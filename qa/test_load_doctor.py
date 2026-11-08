@@ -1,13 +1,14 @@
 """Burst кабинета врача (SPEC.md, §22, уровень 4).
 
-Врачи стенда одновременно входят по magic link (`GET /doctor?token=…`,
-токен подписывается тем же `DoctorMagicLink` и секретом, что у кабинета),
+Врачи стенда одновременно входят по ссылке доступа (`GET /doctor?token=…` —
+страница подтверждения, `POST /doctor/open` — «Открыть дневник»; токен
+подписывается тем же `DoctorMagicLink` и секретом, что у кабинета),
 открывают карточку своего пациента, делают 5 выгрузок (CSV и PDF
-вперемешку) и оставляют 3 комментария: 10 запросов на врача, ровно 200 в
+вперемешку) и оставляют 3 комментария: 11 запросов на врача, ровно 220 в
 полном профиле. Транспорт — `httpx.ASGITransport` (кабинет в процессе
 pytest, без сервера); у каждого врача свой клиент и свои cookie.
 
-Критерии: все запросы успешны (вход — 303 на карточку своего пациента,
+Критерии: все запросы успешны (подтверждение — 200, вход — 303 на карточку своего пациента,
 карточка и выгрузки — 200 с нужным типом, комментарий — 303 с
 `saved=note`), p95 карточки < 2 с, комментарии привязаны к своим
 `doctor_id` / `user_id`. Итог — `qa/reports/load/test_load_doctor.json`.
@@ -117,11 +118,28 @@ class DoctorSession:
             )
 
 
+async def open_link(doctor: DoctorSession, token: str) -> Optional[httpx.Response]:
+    """Вход по ссылке доступа: страница подтверждения → «Открыть дневник» (§21).
+
+    Два HTTP-запроса: `confirm` (GET, 200) и `login` (POST, 303 на карточку).
+    """
+    confirm = await doctor.request("confirm", "GET", "/doctor", params={"token": token})
+    doctor.expect("confirm", confirm, confirm is not None and confirm.status_code == 200)
+    if confirm is None or confirm.status_code != 200:
+        return None
+    return await doctor.request(
+        "login",
+        "POST",
+        "/doctor/open",
+        data={"csrf_token": doctor.client.cookies.get("csrf_token", ""), "token": token},
+    )
+
+
 async def run_doctor(doctor: DoctorSession, magic: DoctorMagicLink) -> None:
     """Флоу врача: вход по ссылке → карточка → 5 выгрузок → 3 комментария."""
     patient_url = f"/doctor/patient/{doctor.user_id}"
     token = magic.make(doctor.doctor_id, doctor.user_id)
-    login = await doctor.request("login", "GET", "/doctor", params={"token": token})
+    login = await open_link(doctor, token)
     doctor.expect(
         "login", login, login is not None and login.status_code == 303
         and login.headers.get("location") == patient_url
@@ -162,7 +180,7 @@ async def calibrate(
     for _ in range(3):
         async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
             doctor = DoctorSession(client, doctor_id, user_id)
-            await doctor.request("login", "GET", "/doctor", params={"token": magic.make(doctor_id, user_id)})
+            await open_link(doctor, magic.make(doctor_id, user_id))
             await doctor.request("dashboard", "GET", patient_url, params={"days": "30"})
             for name in ("export.csv", "export.pdf"):
                 await doctor.request(name, "GET", f"{patient_url}/{name}", params={"days": "30"})
@@ -232,7 +250,7 @@ async def test_doctors_burst(load_db, doctor_pairs, load_log, load_report, tmp_p
             timings[kind].extend(values)
     errors = {doctor.doctor_id: doctor.errors for doctor in doctors if doctor.errors}
     requests = sum(doctor.requests for doctor in doctors)
-    expected_requests = len(doctors) * (2 + len(EXPORTS) + NOTES)
+    expected_requests = len(doctors) * (3 + len(EXPORTS) + NOTES)  # подтверждение, вход, карточка
     dashboard_p95 = p95(timings["dashboard"])
     report = {
         "passed": not errors
