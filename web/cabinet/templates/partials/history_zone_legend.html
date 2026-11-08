@@ -1,0 +1,7 @@
+{# Легенда подсветки строк «Истории записей» (SPEC.md, §16.2): только жёлтая и
+   красная зоны — строки в норме не подсвечиваются. Общая для ЛК и кабинета врача. #}
+<ul class="zone-legend history-zone-legend" aria-label="Подсветка строк по зонам давления">
+  {% for chip in history_zone_legend %}
+    <li><span class="zone-swatch" style="background: {{ chip.fill }}"></span>{{ chip.label }}</li>
+  {% endfor %}
+</ul>

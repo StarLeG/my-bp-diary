@@ -50,7 +50,7 @@ from bot.services.measurements import (
 from bot.services.medications import MedicationNotFoundError
 from bot.services.reminders import DEFAULT_SLOT_TIMES, enable_slot_row, next_slot_occurrence
 from web.cabinet import auth, csv_import, doctor_auth
-from web.cabinet.chart_zones import CHART_ZONES
+from web.cabinet.chart_zones import CHART_ZONES, row_zone, table_legend
 
 #: Имя сессионной cookie (SPEC.md, раздел 16.2: HTTP-only, 7 дней).
 SESSION_COOKIE = "cabinet_session"
@@ -101,6 +101,10 @@ async def _medication_cells(
 
 _BASE_DIR = Path(__file__).resolve().parent
 _templates = Jinja2Templates(directory=str(_BASE_DIR / "templates"))
+# Подсветка строк «Истории записей» по зонам давления — общая для кабинета
+# пациента и врача (§16.2, §21): один источник порогов и цветов с графиками.
+_templates.env.globals["row_zone"] = row_zone
+_templates.env.globals["history_zone_legend"] = table_legend()
 
 
 # ─────────────────────────── Вспомогательное ───────────────────────────

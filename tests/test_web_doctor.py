@@ -631,3 +631,28 @@ class TestDoctorBlockingOffLoop:
         )
         assert login.status_code == 303 and login.headers["location"] == "/doctor"
         assert page.status_code == 200
+
+
+class TestPatientCardZones:
+    """У врача — та же подсветка строк истории и легенда, что в ЛК (§21, §16.2)."""
+
+    def test_rows_and_legend(self, app_client, settings) -> None:
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        now = datetime.now(timezone.utc)
+        con = sqlite3.connect(settings.db_path)
+        for minutes, (systolic, diastolic) in enumerate(((132, 90), (128, 82))):
+            con.execute(
+                "INSERT INTO measurements (user_id, timestamp, systolic, diastolic)"
+                " VALUES (?, ?, ?, ?)",
+                (user_id, (now - timedelta(minutes=minutes + 1)).strftime("%Y-%m-%d %H:%M:%S"),
+                 systolic, diastolic),
+            )
+        con.commit()
+        con.close()
+        _login_doctor(client, doctor_id)
+        html = client.get(f"/doctor/patient/{user_id}").text
+        assert html.count('class="zone-row zone-row-high"') == 1
+        assert 'title="САД: 130–139, ДАД: ≥ 90"' in html
+        assert "zone-row-elevated" not in html, "128/82 — норма, без подсветки"
+        assert "САД ≥ 140 · ДАД ≥ 90" in html

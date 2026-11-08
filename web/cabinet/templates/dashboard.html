@@ -367,6 +367,7 @@
       {% if not measurements %}
         <p>За этот период записей нет.</p>
       {% else %}
+        {% include "partials/history_zone_legend.html" %}
         <div class="table-scroll">
           <table class="stacked-table">
             <thead>
@@ -384,7 +385,8 @@
             </thead>
             <tbody>
               {% for m in measurements %}
-                <tr>
+                {% set zone = row_zone(m.systolic, m.diastolic) %}
+                <tr{% if zone %} class="zone-row {{ zone.css_class }}" style="--zone-fill: {{ zone.fill }}" title="{{ zone.title }}"{% endif %}>
                   <td data-label="Дата">{{ m.timestamp.astimezone(user_zone).strftime("%d.%m.%Y") }}</td>
                   <td data-label="Время">{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
                   <td data-label="Сист.">{{ m.systolic }}</td>

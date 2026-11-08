@@ -280,6 +280,18 @@ td.actions {
   white-space: nowrap;
 }
 
+/* Подсветка строк «Истории записей» по худшей из зон САД/ДАД (§16.2): заливка
+   — из chart_zones.py через --zone-fill; строки в норме не подсвечиваются.
+   Одно правило и для строк-карточек на узких экранах: оно специфичнее фона
+   `.stacked-table tr` из @media (max-width: 767px). */
+.stacked-table tr.zone-row {
+  background: var(--zone-fill);
+}
+
+.history-zone-legend {
+  margin: 0 0 8px;
+}
+
 /* График */
 .chart-wrap {
   position: relative;

@@ -55,3 +55,61 @@ CHART_ZONES: dict[str, list[dict]] = {
         },
     ],
 }
+
+
+def band_index(value: int, bands: list[dict]) -> int:
+    """Номер полосы значения: 0 — зелёная, 1 — жёлтая, 2 — красная.
+
+    Значение попадает в первую полосу, чья граница `to` больше него
+    (130 — уже жёлтая, 140 — уже красная, как в подписях «< 130», «130–139»).
+    """
+    for index, band in enumerate(bands):
+        if band["to"] is None or value < band["to"]:
+            return index
+    raise ValueError("у последней полосы нет открытой верхней границы")
+
+
+#: CSS-класс строки «Истории записей» по номеру худшей полосы (§16.2):
+#: зелёная (0) не подсвечивается.
+ROW_ZONE_CLASSES = {1: "zone-row-elevated", 2: "zone-row-high"}
+
+
+def row_zone(systolic: int, diastolic: int) -> dict | None:
+    """Подсветка строки «Истории записей» по худшей из зон САД и ДАД (§16.2).
+
+    None — обе зоны зелёные (строка без подсветки). Иначе — CSS-класс,
+    заливка худшей полосы (из `CHART_ZONES`, как у графиков) и `title`:
+    зоны показателей вне нормы («САД: ≥ 140, ДАД: 85–89»).
+    """
+    levels = {
+        "САД": band_index(systolic, CHART_ZONES["systolic"]),
+        "ДАД": band_index(diastolic, CHART_ZONES["diastolic"]),
+    }
+    worst = max(levels.values())
+    if worst == 0:
+        return None
+    keys = {"САД": "systolic", "ДАД": "diastolic"}
+    title = ", ".join(
+        f"{name}: {CHART_ZONES[keys[name]][level]['label']}"
+        for name, level in levels.items()
+        if level > 0
+    )
+    return {
+        "css_class": ROW_ZONE_CLASSES[worst],
+        "fill": CHART_ZONES["systolic"][worst]["fill"],
+        "title": title,
+    }
+
+
+def table_legend() -> list[dict]:
+    """Легенда над таблицей истории: две плашки — жёлтая и красная (§16.2)."""
+    return [
+        {
+            "fill": CHART_ZONES["systolic"][level]["fill"],
+            "label": (
+                f"САД {CHART_ZONES['systolic'][level]['label']}"
+                f" · ДАД {CHART_ZONES['diastolic'][level]['label']}"
+            ),
+        }
+        for level in (1, 2)
+    ]

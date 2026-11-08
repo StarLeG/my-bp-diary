@@ -1019,3 +1019,102 @@ class TestMedicationPickerDelete:
         assert _med_logs(settings) == [
             (meds["morning"], "2026-01-02 03:04:05.000000", "taken", "morning")
         ]
+
+
+# ─────────────── Подсветка строк «Истории записей» по зонам давления (§16.2) ───────────────
+
+
+class TestRowZone:
+    """Худшая из зон САД/ДАД; пороги — из chart_zones.py, как у графиков."""
+
+    @pytest.mark.parametrize(
+        ("systolic", "diastolic", "expected"),
+        [
+            (129, 84, None),  # обе зелёные — без подсветки
+            (130, 84, "zone-row-elevated"),  # граница САД 130 — уже жёлтая
+            (139, 84, "zone-row-elevated"),
+            (140, 84, "zone-row-high"),  # граница САД 140 — уже красная
+            (129, 85, "zone-row-elevated"),  # граница ДАД 85
+            (129, 89, "zone-row-elevated"),
+            (129, 90, "zone-row-high"),  # граница ДАД 90
+            (154, 84, "zone-row-high"),  # пример из SPEC: красная по САД
+            (132, 90, "zone-row-high"),  # жёлтая САД + красная ДАД → красная
+            (135, 87, "zone-row-elevated"),
+        ],
+    )
+    def test_worst_zone(self, systolic: int, diastolic: int, expected) -> None:
+        from web.cabinet.chart_zones import row_zone
+
+        zone = row_zone(systolic, diastolic)
+        assert (zone["css_class"] if zone else None) == expected
+
+    def test_fill_and_title_from_chart_zones(self) -> None:
+        from web.cabinet.chart_zones import CHART_ZONES, row_zone
+
+        zone = row_zone(132, 90)
+        assert zone["fill"] == CHART_ZONES["systolic"][2]["fill"]
+        assert zone["title"] == "САД: 130–139, ДАД: ≥ 90"
+        assert row_zone(154, 84)["title"] == "САД: ≥ 140", "ДАД в норме — в title не пишется"
+
+    def test_legend_two_chips(self) -> None:
+        from web.cabinet.chart_zones import CHART_ZONES, table_legend
+
+        assert table_legend() == [
+            {"fill": CHART_ZONES["systolic"][1]["fill"], "label": "САД 130–139 · ДАД 85–89"},
+            {"fill": CHART_ZONES["systolic"][2]["fill"], "label": "САД ≥ 140 · ДАД ≥ 90"},
+        ]
+
+    def test_band_index_requires_open_top(self) -> None:
+        from web.cabinet.chart_zones import band_index
+
+        with pytest.raises(ValueError):
+            band_index(200, [{"to": 130}])
+
+
+class TestHistoryZonesRender:
+    def _insert(self, settings: Settings, user_id: int, *pairs: tuple[int, int]) -> None:
+        con = sqlite3.connect(settings.db_path)
+        base = datetime.now(ZoneInfo("UTC")).replace(microsecond=0) - timedelta(hours=1)
+        for index, (systolic, diastolic) in enumerate(pairs):
+            con.execute(
+                "INSERT INTO measurements (user_id, timestamp, systolic, diastolic)"
+                " VALUES (?, ?, ?, ?)",
+                (user_id, (base - timedelta(minutes=index)).strftime("%Y-%m-%d %H:%M:%S"),
+                 systolic, diastolic),
+            )
+        con.commit()
+        con.close()
+
+    def test_rows_highlighted_by_worst_zone(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        self._insert(settings, user_id, (154, 84), (135, 80), (120, 70))
+        html = client.get("/?days=7#history").text
+        assert html.count('class="zone-row zone-row-high"') == 1
+        assert html.count('class="zone-row zone-row-elevated"') == 1
+        assert 'title="САД: ≥ 140"' in html
+        assert 'style="--zone-fill: rgba(192,57,43,0.12)"' in html
+        rows = html[html.index("<tbody>", html.index('id="history"')):]
+        assert rows.count("<tr>") == 1, "строка в норме — без подсветки"
+
+    def test_legend_above_table(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        self._insert(settings, user_id, (120, 70))
+        html = client.get("/?days=7#history").text
+        history = html[html.index('id="history"'):]
+        legend = history.index('class="zone-legend history-zone-legend"')
+        assert legend < history.index('<table class="stacked-table">')
+        assert "САД 130–139 · ДАД 85–89" in history and "САД ≥ 140 · ДАД ≥ 90" in history
+
+    def test_no_legend_without_records(self, app_client) -> None:
+        client, _ = app_client
+        _register(client)
+        html = client.get("/?days=7#history").text
+        assert "history-zone-legend" not in html
+
+    def test_css_colors_row_and_card(self, app_client) -> None:
+        """Одно правило — фон строки и строки-карточки на узких экранах (Z6 А)."""
+        client, _ = app_client
+        css = client.get("/static/style.css").text
+        assert ".stacked-table tr.zone-row {\n  background: var(--zone-fill);" in css
