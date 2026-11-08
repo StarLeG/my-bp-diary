@@ -1119,3 +1119,12 @@ class TestHistoryZonesRender:
         # Окончания строк зависят от checkout (CRLF на Windows) — сравниваем без них.
         css = client.get("/static/style.css").text.replace("\r\n", "\n")
         assert ".stacked-table tr.zone-row {\n  background: var(--zone-fill);" in css
+
+
+class TestChartAxisLabels:
+    def test_two_line_ticks_with_padding(self, app_client) -> None:
+        """Подписи оси X «дд.мм ЧЧ:ММ» — в две строки, с отступом автопропуска (30 дней не наезжают)."""
+        client, _ = app_client
+        script = client.get("/static/bp-charts.js").text
+        assert "autoSkipPadding: 12" in script
+        assert 'return String(this.getLabelForValue(value)).split(" ");' in script

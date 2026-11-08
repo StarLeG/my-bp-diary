@@ -106,7 +106,17 @@
         },
         scales: {
           y: { suggestedMin: panel.min, suggestedMax: panel.max },
-          x: { ticks: { maxRotation: 0, maxTicksLimit: isNarrow ? 4 : 6 } }
+          x: {
+            ticks: {
+              maxRotation: 0,
+              autoSkipPadding: 12,
+              maxTicksLimit: isNarrow ? 4 : 6,
+              // «дд.мм ЧЧ:ММ» — в две строки: на 30 днях подписи не наезжают друг на друга
+              callback: function (value) {
+                return String(this.getLabelForValue(value)).split(" ");
+              }
+            }
+          }
         }
       }
     });
