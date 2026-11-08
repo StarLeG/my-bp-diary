@@ -412,6 +412,21 @@ class TestBuildReportPdf:
     def test_summary_text_empty(self) -> None:
         assert doctor_service._summary_text([]) == "Записей нет."
 
+    @pytest.mark.parametrize(
+        ("feeling", "expected"),
+        [
+            ("headache", "головная боль"),
+            ("weakness", "слабость"),
+            ("normal", "норма"),
+            ("other", "другое"),
+            (None, "—"),
+            ("", "—"),
+        ],
+    )
+    def test_feeling_in_russian(self, feeling, expected) -> None:
+        """Самочувствие в PDF — как в боте, а не ключ модели (`weakness`)."""
+        assert doctor_service._report_feeling(feeling) == expected
+
 
 # ─────────────────────────── Конкурентность (§7.2) ───────────────────────────
 

@@ -23,6 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot import texts
 from bot.models import Doctor, DoctorNote, DoctorPatient, Measurement, User
 
 #: Проверка формата e-mail при добавлении врача (как в §16.2 для ЛК).
@@ -39,6 +40,13 @@ _REPORT_COLUMNS = ("Дата", "Сист.", "Диаст.", "Пульс", "Лек
 
 #: Отметка приёма лекарства в отчёте PDF.
 _REPORT_MED_LABELS = {True: "да", False: "нет", None: "—"}
+
+
+def _report_feeling(feeling: Optional[str]) -> str:
+    """Самочувствие в таблице отчёта — по-русски, как в боте («головная боль»), не ключ модели."""
+    if not feeling:
+        return "—"
+    return texts.FEELING_LABELS.get(feeling, feeling)[:20]
 
 
 def valid_email(email: str) -> bool:
@@ -285,7 +293,7 @@ def _report_table(pdf: FPDF, measurements: Sequence[Measurement], tz_name: str) 
             str(m.diastolic),
             str(m.pulse) if m.pulse is not None else "—",
             _REPORT_MED_LABELS.get(m.medication_taken, "—"),
-            (m.feeling or "—")[:20],
+            _report_feeling(m.feeling),
         )
         for value, width in zip(values, widths):
             pdf.cell(width, 6, text=value, border=1)
