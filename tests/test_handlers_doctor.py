@@ -503,3 +503,194 @@ class TestMakeDoctorLink:
         )
         url = doctor.make_doctor_link(settings, 7, 42)
         assert url.startswith(f"{CABINET_URL}/doctor?token=")
+
+
+# ─────────────────── Письма врачу (SMTP, §21, релиз 0.4.11) ───────────────────
+
+
+def smtp_on(**env) -> dict:
+    """Кабинет и почта настроены."""
+    return cabinet_on(
+        smtp_host="smtp.example.org",
+        smtp_from="Дневник гипертоника <noreply@electroman.by>",
+        **env,
+    )
+
+
+@pytest.fixture
+def sent(monkeypatch):
+    """Подменить отправку: письма не уходят, а копятся в списке."""
+    from bot.services import mailer
+
+    class Outbox(list):
+        """Отправленные письма + доступ к подменённой отправке (`fake`)."""
+
+    outbox = Outbox()
+
+    def fake_send(settings, message) -> None:
+        if getattr(fake_send, "error", None) is not None:
+            raise fake_send.error
+        outbox.append(message)
+
+    monkeypatch.setattr(mailer, "send_message_sync", fake_send)
+    outbox.fake = fake_send  # type: ignore[attr-defined]
+    return outbox
+
+
+async def _email_state() -> FSMContext:
+    state = make_state()
+    await state.set_state(doctor.DoctorAccess.email)
+    return state
+
+
+class TestDoctorEmailSending:
+    async def test_prompt_mentions_invitation(self, answer, state, with_settings, session, user) -> None:
+        with_settings(**smtp_on())
+        await call(doctor.cmd_doctor, message=make_message(), state=state, session=session)
+        assert answer.call_args.args[0] == texts.DOCTOR_NO_LINK_EMAIL == (
+            "Врач пока не добавлен.\nОтправьте e-mail врача сообщением — отправлю ему приглашение."
+        )
+
+    async def test_invite_sent_same_link_as_forward(
+        self, answer, with_settings, session, user, sent
+    ) -> None:
+        with_settings(**smtp_on())
+        await call(
+            doctor.msg_doctor_email,
+            message=make_message("Doc@Example.ORG"),
+            state=await _email_state(),
+            session=session,
+        )
+        text = answer.call_args.args[0]
+        url = extract_url(text)
+        assert text == texts.DOCTOR_INVITE_SENT.format(email="doc@example.org", name="Тест", url=url)
+        assert text.startswith("Приглашение отправлено на doc@example.org.\nЕсли письмо не дойдёт")
+        assert answer.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW
+        [message] = sent
+        assert message["To"] == "doc@example.org"
+        assert url in message.get_content()  # письмо и пересылка — один токен
+        assert "Пациент Тест открыл вам доступ" in message.get_content()
+
+    async def test_invite_failed(self, answer, with_settings, session, user, sent) -> None:
+        import smtplib
+
+        with_settings(**smtp_on())
+        sent.fake.error = smtplib.SMTPServerDisconnected()
+        await call(
+            doctor.msg_doctor_email,
+            message=make_message("doc@example.org"),
+            state=await _email_state(),
+            session=session,
+        )
+        text = answer.call_args.args[0]
+        assert text == texts.DOCTOR_INVITE_FAILED.format(name="Тест", url=extract_url(text))
+
+    async def test_invite_limited(self, answer, with_settings, session, user, sent) -> None:
+        """Повторное добавление того же врача в течение часа — письмо не уходит."""
+        with_settings(**smtp_on())
+        for _ in range(2):
+            await call(
+                doctor.msg_doctor_email,
+                message=make_message("doc@example.org"),
+                state=await _email_state(),
+                session=session,
+            )
+        text = answer.call_args.args[0]
+        assert text == texts.DOCTOR_INVITE_LIMIT.format(name="Тест", url=extract_url(text))
+        assert len(sent) == 1
+
+    async def test_readd_after_revoke_sends_again(
+        self, answer, with_settings, session, user, sent
+    ) -> None:
+        """E5-3: повторное добавление после отзыва — новое письмо (вне часового окна)."""
+        from bot.models import InviteLog
+        from bot.services.measurements import utcnow
+        from datetime import timedelta
+
+        with_settings(**smtp_on())
+        await make_link(session, status="revoked")
+        session.add(InviteLog(user_id=1, channel="email", target="doc@example.org",
+                              kind="invite", ok=True, created_at=utcnow() - timedelta(hours=2)))
+        await session.commit()
+        await call(
+            doctor.msg_doctor_email,
+            message=make_message("doc@example.org"),
+            state=await _email_state(),
+            session=session,
+        )
+        assert answer.call_args.args[0].startswith("Приглашение отправлено на doc@example.org.")
+        link = await doctor_service.link_for_pair(session, 1, 1)
+        assert link is not None and link.status == "pending"
+        assert len(sent) == 1
+
+    async def test_report_emailed(self, edit, cb_answer, with_settings, session, user, sent) -> None:
+        with_settings(**smtp_on())
+        await make_link(session, status="active")
+        await call(
+            doctor.cb_send_report,
+            callback=make_callback("menu:report"),
+            state=make_state(),
+            session=session,
+        )
+        text = edit.call_args.args[0]
+        url = extract_url(text)
+        assert text == texts.DOCTOR_REPORT_EMAILED.format(email="doc@example.org", url=url)
+        assert url in sent[0].get_content()
+
+    async def test_report_email_failed_or_limited(
+        self, edit, cb_answer, with_settings, session, user, sent
+    ) -> None:
+        with_settings(**smtp_on())
+        await make_link(session, status="active")
+        for _ in range(2):  # второе — сверх лимита «1 в час на адрес»
+            await call(
+                doctor.cb_send_report,
+                callback=make_callback("menu:report"),
+                state=make_state(),
+                session=session,
+            )
+        text = edit.call_args.args[0]
+        assert text == texts.DOCTOR_REPORT_EMAIL_FAILED.format(url=extract_url(text))
+        assert len(sent) == 1
+
+    async def test_report_without_smtp_unchanged(
+        self, edit, cb_answer, with_settings, session, user, sent
+    ) -> None:
+        with_settings(**cabinet_on())
+        await make_link(session, status="active")
+        await call(
+            doctor.cb_send_report,
+            callback=make_callback("menu:report"),
+            state=make_state(),
+            session=session,
+        )
+        text = edit.call_args.args[0]
+        assert text == texts.DOCTOR_REPORT_LINK.format(url=extract_url(text))
+        assert sent == []
+
+
+def test_email_texts_verbatim() -> None:
+    """Тексты §21 дословно."""
+    assert texts.DOCTOR_INVITE_FAILED.format(name="И", url="U") == (
+        "Не удалось отправить письмо. Перешлите врачу сообщение ниже:\n\n"
+        "Пациент И предоставил вам доступ.\nU"
+    )
+    assert texts.DOCTOR_INVITE_LIMIT.format(name="И", url="U") == (
+        "Письмо уже отправлено недавно. Перешлите врачу сообщение ниже:\n\n"
+        "Пациент И предоставил вам доступ.\nU"
+    )
+    assert texts.DOCTOR_REPORT_EMAILED.format(email="e", url="U") == (
+        "Ссылка отправлена врачу на e. Можно также переслать её: U"
+    )
+    assert texts.DOCTOR_REPORT_EMAIL_FAILED.format(url="U") == (
+        "Не удалось отправить письмо. Перешлите ссылку врачу сами: U"
+    )
+
+
+async def test_report_text_doctor_without_email() -> None:
+    """Врач без e-mail (появится с Telegram-приглашением, §4.8) — ссылка для пересылки."""
+    text = await doctor._report_text(
+        None, Settings(bot_token="123:TEST"), 1, DbDoctor(name="Врач", email=None),
+        make_callback("menu:report"), "https://x/doctor?token=t",
+    )
+    assert text == texts.DOCTOR_REPORT_LINK.format(url="https://x/doctor?token=t")

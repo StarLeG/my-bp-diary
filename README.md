@@ -64,6 +64,7 @@ uv run python -m bot
 | `LOG_LEVEL` | уровень логирования |
 | `WEB_SECRET_KEY` | секрет личного кабинета (сессии и magic link) |
 | `CABINET_URL` | base URL личного кабинета; пусто = кабинет не развёрнут |
+| `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | почта для писем врачу со ссылкой доступа (SPEC §21); пустой `SMTP_HOST` = письма не отправляются, ссылка — пациенту для пересылки |
 
 ## Запуск в Docker
 

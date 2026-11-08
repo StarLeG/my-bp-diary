@@ -125,6 +125,33 @@ class Settings(BaseModel):
     s3_secret_access_key: str = ""
     """Secret key S3."""
 
+    smtp_host: str = ""
+    """SMTP-сервер писем врачу (§21). Пусто = письма не отправляются."""
+
+    smtp_port: int = 465
+    """Порт SMTP: 465 (SSL) или 587 (STARTTLS)."""
+
+    smtp_security: str = "ssl"
+    """Защита соединения: `ssl` или `starttls`."""
+
+    smtp_user: str = ""
+    """Логин SMTP."""
+
+    smtp_password: str = ""
+    """Пароль SMTP; не логируется."""
+
+    smtp_from: str = ""
+    """Отправитель: `Дневник гипертоника <noreply@electroman.by>`."""
+
+    @field_validator("smtp_security")
+    @classmethod
+    def _validate_smtp_security(cls, value: str) -> str:
+        """Режим SMTP — `ssl` или `starttls` (регистр не важен)."""
+        mode = value.strip().lower() or "ssl"
+        if mode not in ("ssl", "starttls"):
+            raise ValueError("SMTP_SECURITY: ssl или starttls")
+        return mode
+
     @field_validator("bot_token")
     @classmethod
     def _validate_token(cls, value: str) -> str:
@@ -203,6 +230,11 @@ class Settings(BaseModel):
         return bool(self.web_secret_key.strip() and self.cabinet_url.strip())
 
     @property
+    def smtp_configured(self) -> bool:
+        """Письма врачу включены: заданы сервер и отправитель (§3, §21)."""
+        return bool(self.smtp_host.strip() and self.smtp_from.strip())
+
+    @property
     def s3_configured(self) -> bool:
         """Off-site в S3 включён: заданы endpoint, бакет и оба ключа (§20)."""
         return all(
@@ -241,4 +273,10 @@ def get_settings() -> Settings:
         s3_bucket=os.getenv("S3_BUCKET", ""),
         s3_access_key_id=os.getenv("S3_ACCESS_KEY_ID", ""),
         s3_secret_access_key=os.getenv("S3_SECRET_ACCESS_KEY", ""),
+        smtp_host=os.getenv("SMTP_HOST", ""),
+        smtp_port=int(os.getenv("SMTP_PORT", "") or 465),
+        smtp_security=os.getenv("SMTP_SECURITY", "ssl"),
+        smtp_user=os.getenv("SMTP_USER", ""),
+        smtp_password=os.getenv("SMTP_PASSWORD", ""),
+        smtp_from=os.getenv("SMTP_FROM", ""),
     )

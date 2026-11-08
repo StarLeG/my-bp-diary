@@ -1,9 +1,10 @@
 """Хендлеры «Мой врач» и «Отправить отчет» (SPEC.md, §21).
 
 Пациент добавляет врача по e-mail (FSM `DoctorAccess.email`), бот создаёт
-запись в `doctors` / `doctor_patients` (статус `pending`) и отдаёт ссылку,
-которую пациент пересылает врачу. Открытие ссылки врачом активирует доступ
-(`status='active'`). Пациент может отозвать доступ в любой момент
+запись в `doctors` / `doctor_patients` (статус `pending`), отправляет врачу
+письмо со ссылкой (если настроен SMTP, `services/mailer`) и отдаёт ту же
+ссылку пациенту для пересылки. Ссылка доступа — 72 часа, одноразовая; её
+открытие врачом активирует доступ (`status='active'`). Пациент может отозвать доступ в любой момент
 (`status='revoked'`).
 
 Ссылки и контакты берутся только из конфига (`CABINET_URL`, `WEB_SECRET_KEY`):
@@ -32,13 +33,11 @@ from bot.services.doctor import (
     revoke_access,
     valid_email,
 )
+from bot.services import mailer
 from bot.services.measurements import get_or_create_user
 
 #: Соль подписи ссылки для врача (как `CABINET_SALT` в support.py, §21).
 DOCTOR_SALT = "doctor-login"
-
-#: Время жизни ссылки для врача, минут (§21: magic link, 15 минут).
-DOCTOR_TOKEN_MAX_AGE = 15 * 60
 
 router = Router(name="doctor")
 
@@ -52,9 +51,9 @@ class DoctorAccess(StatesGroup):
 def make_doctor_link(settings: Settings, doctor_id: int, patient_user_id: int) -> str:
     """Подписать magic link для врача (§21).
 
-    Токен stateless (`itsdangerous.URLSafeTimedSerializer` + `WEB_SECRET_KEY`),
-    живёт `DOCTOR_TOKEN_MAX_AGE` секунд; проверяет его веб-часть
-    (`web/cabinet/doctor_auth.py::DoctorMagicLink`). Payload — `did` (врач),
+    Токен подписан `itsdangerous.URLSafeTimedSerializer` + `WEB_SECRET_KEY`;
+    срок (72 часа, `DOCTOR_ACCESS_MAX_AGE`) и одноразовость проверяет
+    веб-часть (`web/cabinet/doctor_auth.py::DoctorMagicLink`, `used_tokens`). Payload — `did` (врач),
     `pid` (пациент, `users.id`) и `jti` для одноразовости. Base URL кабинета —
     из переменной окружения `CABINET_URL` (пустая = кабинет не развёрнут).
     """
@@ -96,7 +95,8 @@ async def _doctor_entry(
     links = await links_for_patient(session, user.id)
     if not any(link.status != "revoked" for link, _ in links):
         await state.set_state(DoctorAccess.email)
-        return texts.DOCTOR_NO_LINK, keyboards.input_cancel_kb("set:doctor:cancel")
+        prompt = texts.DOCTOR_NO_LINK_EMAIL if settings.smtp_configured else texts.DOCTOR_NO_LINK
+        return prompt, keyboards.input_cancel_kb("set:doctor:cancel")
     return _doctor_screen(links)
 
 
@@ -144,15 +144,25 @@ async def msg_doctor_email(
     if not valid_email(email):
         await message.answer(texts.DOCTOR_EMAIL_BAD, reply_markup=markup)
         return
+    settings = get_settings()
     user = await get_or_create_user(session, message.from_user.id)  # type: ignore[union-attr]
     doctor, _ = await find_or_create_doctor(session, email)
     await link_patient(session, doctor.id, user.id)
+    await session.commit()
     await state.clear()
-    link = make_doctor_link(get_settings(), doctor.id, user.id)
+    link = make_doctor_link(settings, doctor.id, user.id)
+    name = message.from_user.first_name  # type: ignore[union-attr]
+    result = await mailer.send_doctor_link(
+        session, settings, user_id=user.id, email=email, name=name, url=link, kind="invite"
+    )
+    template = {
+        mailer.SendResult.SENT: texts.DOCTOR_INVITE_SENT,
+        mailer.SendResult.FAILED: texts.DOCTOR_INVITE_FAILED,
+        mailer.SendResult.LIMITED: texts.DOCTOR_INVITE_LIMIT,
+        mailer.SendResult.DISABLED: texts.DOCTOR_INVITE_CREATED,
+    }[result]
     await message.answer(
-        texts.DOCTOR_INVITE_CREATED.format(
-            name=message.from_user.first_name, url=link  # type: ignore[union-attr]
-        ),
+        template.format(email=email, name=name, url=link),
         reply_markup=keyboards.back_to_menu(),
         link_preview_options=keyboards.NO_LINK_PREVIEW,
     )
@@ -197,6 +207,37 @@ async def cb_doctor_revoke(
 # ─────────────────────────── Отправить отчет ───────────────────────────
 
 
+async def _report_text(
+    session: AsyncSession,
+    settings: Settings,
+    user_id: int,
+    doctor: Doctor,
+    callback: CallbackQuery,
+    link: str,
+) -> str:
+    """Текст «Отправить отчет»: письмо врачу (если есть e-mail и SMTP) + ссылка (§21).
+
+    Без почты — прежнее сообщение для пересылки (§21, п.6).
+    """
+    if not doctor.email:
+        return texts.DOCTOR_REPORT_LINK.format(url=link)
+    await session.commit()  # транзакция закрыта до сетевой отправки
+    result = await mailer.send_doctor_link(
+        session,
+        settings,
+        user_id=user_id,
+        email=doctor.email,
+        name=callback.from_user.first_name,
+        url=link,
+        kind="report",
+    )
+    if result is mailer.SendResult.SENT:
+        return texts.DOCTOR_REPORT_EMAILED.format(email=doctor.email, url=link)
+    if result is mailer.SendResult.DISABLED:
+        return texts.DOCTOR_REPORT_LINK.format(url=link)
+    return texts.DOCTOR_REPORT_EMAIL_FAILED.format(url=link)
+
+
 @router.callback_query(F.data == "menu:report")
 async def cb_send_report(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
@@ -222,7 +263,7 @@ async def cb_send_report(
         else:
             _, doctor = active[0]
             link = make_doctor_link(settings, doctor.id, user.id)
-            text = texts.DOCTOR_REPORT_LINK.format(url=link)
+            text = await _report_text(session, settings, user.id, doctor, callback, link)
             markup = keyboards.back_to_menu()
     await callback.message.edit_text(  # type: ignore[union-attr]
         text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
