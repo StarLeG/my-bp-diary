@@ -1,0 +1,63 @@
+# Скриншоты для лендинга
+
+Секция «Как это выглядит» на лендинге (SPEC.md, §16.1). 16 кадров: 6 — бот в Telegram Web, 6 — личный кабинет (из них 1 мобильный), 4 — кабинет врача (из них 1 мобильный). Решения по съёмке — `doc/LANDING-SCREENS-QUESTIONS.md`.
+
+Скриншоты бота — **настоящий Telegram Web** (web.telegram.org/k) под аккаунтом, вошедшим по QR, а не симуляция. В кадр попадает только область диалога. Счётчик непрочитанных других чатов скрыт стилем. Старые сообщения на время кадра скрываются через `display: none`, история чата не удаляется.
+
+## Безопасность
+
+- Только локальный стенд и только БД, в имени которой есть `test-stand` (`qa.seed.ensure_stand_db`). Прод и `data/bot.sqlite3` не затрагиваются.
+- Данные вымышленные: пациенты `@example.org`, врач `smirnova@example.org`.
+- Бот запускается с **тестовым** токеном из `.env` (`QA_BOT_USERNAME`). Перед запуском проверьте, что это не прод-бот.
+- В `qa/reports/screens/`, которая не попадает в git, лежат:
+  - сессия Telegram Web — `tg_state.json`;
+  - одноразовый `WEB_SECRET_KEY` стенда — `.web_secret`;
+  - сырые кадры.
+
+  Сессию Telegram Web после съёмки можно завершить в Telegram: «Настройки → Устройства».
+- В кабинет входят сессионной cookie. Паролей нет ни в коде, ни в БД: в демо-БД лежит хеш случайного одноразового секрета.
+
+## Порядок
+
+```bash
+# 0. Ключ стенда (один раз)
+python -c "import secrets; open('qa/reports/screens/.web_secret','w').write(secrets.token_urlsafe(32))"
+
+# 1. Демо-БД; --bot-tg-id — telegram id аккаунта Telegram Web,
+#    --remind-in — через сколько минут придёт вечернее напоминание бота
+uv run python -m qa.screenshots.demo_data --db data/screens-test-stand.sqlite3 \
+    --bot-tg-id <id> --remind-in 2
+
+# 2. Вход в Telegram Web по QR (один раз; окно браузера, до 10 минут)
+uv run --group qa python -m qa.screenshots.shot_landing tg-login
+
+# 3. Тестовый бот на демо-БД (отдельный терминал)
+DB_PATH=data/screens-test-stand.sqlite3 ADMIN_TELEGRAM_IDS= \
+    BACKUP_DIR=qa/reports/screens/backups uv run python -m bot
+
+# 4. Кадры бота: сначала ждёт напоминание, потом проходит сценарий
+QA_BOT_USERNAME=<тестовый бот> uv run --group qa python -m qa.screenshots.shot_landing bot
+
+# 5. Остановить бота, пересобрать демо-БД (шаг 1) и запустить кабинет
+DB_PATH=data/screens-test-stand.sqlite3 CABINET_URL=http://127.0.0.1:8000 \
+    WEB_SECRET_KEY="$(cat qa/reports/screens/.web_secret)" \
+    uv run uvicorn web.cabinet.app:app --port 8000
+
+# 6. Кадры кабинетов (pypdfium2 — на время запуска, для первой страницы PDF)
+WEB_SECRET_KEY="$(cat qa/reports/screens/.web_secret)" \
+    uv run --group qa --with pypdfium2 python -m qa.screenshots.shot_landing cabinet
+```
+
+Результат:
+
+- `qa/reports/screens/raw/*.png` — сырые кадры;
+- `qa/reports/screens/webp/*.webp` — ширина 1200, у мобильных кадров и кадров бота 780, качество 80.
+
+Кадры проверяют глазами. Только после этого их копируют в `web/landing/img/screens/`.
+
+## Подводные камни
+
+- **Напоминание снимается первым.** После свежей записи давления бот не присылает слотовое напоминание (SPEC §6.7).
+- **Пауза перед нажатием 1,3 с.** Антидребезг бота (`DebounceMiddleware`) отбрасывает слишком частые нажатия.
+- **Старое имя бота в шапке.** Если бота переименовали после `tg-login`, Telegram Web показывает имя из кэша. Откройте профиль бота в Telegram Web и пересохраните сессию.
+- **Пересборка демо-БД.** Импорт CSV меняет демо-БД, поэтому кадры кабинетов снимаются на свежесобранной. Кабинет держит файл БД открытым: перед пересборкой его нужно остановить.
