@@ -30,8 +30,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import UsedToken
 
-#: Соль подписи ссылки для врача — как `DOCTOR_SALT` в `bot/handlers/doctor.py`.
-DOCTOR_LOGIN_SALT = "doctor-login"
+#: Соль подписи ссылки доступа — как `DOCTOR_SALT` в `bot/handlers/doctor.py`.
+#: Сменена с «doctor-login» в 0.4.12: ссылки до 0.4.11 (15 минут, одноразовость
+#: в памяти процесса) при сроке 72 часа снова стали бы рабочими.
+DOCTOR_ACCESS_SALT = "doctor-access"
+#: Прежняя соль ссылок врача — только для теста, что старые ссылки отклоняются.
+LEGACY_DOCTOR_SALT = "doctor-login"
 
 #: Соль подписи сессионной cookie врача.
 DOCTOR_SESSION_SALT = "doctor-session"
@@ -71,7 +75,7 @@ class DoctorMagicLink:
 
     def __init__(self, secret_key: str) -> None:
         """Секрет подписи — `WEB_SECRET_KEY` из окружения."""
-        self._serializer = URLSafeTimedSerializer(secret_key, salt=DOCTOR_LOGIN_SALT)
+        self._serializer = URLSafeTimedSerializer(secret_key, salt=DOCTOR_ACCESS_SALT)
 
     def make(self, doctor_id: int, patient_user_id: int) -> str:
         """Подписать ссылку доступа врача к данным конкретного пациента."""

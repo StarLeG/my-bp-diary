@@ -36,8 +36,10 @@ from bot.services.doctor import (
 from bot.services import mailer
 from bot.services.measurements import get_or_create_user
 
-#: Соль подписи ссылки для врача (как `CABINET_SALT` в support.py, §21).
-DOCTOR_SALT = "doctor-login"
+#: Соль подписи ссылки доступа врача (§21). «doctor-access», а не прежняя
+#: «doctor-login»: ссылки до 0.4.11 (15 минут, списание в памяти) не принимаются —
+#: иначе продление срока до 72 часов «оживило» бы уже использованные.
+DOCTOR_SALT = "doctor-access"
 
 router = Router(name="doctor")
 

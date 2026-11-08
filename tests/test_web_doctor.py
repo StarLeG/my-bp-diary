@@ -177,6 +177,17 @@ class TestDoctorMagicLink:
         mocker.stopall()
         assert magic.load(token) is not None
 
+    def test_legacy_salt_is_rejected(self) -> None:
+        """Ссылки до 0.4.11 (соль «doctor-login») не принимаются: иначе уже
+        использованные 15-минутные ссылки ожили бы на 72 часа после деплоя."""
+        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.LEGACY_DOCTOR_SALT).dumps(
+            {"did": 7, "pid": 42, "jti": "j"}
+        )
+        assert doctor_auth.DoctorMagicLink(SECRET).load(token) is None
+
+    def test_bot_and_cabinet_share_salt(self) -> None:
+        assert doctor_handlers.DOCTOR_SALT == doctor_auth.DOCTOR_ACCESS_SALT == "doctor-access"
+
     def test_foreign_signature_is_rejected(self) -> None:
         token = doctor_auth.DoctorMagicLink(SECRET).make(7, 42)
         assert doctor_auth.DoctorMagicLink("other-secret").load(token) is None
@@ -188,7 +199,7 @@ class TestDoctorMagicLink:
 
     def test_non_dict_payload_is_rejected(self) -> None:
         """Payload не-dict отклоняется без ошибки."""
-        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_LOGIN_SALT).dumps(
+        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_ACCESS_SALT).dumps(
             ["did", "pid"]
         )
         assert doctor_auth.DoctorMagicLink(SECRET).load(token) is None
@@ -204,7 +215,7 @@ class TestDoctorMagicLink:
         ],
     )
     def test_invalid_payload_is_rejected(self, payload: dict) -> None:
-        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_LOGIN_SALT).dumps(
+        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_ACCESS_SALT).dumps(
             payload
         )
         assert doctor_auth.DoctorMagicLink(SECRET).load(token) is None
@@ -273,6 +284,17 @@ class TestDoctorSession:
     def test_make_verify(self) -> None:
         sessions = doctor_auth.DoctorSession(SECRET)
         assert sessions.verify(sessions.make(7)) == 7
+
+    def test_legacy_salt_is_rejected(self) -> None:
+        """Ссылки до 0.4.11 (соль «doctor-login») не принимаются: иначе уже
+        использованные 15-минутные ссылки ожили бы на 72 часа после деплоя."""
+        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.LEGACY_DOCTOR_SALT).dumps(
+            {"did": 7, "pid": 42, "jti": "j"}
+        )
+        assert doctor_auth.DoctorMagicLink(SECRET).load(token) is None
+
+    def test_bot_and_cabinet_share_salt(self) -> None:
+        assert doctor_handlers.DOCTOR_SALT == doctor_auth.DOCTOR_ACCESS_SALT == "doctor-access"
 
     def test_foreign_signature_is_rejected(self) -> None:
         token = doctor_auth.DoctorSession(SECRET).make(7)
