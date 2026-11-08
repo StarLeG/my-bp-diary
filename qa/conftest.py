@@ -32,6 +32,7 @@ import urllib.request
 from typing import Callable, Iterator, Optional
 
 import pytest
+import pytest_asyncio
 
 # Импорты playwright/telethon — внутри фикстур (лениво): юнит-окружению
 # тяжёлые QA-зависимости не нужны, а аннотации типов отложены (PEP 563).
@@ -820,3 +821,120 @@ def load_db(tmp_path, load_template) -> str:
         destination.close()
         source.close()
     return str(target)
+
+
+# ─────────────── Мок Telegram и виртуальные часы (SPEC §22, уровни 3 и 8) ───────────────
+
+
+class VirtualClock:
+    """Монотонные часы для debounce/throttle: время идёт только по `tick()`.
+
+    Подставляется в `_clock` middleware собранного приложения: прод-код не
+    меняется, а тест сам решает, «прошло» ли окно (без `sleep`).
+    """
+
+    def __init__(self, start: float = 1_000.0) -> None:
+        self.now = start
+
+    def __call__(self) -> float:
+        return self.now
+
+    def tick(self, seconds: float = 2.0) -> None:
+        """Сдвинуть время вперёд (по умолчанию — больше окон debounce и throttle)."""
+        self.now += seconds
+
+
+def make_fake_telegram():
+    """Сетевая сессия aiogram без сети: запросы пишутся в `calls`, ответы — фейковые.
+
+    Методы, возвращающие `bool`, получают `True`; остальные — `Message` в том
+    же чате (с текстом запроса), чтобы хендлеры могли редактировать «свои»
+    сообщения. Исключение для запроса настраивается через `fail_for(chat_id, exc)`.
+    """
+    import itertools
+    from datetime import datetime, timezone
+
+    from aiogram.client.session.base import BaseSession
+    from aiogram.types import Chat, Message
+
+    class FakeTelegram(BaseSession):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls: list = []
+            self._ids = itertools.count(10_000)
+            self._failures: dict[int, BaseException] = {}
+
+        def fail_for(self, chat_id: int, exc: BaseException) -> None:
+            """Запросы в этот чат будут падать с `exc` (например, бот заблокирован)."""
+            self._failures[chat_id] = exc
+
+        def for_chat(self, chat_id: int) -> list:
+            """Запросы бота в чат `chat_id` по порядку."""
+            return [call for call in self.calls if getattr(call, "chat_id", None) == chat_id]
+
+        async def make_request(self, bot, method, timeout=None):  # type: ignore[override]
+            self.calls.append(method)
+            chat_id = getattr(method, "chat_id", None)
+            if chat_id in self._failures:
+                raise self._failures[chat_id]
+            if method.__returning__ is bool:
+                return True
+            message_id = getattr(method, "message_id", None) or next(self._ids)
+            return Message(
+                message_id=message_id,
+                date=datetime.now(timezone.utc),
+                chat=Chat(id=int(chat_id or 0), type="private"),
+                text=getattr(method, "text", None),
+            )
+
+        async def stream_content(self, *args, **kwargs):  # type: ignore[override]
+            raise NotImplementedError("скачивание файлов в нагрузке не используется")
+            yield b""  # pragma: no cover — делает функцию генератором
+
+        async def close(self) -> None:  # type: ignore[override]
+            return None
+
+    return FakeTelegram()
+
+
+@pytest.fixture
+def virtual_clock() -> VirtualClock:
+    """Виртуальные часы middleware (debounce/throttle) для одного теста."""
+    return VirtualClock()
+
+
+@pytest_asyncio.fixture
+async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
+    """Приложение бота (`build_app`) на копии стенда: мок Telegram, часы, планировщик.
+
+    Сеть не используется: сессия `Bot` — `make_fake_telegram()`; планировщик —
+    `AsyncIOScheduler` с памятью вместо SQLite-jobstore (не запускается: job'ы
+    повторов замера только регистрируются). Debounce и throttle работают на
+    `virtual_clock`. Возвращает `App`; `app.bot.session` — мок с `calls`.
+    """
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from bot.config import Settings
+    from bot.main import build_app
+    from bot.middlewares import DebounceMiddleware, ThrottleMiddleware
+
+    settings = Settings(
+        bot_token=f"123456:{'A' * 35}",  # формат токена, а не настоящий токен
+        db_path=load_db,
+        backup_dir=str(tmp_path / "backups"),
+        backup_encryption_key="load-test-key",
+    )
+    scheduler = AsyncIOScheduler(timezone="UTC")
+    app = build_app(settings, scheduler=scheduler)
+    app.bot.session = make_fake_telegram()
+    replaced = 0
+    for middleware in app.dp.callback_query.outer_middleware:
+        if isinstance(middleware, (DebounceMiddleware, ThrottleMiddleware)):
+            middleware._clock = virtual_clock  # часы экземпляра; прод-код не меняется
+            middleware._last_cleanup = virtual_clock()
+            replaced += 1
+    assert replaced == 2, "в приложении нет debounce/throttle — проверьте build_app"
+    try:
+        yield app
+    finally:
+        await app.engine.dispose()
