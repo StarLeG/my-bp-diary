@@ -129,6 +129,12 @@ async def get_or_create_user(
 
     При конкурентном создании (два параллельных /start) проигравший гонку
     получает уже существующую строку: IntegrityError → повторный SELECT.
+
+    Созданная строка коммитится сразу (§7.2, U2): вызывающие хендлеры дальше
+    ждут asyncio-локи (дедуп сохранений, отметки приёмов), и незакоммиченная
+    вставка держала бы запись SQLite во время ожидания — взаимоблокировка с
+    держателем лока. Создание пользователя идемпотентно, ранний коммит его не
+    ломает.
     """
     user = (
         await session.execute(select(User).where(User.telegram_id == telegram_id))
@@ -138,7 +144,7 @@ async def get_or_create_user(
     user = User(telegram_id=telegram_id, timezone=default_timezone)
     session.add(user)
     try:
-        await session.flush()
+        await session.commit()
     except IntegrityError:
         await session.rollback()
         user = (

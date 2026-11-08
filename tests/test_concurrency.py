@@ -711,6 +711,55 @@ class TestMedsDoneLockOrder:
         assert (logs, links) == (1, 1), "журнал и связь — в одной транзакции"
 
 
+class TestGetOrCreateReleasesWrite:
+    """`get_or_create_user` не оставляет открытой запись SQLite (U2, §7.2).
+
+    Хендлеры вызывают его перед операциями под asyncio-локом (дедуп
+    сохранений, отметки приёмов). Если созданная строка `users` осталась бы
+    незакоммиченной, сессия ждала бы лок, держа запись SQLite, — тот же
+    шаблон взаимоблокировки, что в «Готово» мультивыбора (T1). Проверка
+    детерминирована: сессия ещё открыта, а постороннее соединение обязано
+    сразу получить блокировку записи (`BEGIN IMMEDIATE`, без ожидания).
+    """
+
+    @staticmethod
+    def _can_take_write_lock(db_path: str) -> bool:
+        import sqlite3
+
+        con = sqlite3.connect(db_path, timeout=0.2)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            con.rollback()
+            return True
+        except sqlite3.OperationalError:
+            return False
+        finally:
+            con.close()
+
+    async def test_created_user_is_committed(self, engine, session_factory) -> None:
+        db_path = engine.url.database
+        async with session_factory() as session:
+            user = await measurements_service.get_or_create_user(session, 333_333)
+            assert user.id is not None
+            assert self._can_take_write_lock(db_path), (
+                "после создания пользователя сессия держит запись SQLite"
+            )
+        async with session_factory() as session:
+            count_users = (
+                await session.execute(
+                    select(func.count()).select_from(DbUser).where(DbUser.telegram_id == 333_333)
+                )
+            ).scalar_one()
+        assert count_users == 1, "созданный пользователь сохранён и без commit вызывающего"
+
+    async def test_existing_user_takes_no_write(self, engine, session_factory, user) -> None:
+        db_path = engine.url.database
+        async with session_factory() as session:
+            found = await measurements_service.get_or_create_user(session, TG_ID)
+            assert found.id == user.id
+            assert self._can_take_write_lock(db_path)
+
+
 class TestParallelStart:
     """Параллельный /start — ровно одна строка users."""
 
