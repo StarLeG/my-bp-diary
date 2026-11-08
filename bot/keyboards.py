@@ -25,6 +25,7 @@ CALLBACK_DATA_LIMIT = 64
 # d:     дневник
 # stats: статистика
 # csv:   экспорт CSV
+# pdf:   экспорт PDF (§10.1)
 # set:   настройки
 # med:   лекарства (add, edit, edit:{id}, del, del:{id}, dose:*, dose:same,
 #        slot:*, slots:done, name:same, cancel)
@@ -403,9 +404,10 @@ def stats_period_kb() -> InlineKeyboardMarkup:
 
 
 def stats_result_kb() -> InlineKeyboardMarkup:
-    """Под сводкой: экспорт CSV и «Назад»."""
+    """Под сводкой: экспорт CSV, экспорт PDF и «Назад»."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_CSV, callback_data="stats:csv"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_PDF, callback_data="stats:pdf"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="stats:periods"))
     return builder.as_markup()
 
@@ -416,6 +418,16 @@ def csv_period_kb() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text=texts.BTN_7_DAYS, callback_data="csv:7"))
     builder.row(InlineKeyboardButton(text=texts.BTN_30_DAYS, callback_data="csv:30"))
     builder.row(InlineKeyboardButton(text=texts.BTN_ALL_TIME, callback_data="csv:all"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def pdf_period_kb() -> InlineKeyboardMarkup:
+    """Период экспорта PDF: 7 дней / 30 дней / всё время (§10.1)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_7_DAYS, callback_data="pdf:7"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_30_DAYS, callback_data="pdf:30"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_ALL_TIME, callback_data="pdf:all"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
 
@@ -435,6 +447,7 @@ def settings_kb() -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=texts.BTN_ARCHIVE, callback_data="set:archive")
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_CSV, callback_data="set:csv"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_PDF, callback_data="set:pdf"))
     builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()

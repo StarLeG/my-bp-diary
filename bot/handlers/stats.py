@@ -1,4 +1,4 @@
-"""Хендлеры статистики и экспорта CSV (SPEC.md, §6.5 и §10).
+"""Хендлеры статистики, экспорта CSV и PDF (SPEC.md, §6.5, §10 и §10.1).
 
 Период кнопками «7 дней» / «30 дней» → текстовая сводка (`fmt_stats`) +
 футер «Поддержать» (≥ 3 записей и не чаще раза в сутки, при показе
@@ -6,9 +6,15 @@
 (7 / 30 / всё время) → два файла документами: измерения и приёмы лекарств
 (`csv_export`, лимит «всё время» — 5000 записей). Сообщение выбора периода
 редактируется, файлы отправляются новыми сообщениями.
+
+«Экспорт PDF» → период (7 / 30 / всё время) → один PDF-отчёт (`pdf_report`):
+на время генерации сообщение выбора периода становится «Готовлю отчёт…»,
+после отправки файла — снова экраном выбора периода. Пока отчёт пользователя
+готовится, повторные нажатия `pdf:*` новую выгрузку не запускают (§7.2).
 """
 from __future__ import annotations
 
+import asyncio
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -21,6 +27,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import keyboards, texts
 from bot.models import Measurement, User
 from bot.services import csv_export
+from bot.services import pdf_report
 from bot.services import measurements as measurements_service
 from bot.services import stats as stats_service
 
@@ -193,3 +200,70 @@ async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
         caption=texts.CSV_FILE_CAPTION,
     )
     await callback.answer()
+
+
+# ─────────────────────────── Экспорт PDF ───────────────────────────
+
+#: Пользователи, чей PDF-отчёт сейчас готовится: двойное нажатие — одна выгрузка.
+_pdf_in_progress: set[int] = set()
+
+
+@router.callback_query(F.data == "stats:pdf")
+async def cb_pdf_menu(callback: CallbackQuery) -> None:
+    """«Экспорт PDF» — выбор периода отчёта (§10.1)."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.CSV_ASK, reply_markup=keyboards.pdf_period_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"pdf:7", "pdf:30", "pdf:all"}))
+async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выгрузка PDF-отчёта документом (§10.1).
+
+    Данные читаются и транзакция закрывается до генерации и отправки файла;
+    PDF рисуется в thread pool (§7.2 п.7). Пустой период и лимит — текст
+    вместо файла на том же экране выбора периода.
+    """
+    tg_id = callback.from_user.id
+    if tg_id in _pdf_in_progress:
+        await callback.answer(texts.PDF_PREPARING)
+        return
+    _pdf_in_progress.add(tg_id)
+    try:
+        await callback.answer()
+        await callback.message.edit_text(texts.PDF_PREPARING)  # type: ignore[union-attr]
+        period = callback.data.split(":", 1)[1]  # type: ignore[union-attr]
+        user = await measurements_service.get_or_create_user(session, tg_id)
+        start: Optional[date] = None
+        end: Optional[date] = None
+        if period != "all":
+            end = datetime.now(ZoneInfo(user.timezone)).date()
+            start = end - timedelta(days=int(period) - 1)
+        problem: Optional[str] = None
+        try:
+            data = await pdf_report.collect_report(
+                session, user, start, end, subject=pdf_report.PATIENT_SUBJECT
+            )
+        except pdf_report.ReportEmptyError:
+            problem = texts.PDF_EMPTY
+        except pdf_report.ReportTooLargeError:
+            problem = texts.CSV_TOO_MANY
+        await session.commit()  # транзакция закрыта до генерации и отправки
+        if problem is not None:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                problem, reply_markup=keyboards.pdf_period_kb()
+            )
+            return
+        payload = await asyncio.to_thread(pdf_report.build_pdf, data)
+        await callback.message.answer_document(  # type: ignore[union-attr]
+            BufferedInputFile(payload, filename=data.file_name),
+            caption=texts.PDF_FILE_CAPTION.format(
+                date_from=f"{data.start_day:%d.%m}", date_to=f"{data.end_day:%d.%m}"
+            ),
+        )
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.CSV_ASK, reply_markup=keyboards.pdf_period_kb()
+        )
+    finally:
+        _pdf_in_progress.discard(tg_id)

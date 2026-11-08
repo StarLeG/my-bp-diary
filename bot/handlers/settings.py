@@ -6,8 +6,8 @@ Inline-меню: каждая опция редактирует сообщени
 `RemindersService` (строки `reminders` — источник истины, §6.7). Добавление и
 изменение лекарства — FSM-цепочка из трёх шагов (название → дозировка → слоты);
 изменение и удаление действуют по группе строк лекарства (§6.6).
-Экспорт CSV переиспользует экран выбора периода (кнопки `csv:*` обрабатывают
-хендлеры статистики).
+Экспорт CSV и PDF переиспользуют экраны выбора периода (кнопки `csv:*` и `pdf:*`
+обрабатывают хендлеры статистики).
 """
 from __future__ import annotations
 
@@ -459,6 +459,15 @@ async def cb_csv(callback: CallbackQuery) -> None:
     """«Экспорт CSV» — тот же экран периода, что в статистике (§6.6, §10)."""
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.CSV_ASK, reply_markup=keyboards.csv_period_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:pdf")
+async def cb_pdf(callback: CallbackQuery) -> None:
+    """«Экспорт PDF» — тот же экран периода, что в статистике (§6.6, §10.1)."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.CSV_ASK, reply_markup=keyboards.pdf_period_kb()
     )
     await callback.answer()
 

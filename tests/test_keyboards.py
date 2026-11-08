@@ -10,7 +10,7 @@ from bot import keyboards, texts
 from bot.models import Medication
 
 #: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
-KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "set", "med", "rem", "about", "adm"}
+KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "set", "med", "rem", "about", "adm"}
 
 CALLBACK_RE = re.compile(r"^(?P<area>[a-z]+):(?P<action>[a-z0-9_-]+)(?::(?P<value>.*))?$")
 
@@ -59,6 +59,7 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("stats_period_kb", keyboards.stats_period_kb()),
         ("stats_result_kb", keyboards.stats_result_kb()),
         ("csv_period_kb", keyboards.csv_period_kb()),
+        ("pdf_period_kb", keyboards.pdf_period_kb()),
         ("settings_kb", keyboards.settings_kb()),
         ("targets_kb", keyboards.targets_kb()),
         (
@@ -361,6 +362,23 @@ class TestMainMenuKeyboards:
         assert buttons["menu:cabinet"] == texts.BTN_CABINET
 
 
+class TestPdfKeyboards:
+    """Экспорт PDF (§10.1): кнопка под сводкой и экран периода."""
+
+    def test_stats_result_has_pdf(self) -> None:
+        buttons = {b.callback_data: b.text for b in callback_buttons(keyboards.stats_result_kb())}
+        assert buttons["stats:pdf"] == texts.BTN_EXPORT_PDF == "Экспорт PDF"
+        assert "stats:csv" in buttons
+
+    def test_settings_pdf_button_text(self) -> None:
+        buttons = {b.callback_data: b.text for b in callback_buttons(keyboards.settings_kb())}
+        assert buttons["set:pdf"] == texts.BTN_EXPORT_PDF
+
+    def test_pdf_period_buttons(self) -> None:
+        data = [b.callback_data for b in callback_buttons(keyboards.pdf_period_kb())]
+        assert data == ["pdf:7", "pdf:30", "pdf:all", "menu:back"]
+
+
 class TestSettingsKeyboards:
     def test_settings_menu_items(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.settings_kb())}
@@ -372,6 +390,7 @@ class TestSettingsKeyboards:
             "set:doctor",
             "set:tz",
             "set:csv",
+            "set:pdf",
             "set:delete",
             "menu:back",
         }
