@@ -907,15 +907,15 @@ def virtual_clock() -> VirtualClock:
 async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
     """Приложение бота (`build_app`) на копии стенда: мок Telegram, часы, планировщик.
 
-    Сеть не используется: сессия `Bot` — `make_fake_telegram()`; планировщик —
-    `AsyncIOScheduler` с памятью вместо SQLite-jobstore (не запускается: job'ы
-    повторов замера только регистрируются). Debounce и throttle работают на
-    `virtual_clock`. Возвращает `App`; `app.bot.session` — мок с `calls`.
+    Сеть не используется: сессия `Bot` — `make_fake_telegram()`. Планировщик —
+    прод-конфигурация (`build_scheduler`: `SQLAlchemyJobStore` в отдельном
+    файле рядом с БД, SPEC §6.7) и **запущен**: нагрузка проверяет и запись
+    job'ов повторного замера под конкуренцией (U1). Debounce и throttle
+    работают на `virtual_clock`. Возвращает `App`; `app.bot.session` — мок с
+    `calls`.
     """
-    from apscheduler.schedulers.asyncio import AsyncIOScheduler
-
     from bot.config import Settings
-    from bot.main import build_app
+    from bot.main import build_app, build_scheduler
     from bot.middlewares import DebounceMiddleware, ThrottleMiddleware
 
     settings = Settings(
@@ -924,7 +924,7 @@ async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
         backup_dir=str(tmp_path / "backups"),
         backup_encryption_key="load-test-key",
     )
-    scheduler = AsyncIOScheduler(timezone="UTC")
+    scheduler = build_scheduler(load_db)
     app = build_app(settings, scheduler=scheduler)
     app.bot.session = make_fake_telegram()
     replaced = 0
@@ -934,7 +934,9 @@ async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
             middleware._last_cleanup = virtual_clock()
             replaced += 1
     assert replaced == 2, "в приложении нет debounce/throttle — проверьте build_app"
+    scheduler.start()
     try:
         yield app
     finally:
+        scheduler.shutdown(wait=False)
         await app.engine.dispose()
