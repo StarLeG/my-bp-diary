@@ -60,6 +60,8 @@ M_PULSE = "m_pulse"
 M_BUF = "m_buf"
 #: Отмеченные приёмы мультивыбора «Какие лекарства приняли?» (список id).
 M_MED_CHECKED = "m_med_checked"
+#: Id приёмов, принятых за сегодня, — для пометки «· сегодня ✓» при перерисовке (§6.3).
+M_MED_TAKEN_TODAY = "m_med_taken_today"
 M_ID = "m_id"
 #: Id редактируемой записи («последняя» фиксируется в момент входа в правку, §6.3).
 M_EDIT_ID = "m_edit_id"
@@ -529,8 +531,9 @@ async def cb_med_yes(
     """«Да»: флаг TRUE + повтор замера через `med_remeasure_delay` (§6.3).
 
     Повтор идемпотентен по id записи; кнопка «Не надо» — отмена. При
-    настроенных лекарствах — мультивыбор «Какие лекарства приняли?» («✓» — у
-    отмеченных и уже отмеченных за сегодня). После первой «Да» без
+    настроенных лекарствах — мультивыбор «Какие лекарства приняли?»: открывается
+    пустым, у принятых сегодня — пометка «· сегодня ✓» без галочки (с записью
+    связывается только отмеченное в этом выборе). После первой «Да» без
     настроенных лекарств — мягкая подсказка добавить их (один раз).
     Устаревшая кнопка при архивном черновике ничего не планирует (§6.10).
     """
@@ -548,9 +551,11 @@ async def cb_med_yes(
         await reminders.ensure_remeasure(user.id, measurement_id, delay)
     meds = await medications_service.list_medications(session, user)
     if meds:
-        checked = await medications_service.logged_intake_ids_today(session, user)
-        await state.update_data(**{M_MED_CHECKED: sorted(checked)})
-        markup = keyboards.intake_meds_kb(checked, meds)
+        taken_today = await medications_service.taken_intake_ids_today(session, user)
+        await state.update_data(
+            **{M_MED_CHECKED: [], M_MED_TAKEN_TODAY: sorted(taken_today)}
+        )
+        markup = keyboards.intake_meds_kb(set(), meds, taken_today)
         if delay:
             # «Напомню…» + «Не надо» — отдельным экраном (у мультивыбора свои
             # кнопки «Готово»/«Отмена»); мультивыбор — следующим сообщением.
@@ -655,8 +660,10 @@ async def cb_med_pick(
     else:
         checked.add(med_id)
     await state.update_data(**{M_MED_CHECKED: sorted(checked)})
+    taken_today = set(data.get(M_MED_TAKEN_TODAY, []))
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MEDS_INTAKE_ASK, reply_markup=keyboards.intake_meds_kb(checked, meds)
+        texts.MEDS_INTAKE_ASK,
+        reply_markup=keyboards.intake_meds_kb(checked, meds, taken_today),
     )
     await callback.answer()
 

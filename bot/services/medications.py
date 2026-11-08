@@ -403,10 +403,11 @@ async def log_slot_intake(
 async def logged_intake_ids_today(
     session: AsyncSession, user: User, timestamp: Optional[datetime] = None
 ) -> set[int]:
-    """Id лекарств с отметкой приёма за локальные сутки («✓» в мультивыборе, §6.3).
+    """Id лекарств с отметкой приёма за локальные сутки — набор дедупа журнала (§7.2).
 
     Учитывается любая отметка (`taken`/`skipped`/`partial`) во всех слотах —
     повторная отметка того же приёма за те же сутки записи не создаёт.
+    Для пометки «· сегодня ✓» в мультивыборе — `taken_intake_ids_today`.
     """
     moment = _as_utc(timestamp)
     local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
@@ -415,6 +416,31 @@ async def logged_intake_ids_today(
         await session.execute(
             select(MedicationLog.medication_id).where(
                 MedicationLog.user_id == user.id,
+                MedicationLog.timestamp >= start,
+                MedicationLog.timestamp < end,
+            )
+        )
+    ).scalars()
+    return set(rows)
+
+
+async def taken_intake_ids_today(
+    session: AsyncSession, user: User, timestamp: Optional[datetime] = None
+) -> set[int]:
+    """Id лекарств, принятых за локальные сутки, — пометка «· сегодня ✓» (§6.3).
+
+    Только `status='taken'`: «Пропускаю» и «Частично» — не «принято». Это
+    подсказка в подписи, а не отметка выбора: в выбор приёмы не попадают
+    (в отличие от `logged_intake_ids_today` — набора дедупа §7.2).
+    """
+    moment = _as_utc(timestamp)
+    local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
+    start, end = day_bounds_utc(user.timezone, local_day)
+    rows = (
+        await session.execute(
+            select(MedicationLog.medication_id).where(
+                MedicationLog.user_id == user.id,
+                MedicationLog.status == "taken",
                 MedicationLog.timestamp >= start,
                 MedicationLog.timestamp < end,
             )

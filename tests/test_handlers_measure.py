@@ -987,10 +987,10 @@ class TestMedsMultiselect:
         assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(set(), meds)
         assert (await state.get_data())[measure.M_MED_CHECKED] == []
 
-    async def test_prechecks_logged_today(
+    async def test_opens_empty_with_taken_today_marker(
         self, session, edit, cb_answer, answer, reminders
     ) -> None:
-        """«✓» — у уже отмеченных за сегодня (§6.3)."""
+        """Выбор пустой; у принятого сегодня — «· сегодня ✓» без галочки (§6.3, B1 А)."""
         med_id = await add_med(session)
         user = await reload_user(session)
         await medications_service.log_manual_intake(session, user, {med_id})
@@ -1009,10 +1009,101 @@ class TestMedsMultiselect:
             reminders=reminders,
         )
         meds = await medications_service.list_medications(session, await reload_user(session))
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(
-            {med_id}, meds
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert markup == keyboards.intake_meds_kb(set(), meds, {med_id})
+        label = markup.inline_keyboard[0][0].text
+        assert label == f"{texts.fmt_intake_item('Лозартан', '50 мг', 'morning')} · сегодня ✓"
+        data = await state.get_data()
+        assert data[measure.M_MED_CHECKED] == []
+        assert data[measure.M_MED_TAKEN_TODAY] == [med_id]
+
+    async def test_skipped_today_not_marked(
+        self, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        """«Пропускаю» по напоминанию — не «принято»: пометки нет (B2 А)."""
+        med_id = await add_med(session)
+        user = await reload_user(session)
+        await medications_service.log_slot_intake(session, user, "morning", {med_id: "skipped"})
+        await session.commit()
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = None
+        await session.commit()
+        state = make_state()
+        await state.set_data({measure.M_ID: measurement_id})
+        await call(
+            measure.cb_med_yes,
+            callback=make_callback("m:med:yes", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
         )
-        assert (await state.get_data())[measure.M_MED_CHECKED] == [med_id]
+        meds = await medications_service.list_medications(session, await reload_user(session))
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(set(), meds)
+        assert (await state.get_data())[measure.M_MED_TAKEN_TODAY] == []
+
+    async def test_pick_keeps_taken_today_marker(self, session, edit, cb_answer) -> None:
+        """Перерисовка после нажатия сохраняет пометку «· сегодня ✓»."""
+        taken_id = await add_med(session, name="Лозартан")
+        other_id = await add_med(session, name="Амлодипин", slot="evening")
+        await save_draft(session, make_state())
+        state = make_state()
+        await state.set_data(
+            {measure.M_ID: 1, measure.M_MED_CHECKED: [], measure.M_MED_TAKEN_TODAY: [taken_id]}
+        )
+        await call(
+            measure.cb_med_pick,
+            callback=make_callback(f"m:med:pick:{other_id}", make_message()),
+            state=state,
+            session=session,
+        )
+        meds = await medications_service.list_medications(session, await reload_user(session))
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_meds_kb(
+            {other_id}, meds, {taken_id}
+        )
+
+    async def test_done_links_only_picked_now(
+        self, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        """Принятое утром не привязывается к новой записи без нажатия (жалоба, B1 А)."""
+        morning_id = await add_med(session, name="Канверс плюс", dosage="16/12,5")
+        evening_id = await add_med(session, name="ЛерканНАН", dosage="10 мг", slot="evening")
+        user = await reload_user(session)
+        await medications_service.log_manual_intake(session, user, {morning_id})
+        await session.commit()
+        measurement_id = await save_draft(session, make_state())
+        user = await reload_user(session)
+        user.med_remeasure_delay = None
+        await session.commit()
+        state = make_state()
+        await state.set_data({measure.M_ID: measurement_id})
+        await call(
+            measure.cb_med_yes,
+            callback=make_callback("m:med:yes", make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        await call(
+            measure.cb_med_pick,
+            callback=make_callback(f"m:med:pick:{evening_id}", make_message()),
+            state=state,
+            session=session,
+        )
+        await call(
+            measure.cb_med_done,
+            callback=make_callback("m:med:done", make_message()),
+            state=state,
+            session=session,
+        )
+        links = (
+            await session.execute(
+                select(MeasurementMedication).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert [(link.measurement_id, link.medication_id) for link in links] == [
+            (measurement_id, evening_id)
+        ]
 
     async def test_with_delay_two_screens(
         self, session, edit, cb_answer, answer, reminders

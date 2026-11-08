@@ -1278,3 +1278,21 @@ class TestIntakeLock:
     async def test_is_the_intake_lock(self) -> None:
         """Кабинет и бот делят один лок отметок приёма (§7.2)."""
         assert service.intake_lock() is service._current_intake_lock()
+
+
+class TestTakenIntakeIdsToday:
+    """Пометка «· сегодня ✓» в мультивыборе — только принятые за сутки (§6.3, B2 А)."""
+
+    async def test_only_taken_today(self, session: AsyncSession, user: User) -> None:
+        taken = await _add_med(session, user, "Лозартан")
+        skipped = await _add_med(session, user, "Амлодипин", ("evening",))
+        yesterday = await _add_med(session, user, "Бисопролол", ("noon",))
+        await service.log_manual_intake(session, user, [taken[0].id], timestamp=aware(2026, 11, 4, 6))
+        await service.log_slot_intake(
+            session, user, "evening", {skipped[0].id: "skipped"}, timestamp=aware(2026, 11, 4, 18)
+        )
+        await service.log_manual_intake(
+            session, user, [yesterday[0].id], timestamp=aware(2026, 11, 3, 10)
+        )
+        ids = await service.taken_intake_ids_today(session, user, timestamp=aware(2026, 11, 4, 12))
+        assert ids == {taken[0].id}

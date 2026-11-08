@@ -7,7 +7,7 @@
 """
 from __future__ import annotations
 
-from typing import Iterable, Mapping, Optional, Sequence
+from typing import Collection, Iterable, Mapping, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -141,20 +141,25 @@ def keypad_kb(buf: str, *, allow_skip: bool) -> InlineKeyboardMarkup:
 
 
 def intake_meds_kb(
-    checked: set[int], medications: Sequence[Medication]
+    checked: set[int],
+    medications: Sequence[Medication],
+    taken_today: Collection[int] = frozenset(),
 ) -> InlineKeyboardMarkup:
     """Мультивыбор принятых лекарств (SPEC.md, раздел 6.3).
 
     Строка-чекбокс на приём («✓ Лозартан 50 мг · утро», § fmt_intake_item):
+    «✓ » — только у отмеченных в этом выборе; у принятых за сегодня
+    (`taken_today`) — пометка «· сегодня ✓» в конце подписи, без галочки.
     `m:med:pick:{id}` переключает отметку, «Готово» (`m:med:done`) сохраняет
     журнал приёмов, «Отмена» (`m:med:cancel`) возвращается к сводке.
     """
     builder = InlineKeyboardBuilder()
     for med in medications:
         mark = "✓ " if med.id in checked else ""
+        today = texts.INTAKE_TAKEN_TODAY_SUFFIX if med.id in taken_today else ""
         builder.row(
             InlineKeyboardButton(
-                text=f"{mark}{texts.fmt_intake_item(med.name, med.dosage, med.slot)}",
+                text=f"{mark}{texts.fmt_intake_item(med.name, med.dosage, med.slot)}{today}",
                 callback_data=f"m:med:pick:{med.id}",
             )
         )

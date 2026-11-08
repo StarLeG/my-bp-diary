@@ -231,6 +231,19 @@ class TestIntakeMedsKeyboard:
         assert texts_by_data["m:med:pick:1"].startswith("✓ ")
         assert not texts_by_data["m:med:pick:2"].startswith("✓ ")
 
+    def test_taken_today_marker_without_checkmark(self) -> None:
+        """Принятое сегодня — «· сегодня ✓» в конце подписи, галочка — только у отмеченных (§6.3)."""
+        meds = [
+            Medication(id=1, user_id=1, name="Лозартан", dosage="50 мг", slot="morning"),
+            Medication(id=2, user_id=1, name="Амлодипин", dosage="5 мг", slot="evening"),
+        ]
+        markup = keyboards.intake_meds_kb({2}, meds, {1, 2})
+        texts_by_data = {
+            button.callback_data: button.text for button in callback_buttons(markup)
+        }
+        assert texts_by_data["m:med:pick:1"] == "Лозартан 50 мг · утро · сегодня ✓"
+        assert texts_by_data["m:med:pick:2"] == "✓ Амлодипин 5 мг · вечер · сегодня ✓"
+
     def test_empty_medications_still_has_actions(self) -> None:
         data = {
             button.callback_data for button in callback_buttons(keyboards.intake_meds_kb(set(), []))
