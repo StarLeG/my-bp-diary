@@ -29,7 +29,6 @@ from __future__ import annotations
 
 import asyncio
 import itertools
-import os
 import time
 import traceback
 from datetime import date, datetime, timedelta, timezone
@@ -220,11 +219,6 @@ def p95(values: list[float]) -> float:
     return ordered[max(0, round(0.95 * len(ordered) + 0.5) - 1)] if ordered else 0.0
 
 
-@pytest.mark.xfail(
-    os.environ.get("LOAD_TEST", "").strip() == "1",
-    strict=True,
-    reason="T1: deadlock in cb_med_done",
-)
 async def test_bot_flow(bot_app, virtual_clock, shifted_utcnow, load_scale, load_log, load_report) -> None:
     """Все пользователи одновременно проходят флоу; данные — ровно как ожидается."""
     factory = bot_app.session_factory
