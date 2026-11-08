@@ -1,6 +1,6 @@
 [project]
 name = "my-bp-diary"
-version = "0.4.10"
+version = "0.4.11"
 description = "Telegram bot for hypertension diary: quick BP tracking, medication reminders, and stats for the doctor."
 readme = "README.md"
 license = {text = "PolyForm-Noncommercial-1.0.0"}
