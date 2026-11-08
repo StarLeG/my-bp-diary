@@ -14,11 +14,12 @@ AES-GCM) запускается посреди burst-нагрузки: 20 пац
 Критерии: копия создана и расшифровывается; `PRAGMA integrity_check` копии —
 `ok`; число строк ключевых таблиц в копии — между снимком на старте бэкапа и
 итогом; бэкап пересёкся с burst; максимальная задержка event loop < 5 с
-(«основной поток не заблокирован»); burst и проба без ошибок. Время пробной
-записи (max, p95, медленные > 1 с) — в отчёте без порога: под искусственным
-потоком ~64 записи/с запись вне лока дедупа изредка ждёт блокировку до
-`busy_timeout` (неравноправность busy-обработчика SQLite, не бэкап) и
-проходит повтором `run_with_retry` — см. протокол решений, раунд 6.
+(«основной поток не заблокирован»); p95 пробной записи мимо лока < 1 с
+(БД не встаёт колом — решение V1 Б); burst и проба без ошибок. Max пробной
+записи не ограничен: под искусственным потоком ~64 записи/с запись изредка
+ждёт блокировку до `busy_timeout` (неравноправность busy-обработчика SQLite,
+не бэкап) и проходит повтором `run_with_retry`; max и медленные пробы > 1 с —
+в отчёте.
 Итог — `qa/reports/load/test_load_backup.json`.
 """
 from __future__ import annotations
@@ -40,8 +41,11 @@ from qa.seed import load_patients
 #: Тестовый ключ шифрования копий (не прод-ключ).
 BACKUP_KEY = "load-test-backup-key"
 
-#: Предел задержки пробного сохранения во время бэкапа (SPEC §22, уровень 6).
+#: Предел задержки event loop во время бэкапа (SPEC §22, уровень 6).
 PROBE_LIMIT_S = 5.0
+
+#: Предел p95 пробной записи мимо лока дедупа (решение V1 Б).
+PROBE_P95_LIMIT_S = 1.0
 
 #: Интервал пробных сохранений.
 PROBE_EVERY_S = 0.1
@@ -166,12 +170,14 @@ async def test_backup_under_load(
     }
     max_probe = max(probes, default=0.0)
     max_lag = max(loop_lags, default=0.0)
+    probe_p95 = sorted(probes)[max(0, round(0.95 * len(probes) + 0.5) - 1)] if probes else 0.0
     report = {
         "passed": result.integrity_ok
         and integrity == "ok"
         and not short
         and overlapped
         and max_lag < PROBE_LIMIT_S
+        and probe_p95 < PROBE_P95_LIMIT_S
         and not burst_errors
         and not probe_errors,
         "overlapped_with_burst": overlapped,
@@ -196,10 +202,9 @@ async def test_backup_under_load(
             for start, duration in slow_probes
         ],
         "probe_max_s": round(max_probe, 3),
-        "probe_p95_s": round(sorted(probes)[max(0, round(0.95 * len(probes) + 0.5) - 1)], 3)
-        if probes
-        else 0.0,
-        "probe_limit_s": PROBE_LIMIT_S,
+        "probe_p95_s": round(probe_p95, 3),
+        "probe_p95_limit_s": PROBE_P95_LIMIT_S,
+        "loop_lag_limit_s": PROBE_LIMIT_S,
         "probe_errors": probe_errors[:5],
     }
     load_report("test_load_backup", report)
@@ -207,13 +212,16 @@ async def test_backup_under_load(
         f"backup: {result.size_bytes} байт за {backup_s:.2f} с под нагрузкой "
         f"({len(patients) * ops} сохранений), integrity {integrity}, "
         f"задержка loop max {max_lag * 1000:.0f} мс, запись-проба max "
-        f"{max_probe * 1000:.0f} мс из {len(probes)}",
+        f"{max_probe * 1000:.0f} мс, p95 {probe_p95 * 1000:.0f} мс из {len(probes)}",
         **{key: value for key, value in report.items() if key not in {"burst_errors", "probe_errors"}},
     )
     assert integrity == "ok" and result.integrity_ok, f"integrity_check копии: {integrity}"
     assert not short, f"в копии меньше строк, чем в снимке: {short}"
     assert overlapped, "бэкап стартовал уже после burst — нагрузки не было"
     assert max_lag < PROBE_LIMIT_S, f"event loop стоял {max_lag:.2f} с (предел {PROBE_LIMIT_S} с)"
+    assert probe_p95 < PROBE_P95_LIMIT_S, (
+        f"p95 пробной записи мимо лока {probe_p95:.2f} с (предел {PROBE_P95_LIMIT_S} с): БД деградирует под бэкапом"
+    )
     assert not burst_errors, f"ошибки burst: {burst_errors[:3]}"
     assert not probe_errors, f"ошибки пробы: {probe_errors[:3]}"
     assert probes, "пробные сохранения не выполнялись"

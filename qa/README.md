@@ -71,7 +71,7 @@ LOAD_TEST=1 uv run pytest qa/test_load_regression.py -v
 | `test_load_bot.py` | 20 пользователей через Dispatcher: 10 записей, 3 правки, лекарства, 2 архивные, напоминание, дневник, статистика, CSV | готово |
 | `test_load_doctor.py` | 20 врачей: magic link, карточка, 5 выгрузок, 3 комментария — 200 запросов | готово |
 | `test_load_reminders.py` | 100 напоминаний на настоящем планировщике, двойной тик | готово |
-| `test_load_backup.py` | бэкап во время burst, `integrity_check`, event loop не стоит дольше 5 с | готово |
+| `test_load_backup.py` | бэкап во время burst, `integrity_check`, event loop не стоит дольше 5 с, p95 записи мимо лока < 1 с | готово |
 | `test_load_concurrent.py` | гонки §7.2 в масштабе: 20 × 10 на гонку, повтор замера — на прод-планировщике | готово |
 | `test_load_admin.py` | статистика на полном объёме (только агрегаты), поиск, рассылка с Semaphore(20) и заблокировавшими | готово |
 | `locustfile.py` | HTTP-кабинет пациента, 20 VU, веса SPEC §22, проверка трёх графиков | готово |
