@@ -294,6 +294,61 @@ class TestParallelMomentEdit:
         assert in_minute == 1
 
 
+class TestParallelValueEdits:
+    """Правки одной записи из бота: итог — один набор целиком, без смеси (§7.2).
+
+    Детерминированное чередование вместо гонки: обе сессии прочитали строку
+    до коммита друг друга (как хендлер правки), потом правят по очереди.
+    Исходные значения частично совпадают с обоими наборами — при записи
+    «только изменённых полей» первая правка обновила бы лишь `systolic`,
+    вторая — лишь `diastolic` и `pulse`, и в строке осталась бы смесь.
+    """
+
+    INITIAL = (141, 92, 72)
+    FIRST = (142, 92, 72)
+    SECOND = (141, 91, 71)
+
+    async def test_interleaved_edits_keep_whole_set(
+        self, session_factory, user: DbUser
+    ) -> None:
+        async with session_factory() as session:
+            saved = await measurements_service.save_measurement(
+                session, user, *self.INITIAL[:2], pulse=self.INITIAL[2],
+                timestamp=datetime(2025, 3, 12, 5, 30, tzinfo=timezone.utc),
+            )
+            await session.commit()
+            measurement_id = saved.id
+        first, second = session_factory(), session_factory()
+        try:
+            for session in (first, second):  # обе правки прочитали исходную строку
+                row = await measurements_service.get_measurement(session, user, measurement_id)
+                assert (row.systolic, row.diastolic, row.pulse) == self.INITIAL
+            edited = await measurements_service.update_measurement_values(
+                first, user, measurement_id, *self.FIRST
+            )
+            await first.commit()
+            assert (edited.systolic, edited.diastolic, edited.pulse) == self.FIRST
+            edited = await measurements_service.update_measurement_values(
+                second, user, measurement_id, *self.SECOND
+            )
+            await second.commit()
+            assert (edited.systolic, edited.diastolic, edited.pulse) == self.SECOND
+        finally:
+            await first.close()
+            await second.close()
+        async with session_factory() as session:
+            row = await session.get(Measurement, measurement_id)
+            assert (row.systolic, row.diastolic, row.pulse) == self.SECOND
+
+    async def test_foreign_or_missing_record_is_none(
+        self, session_factory, user: DbUser
+    ) -> None:
+        async with session_factory() as session:
+            assert await measurements_service.update_measurement_values(
+                session, user, 999_999, 120, 80, None
+            ) is None
+
+
 class TestParallelCsvImport:
     """Двойная отправка импорта параллельно: строки не дублируются (§16.2, §7.2 п.4)."""
 

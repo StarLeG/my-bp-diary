@@ -286,40 +286,44 @@ async def update_measurement_values(
         DuplicateMeasurementError: новый момент занят другой записью за минуту.
     """
     if timestamp is None:
-        measurement = await get_measurement(session, user, measurement_id)
-        if measurement is None:
-            return None
-        measurement.systolic = systolic
-        measurement.diastolic = diastolic
-        measurement.pulse = pulse
-        await session.flush()
-        return measurement
-
-    ts, minute_start, minute_end = minute_window(timestamp)
-    # Проверка дубля и запись момента — одним UPDATE … WHERE NOT EXISTS под
-    # общим локом сохранений: так же атомарно, как вставка в
-    # `save_measurement` (§7.2), и параллельное добавление в ту же минуту
-    # не проскочит между проверкой и записью.
-    async with _current_save_lock():
-        duplicate = duplicate_in_minute(
-            user.id, minute_start, minute_end, exclude_id=measurement_id
-        )
+        # Полная перезапись всех трёх полей одним UPDATE (§7.2): ORM-flush
+        # пишет только поля, отличающиеся от прочитанных, а SELECT pysqlite
+        # идёт вне транзакции — две параллельные правки, прочитавшие строку
+        # до коммита друг друга, смешали бы наборы значений.
         result = await session.execute(
             update(Measurement)
-            .where(
-                Measurement.id == measurement_id,
-                Measurement.user_id == user.id,
-                ~duplicate,
-            )
-            .values(timestamp=ts, systolic=systolic, diastolic=diastolic, pulse=pulse)
+            .where(Measurement.id == measurement_id, Measurement.user_id == user.id)
+            .values(systolic=systolic, diastolic=diastolic, pulse=pulse)
             .execution_options(synchronize_session=False)
         )
         if result.rowcount == 0:
-            if await get_measurement(session, user, measurement_id) is None:
-                return None
-            raise DuplicateMeasurementError(
-                f"измерение за {minute_start.isoformat()} уже записано"
+            return None
+    else:
+        ts, minute_start, minute_end = minute_window(timestamp)
+        # Проверка дубля и запись момента — одним UPDATE … WHERE NOT EXISTS под
+        # общим локом сохранений: так же атомарно, как вставка в
+        # `save_measurement` (§7.2), и параллельное добавление в ту же минуту
+        # не проскочит между проверкой и записью.
+        async with _current_save_lock():
+            duplicate = duplicate_in_minute(
+                user.id, minute_start, minute_end, exclude_id=measurement_id
             )
+            result = await session.execute(
+                update(Measurement)
+                .where(
+                    Measurement.id == measurement_id,
+                    Measurement.user_id == user.id,
+                    ~duplicate,
+                )
+                .values(timestamp=ts, systolic=systolic, diastolic=diastolic, pulse=pulse)
+                .execution_options(synchronize_session=False)
+            )
+            if result.rowcount == 0:
+                if await get_measurement(session, user, measurement_id) is None:
+                    return None
+                raise DuplicateMeasurementError(
+                    f"измерение за {minute_start.isoformat()} уже записано"
+                )
     # Строка обновлена этой же транзакцией и существует; populate_existing
     # подтягивает в identity map значения, записанные мимо ORM.
     return (
