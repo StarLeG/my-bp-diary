@@ -16,6 +16,7 @@ from itsdangerous import URLSafeTimedSerializer
 
 from bot.config import Settings
 from bot.handlers import doctor as doctor_handlers
+from bot.services import doctor as doctor_service
 from web.cabinet import auth, doctor_auth
 from web.cabinet.app import DOCTOR_COOKIE, create_app
 
@@ -592,3 +593,41 @@ class TestDoctorLogin:
         assert response.status_code == 303
         assert response.headers["location"] == "/doctor"
         assert not client.cookies.get(DOCTOR_COOKIE)
+
+
+# ─────────────────── Тяжёлая работа вне event loop (§7.2 п.7) ───────────────────
+
+
+class TestDoctorBlockingOffLoop:
+    """PDF и Argon2id не останавливают кабинет: пока они идут, другие запросы отвечают."""
+
+    def test_pdf_runs_in_thread(self, app_client, settings, monkeypatch, loop_gate) -> None:
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        _add_measurement(settings, user_id)
+        _login_doctor(client, doctor_id)
+        gate = loop_gate(b"%PDF-gate")
+        monkeypatch.setattr(doctor_service, "build_report_pdf", gate)
+        pdf, page = gate.assert_loop_free(
+            heavy=lambda: client.get(f"/doctor/patient/{user_id}/export.pdf"),
+            light=lambda: client.get("/doctor"),
+        )
+        assert pdf.status_code == 200 and pdf.content == b"%PDF-gate"
+        assert page.status_code in (200, 303)
+        assert gate.calls == 1
+
+    def test_login_password_check_runs_in_thread(self, app_client, monkeypatch, loop_gate) -> None:
+        client, _, _ = app_client
+        client.get("/doctor")
+        csrf_token = _csrf(client)
+        gate = loop_gate(True)
+        monkeypatch.setattr(auth, "verify_password", gate)
+        login, page = gate.assert_loop_free(
+            heavy=lambda: client.post(
+                "/doctor/login",
+                data={"csrf_token": csrf_token, "email": DOCTOR_EMAIL, "password": DOCTOR_PASSWORD},
+            ),
+            light=lambda: client.get("/login"),
+        )
+        assert login.status_code == 303 and login.headers["location"] == "/doctor"
+        assert page.status_code == 200

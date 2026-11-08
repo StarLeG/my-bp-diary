@@ -490,7 +490,9 @@ def create_app(
         record = (
             await db.execute(select(WebUser).where(WebUser.email == email))
         ).scalar_one_or_none()
-        if record is None or not auth.verify_password(record.password_hash, password):
+        if record is None or not await asyncio.to_thread(
+            auth.verify_password, record.password_hash, password
+        ):
             return RedirectResponse(url="/login?error=wrong", status_code=303)
         limiter.reset(key)
         session_token = await auth.create_web_session(db, record.id)
@@ -571,7 +573,9 @@ def create_app(
         if magic.consume(token) is None:  # pragma: no cover — параллельное использование ссылки
             return RedirectResponse(url="/login?error=link_expired", status_code=303)
         record = WebUser(
-            user_id=owner.id, email=email, password_hash=auth.hash_password(password)
+            user_id=owner.id,
+            email=email,
+            password_hash=await asyncio.to_thread(auth.hash_password, password),
         )
         db.add(record)
         await db.flush()
@@ -773,7 +777,7 @@ def create_app(
         if new_password:
             if not auth.valid_password(new_password):
                 return RedirectResponse(url="/?error=password", status_code=303)
-            web_user.password_hash = auth.hash_password(new_password)
+            web_user.password_hash = await asyncio.to_thread(auth.hash_password, new_password)
         user.target_systolic = target_systolic
         user.target_diastolic = target_diastolic
         user.timezone = tz_name
@@ -1236,7 +1240,9 @@ def create_app(
         record = (
             await db.execute(select(Doctor).where(Doctor.email == email))
         ).scalar_one_or_none()
-        if record is None or not auth.verify_password(record.password_hash, password):
+        if record is None or not await asyncio.to_thread(
+            auth.verify_password, record.password_hash, password
+        ):
             return RedirectResponse(url="/doctor?error=wrong", status_code=303)
         limiter.reset(key)
         response = RedirectResponse(url="/doctor", status_code=303)
@@ -1344,7 +1350,9 @@ def create_app(
         user = await require_patient_link(db, doctor, user_id)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
-        payload = doctor_service.build_report_pdf(
+        # FPDF — ~90 мс на 30 дней: в thread pool, чтобы не стоял весь кабинет (§7.2 п.7).
+        payload = await asyncio.to_thread(
+            doctor_service.build_report_pdf,
             patient_label=f"Пациент {user.telegram_id}",
             measurements=measurements,
             tz_name=user.timezone,

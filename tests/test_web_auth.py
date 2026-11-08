@@ -1243,3 +1243,73 @@ class TestDashboardCharts:
         assert '<span class="med-group-title">Вечер</span>' not in text
         assert "<li>Лозартан (50 мг)</li>" in text
         assert "<li>Моксонидин</li>" in text
+
+
+# ─────────────────── Argon2id вне event loop (§7.2 п.7) ───────────────────
+
+
+class TestPasswordHashingOffLoop:
+    """Хеширование и проверка пароля не останавливают кабинет для остальных."""
+
+    def test_login_verify_runs_in_thread(self, app_client, monkeypatch, loop_gate) -> None:
+        client, _ = app_client
+        _register(client)
+        client.post("/logout", data={"csrf_token": _csrf(client)})
+        client.get("/login")
+        csrf_token = _csrf(client)
+        gate = loop_gate(True)
+        monkeypatch.setattr(auth, "verify_password", gate)
+        login, page = gate.assert_loop_free(
+            heavy=lambda: client.post(
+                "/login",
+                data={"csrf_token": csrf_token, "email": "user@example.org", "password": "secret-pass"},
+            ),
+            light=lambda: client.get("/login"),
+        )
+        assert login.status_code == 303 and login.headers["location"] == "/"
+        assert page.status_code in (200, 303)
+
+    def test_register_hash_runs_in_thread(self, app_client, monkeypatch, loop_gate) -> None:
+        client, _ = app_client
+        magic = auth.MagicLink(SECRET)
+        client.get(f"/register?token={magic.make(TG_ID)}")
+        csrf_token = _csrf(client)
+        gate = loop_gate(auth.hash_password("secret-pass"))
+        monkeypatch.setattr(auth, "hash_password", gate)
+        register, page = gate.assert_loop_free(
+            heavy=lambda: client.post(
+                "/register",
+                data={
+                    "csrf_token": csrf_token,
+                    "token": magic.make(TG_ID),
+                    "email": "user@example.org",
+                    "password": "secret-pass",
+                    "password_confirm": "secret-pass",
+                },
+            ),
+            light=lambda: client.get("/login"),
+        )
+        assert register.status_code == 303 and register.headers["location"] == "/"
+        assert page.status_code in (200, 303)
+
+    def test_profile_password_hash_runs_in_thread(self, app_client, monkeypatch, loop_gate) -> None:
+        client, _ = app_client
+        _register(client)
+        csrf_token = _csrf(client)
+        gate = loop_gate(auth.hash_password("brand-new-pass"))
+        monkeypatch.setattr(auth, "hash_password", gate)
+        profile, page = gate.assert_loop_free(
+            heavy=lambda: client.post(
+                "/profile",
+                data={
+                    "csrf_token": csrf_token,
+                    "target_systolic": "130",
+                    "target_diastolic": "80",
+                    "timezone": "Europe/Minsk",
+                    "new_password": "brand-new-pass",
+                },
+            ),
+            light=lambda: client.get("/login"),
+        )
+        assert profile.status_code == 303
+        assert gate.calls == 1
