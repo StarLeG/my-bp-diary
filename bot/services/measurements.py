@@ -15,9 +15,11 @@ from datetime import date, datetime, timedelta, timezone
 from typing import TYPE_CHECKING, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, func, insert, literal, select
+from sqlalchemy import exists, func, insert, literal, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import aliased
+from sqlalchemy.sql.expression import Exists
 from sqlalchemy.orm.exc import StaleDataError
 
 from bot.models import Measurement, User
@@ -58,6 +60,38 @@ def _current_save_lock() -> asyncio.Lock:
 
 _delete_lock: Optional[asyncio.Lock] = None
 _delete_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def minute_window(ts: datetime) -> tuple[datetime, datetime, datetime]:
+    """Момент в UTC и границы его минуты дедупа `[start, end)` (§7.2).
+
+    Naive-момент считается UTC.
+    """
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    ts = ts.astimezone(timezone.utc)
+    start = ts.replace(second=0, microsecond=0)
+    return ts, start, start + DEDUP_WINDOW
+
+
+def duplicate_in_minute(
+    user_id: int, start: datetime, end: datetime, *, exclude_id: Optional[int] = None
+) -> Exists:
+    """Условие `EXISTS` «у пользователя есть запись в минуте `[start, end)`» (§7.2).
+
+    Используется внутри одного `INSERT … SELECT … WHERE NOT EXISTS` /
+    `UPDATE … WHERE NOT EXISTS`: проверка и запись атомарны. `exclude_id` —
+    правимая запись, которая сама себе не дубль.
+    """
+    other = aliased(Measurement)
+    conditions = [
+        other.user_id == user_id,
+        other.timestamp >= start,
+        other.timestamp < end,
+    ]
+    if exclude_id is not None:
+        conditions.append(other.id != exclude_id)
+    return exists(select(literal(1)).select_from(other).where(*conditions))
 
 
 def _current_delete_lock() -> asyncio.Lock:
@@ -165,21 +199,10 @@ async def save_measurement(
     Проверка дубля и вставка идут под общим локом (`_current_save_lock`):
     два конкурентных сохранения с одним временем создают ровно одну запись.
     """
-    ts = timestamp or utcnow()
-    if ts.tzinfo is None:
-        ts = ts.replace(tzinfo=timezone.utc)
-    ts = ts.astimezone(timezone.utc)
-    minute_start = ts.replace(second=0, microsecond=0)
-    minute_end = minute_start + DEDUP_WINDOW
+    ts, minute_start, minute_end = minute_window(timestamp or utcnow())
 
     async with _current_save_lock():
-        duplicate = exists(
-            select(literal(1)).where(
-                Measurement.user_id == user.id,
-                Measurement.timestamp >= minute_start,
-                Measurement.timestamp < minute_end,
-            )
-        )
+        duplicate = duplicate_in_minute(user.id, minute_start, minute_end)
         stmt = insert(Measurement).from_select(
             ["user_id", "timestamp", "systolic", "diastolic", "pulse"],
             select(
@@ -256,34 +279,50 @@ async def update_measurement_values(
     Исключения:
         DuplicateMeasurementError: новый момент занят другой записью за минуту.
     """
-    measurement = await get_measurement(session, user, measurement_id)
-    if measurement is None:
-        return None
-    if timestamp is not None:
-        ts = timestamp if timestamp.tzinfo else timestamp.replace(tzinfo=timezone.utc)
-        ts = ts.astimezone(timezone.utc)
-        minute_start = ts.replace(second=0, microsecond=0)
-        minute_end = minute_start + DEDUP_WINDOW
-        duplicate = (
-            await session.execute(
-                select(Measurement.id).where(
-                    Measurement.user_id == user.id,
-                    Measurement.id != measurement_id,
-                    Measurement.timestamp >= minute_start,
-                    Measurement.timestamp < minute_end,
-                )
+    if timestamp is None:
+        measurement = await get_measurement(session, user, measurement_id)
+        if measurement is None:
+            return None
+        measurement.systolic = systolic
+        measurement.diastolic = diastolic
+        measurement.pulse = pulse
+        await session.flush()
+        return measurement
+
+    ts, minute_start, minute_end = minute_window(timestamp)
+    # Проверка дубля и запись момента — одним UPDATE … WHERE NOT EXISTS под
+    # общим локом сохранений: так же атомарно, как вставка в
+    # `save_measurement` (§7.2), и параллельное добавление в ту же минуту
+    # не проскочит между проверкой и записью.
+    async with _current_save_lock():
+        duplicate = duplicate_in_minute(
+            user.id, minute_start, minute_end, exclude_id=measurement_id
+        )
+        result = await session.execute(
+            update(Measurement)
+            .where(
+                Measurement.id == measurement_id,
+                Measurement.user_id == user.id,
+                ~duplicate,
             )
-        ).first()
-        if duplicate is not None:
+            .values(timestamp=ts, systolic=systolic, diastolic=diastolic, pulse=pulse)
+            .execution_options(synchronize_session=False)
+        )
+        if result.rowcount == 0:
+            if await get_measurement(session, user, measurement_id) is None:
+                return None
             raise DuplicateMeasurementError(
                 f"измерение за {minute_start.isoformat()} уже записано"
             )
-        measurement.timestamp = ts
-    measurement.systolic = systolic
-    measurement.diastolic = diastolic
-    measurement.pulse = pulse
-    await session.flush()
-    return measurement
+    # Строка обновлена этой же транзакцией и существует; populate_existing
+    # подтягивает в identity map значения, записанные мимо ORM.
+    return (
+        await session.execute(
+            select(Measurement)
+            .where(Measurement.id == measurement_id)
+            .execution_options(populate_existing=True)
+        )
+    ).scalar_one()
 
 
 async def delete_measurement(

@@ -1372,6 +1372,64 @@ class TestStaleButtons:
         assert edit.call_args.args[0] == texts.MAIN_MENU
 
 
+class TestStaleRegularButtonsOnArchive:
+    """Кнопки обычной сводки при архивном черновике (§6.10).
+
+    Старое сообщение обычной сводки остаётся в чате; после архивного
+    сохранения `M_ID` указывает на архивную запись — «Да» не должна
+    планировать повторный замер и писать `medication_logs`.
+    """
+
+    async def _archive_state(self, session) -> tuple[FSMContext, int]:
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        user.med_remeasure_delay = 60
+        measurement = await measurements_service.save_measurement(
+            session, user, 135, 85, 72,
+            timestamp=datetime(2024, 3, 12, 5, 30, tzinfo=timezone.utc),
+        )
+        await session.commit()
+        state = make_state()
+        await archive_draft(state, "2024-03-12T05:30:00+00:00", **{measure.M_ID: measurement.id})
+        return state, measurement.id
+
+    @pytest.mark.parametrize(
+        ("data", "handler"),
+        [
+            ("m:med", "cb_med"),
+            ("m:med:yes", "cb_med_yes"),
+            ("m:med:pick:1", "cb_med_pick"),
+            ("m:med:done", "cb_med_done"),
+        ],
+    )
+    async def test_shows_archive_summary(
+        self, data, handler, session, edit, cb_answer, answer, reminders
+    ) -> None:
+        state, measurement_id = await self._archive_state(session)
+        med_id = await add_med(session)
+        await state.update_data(**{measure.M_MED_CHECKED: [med_id]})
+        await call(
+            getattr(measure, handler),
+            callback=make_callback(data, make_message()),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        reminders.ensure_remeasure.assert_not_awaited()
+        logs = (
+            await session.execute(
+                select(MedicationLog).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert logs == []
+        row = await reload_measurement(session, measurement_id)
+        assert row.medication_taken is None
+        assert edit.call_args.args[0] == texts.fmt_archive_saved(
+            "12.03.2025, 08:00", 135, 85, 72
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_saved_kb()
+        cb_answer.assert_awaited_once()
+
+
 # ─────────────────────────── Полный флоу ───────────────────────────
 
 

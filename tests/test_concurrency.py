@@ -210,6 +210,122 @@ class TestParallelEditSave:
         assert (row.systolic, row.diastolic, row.pulse) in {(100, 60, 55), (200, 120, 80)}
 
 
+class TestParallelMomentEdit:
+    """Правка момента из ЛК против параллельных сохранений: дедуп атомарен (§7.2)."""
+
+    @staticmethod
+    async def _edit(session_factory, user, measurement_id: int, ts: datetime) -> bool:
+        async with session_factory() as session:
+            try:
+                await measurements_service.update_measurement_values(
+                    session, user, measurement_id, 140, 90, None, timestamp=ts
+                )
+                await session.commit()
+                return True
+            except measurements_service.DuplicateMeasurementError:
+                await session.rollback()
+                return False
+
+    async def test_edit_and_save_same_minute(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Перенос записи на минуту и новая запись в ту же минуту — выживает одна."""
+        target = datetime(2025, 3, 12, 5, 30, tzinfo=timezone.utc)
+        async with session_factory() as session:
+            saved = await measurements_service.save_measurement(
+                session, user, 135, 85, timestamp=target - timedelta(hours=2)
+            )
+            await session.commit()
+            measurement_id = saved.id
+
+        async def save() -> bool:
+            async with session_factory() as session:
+                try:
+                    await measurements_service.save_measurement(
+                        session, user, 120, 80, timestamp=target + timedelta(seconds=20)
+                    )
+                    await session.commit()
+                    return True
+                except measurements_service.DuplicateMeasurementError:
+                    await session.rollback()
+                    return False
+
+        results = await asyncio.gather(
+            self._edit(session_factory, user, measurement_id, target), save()
+        )
+        assert sorted(results) == [False, True]
+        async with session_factory() as session:
+            in_minute = (
+                await session.execute(
+                    select(func.count()).select_from(Measurement).where(
+                        Measurement.timestamp >= target,
+                        Measurement.timestamp < target + timedelta(minutes=1),
+                    )
+                )
+            ).scalar_one()
+        assert in_minute == 1
+
+    async def test_two_edits_to_same_minute(
+        self, session_factory, user: DbUser
+    ) -> None:
+        """Десять записей параллельно переносят на одну минуту — переносится одна."""
+        target = datetime(2025, 3, 12, 5, 30, tzinfo=timezone.utc)
+        ids = []
+        async with session_factory() as session:
+            for hours in range(1, 11):
+                saved = await measurements_service.save_measurement(
+                    session, user, 135, 85, timestamp=target - timedelta(hours=hours)
+                )
+                ids.append(saved.id)
+            await session.commit()
+
+        results = await asyncio.gather(
+            *(self._edit(session_factory, user, mid, target) for mid in ids)
+        )
+        assert results.count(True) == 1
+        async with session_factory() as session:
+            in_minute = (
+                await session.execute(
+                    select(func.count()).select_from(Measurement).where(
+                        Measurement.timestamp == target
+                    )
+                )
+            ).scalar_one()
+        assert in_minute == 1
+
+
+class TestParallelCsvImport:
+    """Двойная отправка импорта параллельно: строки не дублируются (§16.2, §7.2 п.4)."""
+
+    async def test_parallel_imports_insert_once(
+        self, session_factory, user: DbUser
+    ) -> None:
+        from zoneinfo import ZoneInfo
+
+        from web.cabinet import csv_import
+
+        data = (
+            "timestamp_local;systolic;diastolic;pulse;medication_taken;feeling;note\r\n"
+            "12.03.2024 08:30;135;85;;;;\r\n"
+            "13.03.2024 09:00;120;80;;;;\r\n"
+        ).encode("utf-8")
+        parsed = csv_import.parse(
+            data,
+            "Europe/Minsk",
+            now=datetime(2025, 3, 20, 12, 0, tzinfo=ZoneInfo("Europe/Minsk")),
+        )
+
+        async def run() -> int:
+            async with session_factory() as session:
+                report = await csv_import.import_rows(session, user, parsed)
+                await session.commit()
+                return report.imported
+
+        results = await asyncio.gather(*(run() for _ in range(5)))
+        assert sorted(results) == [0, 0, 0, 0, 2]
+        assert await count(session_factory, Measurement) == 2
+
+
 class TestDoubleTap:
     """Двойной тап в debounce-окне: второе измерение не создаётся."""
 

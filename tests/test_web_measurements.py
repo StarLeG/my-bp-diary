@@ -305,6 +305,43 @@ class TestEditMeasurement:
         assert rows[0][0].startswith("2026-01-15 18:30:00")
         assert rows[0][1:] == (140, 90, None)
 
+    @pytest.mark.parametrize(
+        ("stored", "checked", "expected"),
+        [
+            (0, False, 0),  # «нет» из бота не затирается снятым чекбоксом
+            (0, True, 1),
+            (1, False, None),  # снятый чекбокс снимает «да»
+            (None, False, None),
+            (None, True, 1),
+        ],
+    )
+    def test_edit_medication_flag(
+        self, app_client, settings, stored, checked, expected
+    ) -> None:
+        """Флаг «Принял лекарство» трёхзначен, чекбокс — двузначен (§16.2)."""
+        client, _ = app_client
+        _register(client)
+        _add(client)
+        measurement_id, _ = _ids(settings)[0]
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "UPDATE measurements SET medication_taken = ? WHERE id = ?",
+            (stored, measurement_id),
+        )
+        con.commit()
+        con.close()
+        form = _form(csrf_token=_csrf(client), pulse="75")
+        if checked:
+            form["medication_taken"] = "1"
+        response = client.post(f"/measurements/{measurement_id}", data=form)
+        assert response.headers["location"] == "/?saved=measurement#history"
+        rows = _sql(
+            settings,
+            "SELECT medication_taken, pulse FROM measurements WHERE id = ?",
+            (measurement_id,),
+        )
+        assert rows[0] == (expected, 75)
+
     def test_edit_duplicate_moment_rejected(self, app_client, settings) -> None:
         client, _ = app_client
         _register(client)
@@ -315,9 +352,32 @@ class TestEditMeasurement:
             f"/measurements/{second_id}",
             data=_form(csrf_token=_csrf(client), time="08:00"),
         )
-        assert response.headers["location"] == "/?error=duplicate#history"
+        assert response.headers["location"] == f"/?edit={second_id}&error=duplicate#history"
         rows = _sql(settings, "SELECT timestamp FROM measurements WHERE id = ?", (second_id,))
         assert " 06:00:00" in rows[0][0]  # 09:00 МСК — не изменилось
+
+    @pytest.mark.parametrize(
+        ("overrides", "error"),
+        [({"systolic": "999"}, "measurement"), ({"time": "08:00"}, "duplicate")],
+    )
+    def test_edit_error_reopens_edit_form(
+        self, app_client, settings, overrides, error
+    ) -> None:
+        """Ошибка правки возвращает на форму правки той же записи, не добавления."""
+        client, _ = app_client
+        _register(client)
+        _add(client, time="08:00")
+        _add(client, time="09:00")
+        second_id, _ = _ids(settings)[1]
+        response = client.post(
+            f"/measurements/{second_id}",
+            data=_form(csrf_token=_csrf(client), **overrides),
+        )
+        location = response.headers["location"]
+        assert location == f"/?edit={second_id}&error={error}#history"
+        page = client.get(location)
+        assert "Изменить запись" in page.text
+        assert f'action="/measurements/{second_id}"' in page.text
 
     def test_edit_own_moment_is_not_duplicate(self, app_client, settings) -> None:
         """Проверка дубля не считает саму правимую запись (§16.2)."""
@@ -447,6 +507,26 @@ class TestImportCsv:
         assert "Импортировано: 2 · Пропущено дублей: 0 · Ошибок: 0" in response.text
         rows = _sql(settings, "SELECT COUNT(*) FROM measurements WHERE user_id = ?", (user_id,))
         assert rows == [(2,)]
+
+    def test_import_too_large_file_rejected(
+        self, app_client, settings, monkeypatch
+    ) -> None:
+        """Файл больше лимита байт — отказ без разбора и без вставки."""
+        from web.cabinet import csv_import
+
+        client, user_id = app_client
+        _register(client)
+        payload = csv_file("12.03.2024 08:30;135;85")
+        monkeypatch.setattr(csv_import, "MAX_IMPORT_BYTES", len(payload) - 1)
+        response = client.post(
+            "/import",
+            data={"csrf_token": _csrf(client)},
+            files={"file": ("archive.csv", payload, "text/csv")},
+        )
+        assert response.status_code == 200
+        assert csv_import.FILE_TOO_MANY_ROWS in response.text
+        rows = _sql(settings, "SELECT COUNT(*) FROM measurements WHERE user_id = ?", (user_id,))
+        assert rows == [(0,)]
 
     def test_import_row_errors_reported(self, app_client) -> None:
         client, _ = app_client

@@ -229,7 +229,15 @@ def create_app(
             `settings.db_path` (общая SQLite с ботом).
     """
     if settings is None:
-        settings = get_settings()
+        try:
+            settings = get_settings()
+        except ValidationError as exc:
+            # `str(ValidationError)` содержит исходный ввод (пароль BOT_PROXY,
+            # токен): наружу — только имена полей, исходное исключение глушится.
+            fields = ", ".join(sorted({str(err["loc"][0]) for err in exc.errors()}))
+            raise RuntimeError(
+                f"Ошибка конфигурации ({fields}): проверьте .env — пример в .env.example."
+            ) from None
     if not settings.web_secret_key.strip():
         raise RuntimeError(
             "WEB_SECRET_KEY не задан: личный кабинет подписывает сессии и "
@@ -618,9 +626,14 @@ def create_app(
         error: str = "",
         saved: str = "",
         extra: Optional[dict] = None,
+        *,
+        user: User,
     ) -> Response:
-        """Собрать страницу дашборда; `extra` — контекст форм записи/импорта (§16.2)."""
-        user = await load_user(db, web_user)
+        """Собрать страницу дашборда; `extra` — контекст форм записи/импорта (§16.2).
+
+        `user` — пользователь бота, уже загруженный вызывающим хендлером
+        (`load_user`), чтобы не запрашивать его повторно.
+        """
         tz = ZoneInfo(user.timezone)
         now_local = datetime.now(tz)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
@@ -728,7 +741,8 @@ def create_app(
         if import_form:
             extra["show_import_form"] = True
         return await _dashboard_response(
-            request, db, web_user, days, date_from, date_to, error, saved, extra
+            request, db, web_user, days, date_from, date_to, error, saved, extra,
+            user=user,
         )
 
     # ───────────────────── Профиль ─────────────────────
@@ -889,14 +903,20 @@ def create_app(
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
-        """Правка записи: меняет и момент, с проверкой дубля за минуту (§16.2)."""
+        """Правка записи: меняет и момент, с проверкой дубля за минуту (§16.2).
+
+        Ошибка валидации или дубль — назад на форму правки этой же записи
+        (`?edit={id}`), а не на форму добавления.
+        """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
         try:
             values = _parse_measurement_form(form, user.timezone)
         except ValueError:
-            return RedirectResponse(url="/?error=measurement#history", status_code=303)
+            return RedirectResponse(
+                url=f"/?edit={measurement_id}&error=measurement#history", status_code=303
+            )
         try:
             measurement = await update_measurement_values(
                 db,
@@ -908,10 +928,15 @@ def create_app(
                 timestamp=values["moment"],
             )
         except DuplicateMeasurementError:
-            return RedirectResponse(url="/?error=duplicate#history", status_code=303)
+            return RedirectResponse(
+                url=f"/?edit={measurement_id}&error=duplicate#history", status_code=303
+            )
         if measurement is None:
             return RedirectResponse(url="/?error=measurement#history", status_code=303)
-        measurement.medication_taken = values["medication_taken"]
+        # Чекбокс двузначен, флаг — трёхзначен: снятый чекбокс не затирает
+        # ответ «нет» из бота (False), а только снимает «да».
+        if not (values["medication_taken"] is None and measurement.medication_taken is False):
+            measurement.medication_taken = values["medication_taken"]
         measurement.feeling = values["feeling"]
         measurement.note = values["note"]
         await db.commit()
@@ -959,28 +984,34 @@ def create_app(
         date_to = str(form.get("date_to", ""))
         extra: dict = {"show_import_form": True}
         upload = form.get("file")
+        # Читается не больше лимита + 1 байт: огромный файл не попадает в память.
         data = (
-            await upload.read()
+            await upload.read(csv_import.MAX_IMPORT_BYTES + 1)
             if isinstance(upload, UploadFile) and upload.filename
             else b""
         )
         if not data:
             extra["import_error"] = "Выберите файл."
             return await _dashboard_response(
-                request, db, web_user, days, date_from, date_to, extra=extra
+                request, db, web_user, days, date_from, date_to, extra=extra, user=user
+            )
+        if len(data) > csv_import.MAX_IMPORT_BYTES:
+            extra["import_error"] = csv_import.FILE_TOO_MANY_ROWS
+            return await _dashboard_response(
+                request, db, web_user, days, date_from, date_to, extra=extra, user=user
             )
         try:
             parsed = await asyncio.to_thread(csv_import.parse, data, user.timezone)
         except ValueError as exc:
             extra["import_error"] = str(exc)
             return await _dashboard_response(
-                request, db, web_user, days, date_from, date_to, extra=extra
+                request, db, web_user, days, date_from, date_to, extra=extra, user=user
             )
         report = await csv_import.import_rows(db, user, parsed)
         await db.commit()
         extra["import_report"] = report
         return await _dashboard_response(
-            request, db, web_user, days, date_from, date_to, extra=extra
+            request, db, web_user, days, date_from, date_to, extra=extra, user=user
         )
 
     # ───────────────────── Напоминания ─────────────────────

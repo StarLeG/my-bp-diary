@@ -163,6 +163,26 @@ class TestGetSettings:
         finally:
             get_settings.cache_clear()
 
+    def test_cabinet_hides_invalid_proxy_credentials(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """Кабинет при битом BOT_PROXY падает без пароля в тексте и цепочке (§3)."""
+        from web.cabinet.app import create_app
+
+        monkeypatch.setenv("BOT_TOKEN", "env-token")
+        monkeypatch.setenv("BOT_PROXY", "socks:user:secretpw@proxy.local:1080")
+        monkeypatch.setattr("bot.config.load_dotenv", lambda *args, **kwargs: False)
+        get_settings.cache_clear()
+        try:
+            with pytest.raises(RuntimeError) as exc_info:
+                create_app()
+        finally:
+            get_settings.cache_clear()
+        assert "bot_proxy" in str(exc_info.value)
+        assert "secretpw" not in str(exc_info.value)
+        assert exc_info.value.__cause__ is None
+        assert exc_info.value.__suppress_context__ is True
+
     def test_missing_token_raises(self, monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.delenv("BOT_TOKEN", raising=False)
         # .env на диске не должен влиять: тест проверяет отсутствие переменной.

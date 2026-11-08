@@ -154,6 +154,13 @@ async def _show_keypad(
     )
 
 
+def _saved_markup(data: dict[str, Any]) -> InlineKeyboardMarkup:
+    """Кнопки сводки: архивные (`M_ARCH_TS`, §6.10) или обычные (§6.3)."""
+    if data.get(M_ARCH_TS) is not None:
+        return keyboards.archive_saved_kb()
+    return keyboards.saved_kb()
+
+
 def _summary_screen(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
     """Экран сводки: обычный режим или архив (§6.3, §6.10).
 
@@ -162,7 +169,7 @@ def _summary_screen(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
     архива («➕ Ещё запись» и «В меню» — свои).
     """
     is_archive = data.get(M_ARCH_TS) is not None
-    markup = keyboards.archive_saved_kb() if is_archive else keyboards.saved_kb()
+    markup = _saved_markup(data)
     if data.get(M_EDIT_ID) is not None:
         text = texts.fmt_updated(data[M_SYS], data[M_DIA], data.get(M_PULSE))
     elif is_archive:
@@ -196,6 +203,22 @@ async def _measurement_id(callback: CallbackQuery, state: FSMContext) -> Optiona
         await _to_menu(callback)
         return None
     return measurement_id
+
+
+async def _archive_guard(callback: CallbackQuery, state: FSMContext) -> bool:
+    """Устаревшая кнопка обычной сводки при архивном черновике (§6.10).
+
+    «Приняли лекарство?» обычной сводки планирует повторный замер и пишет
+    `medication_logs` — для архива это запрещено. Если в черновике архивная
+    запись (`M_ARCH_TS`), вместо действия показывается сводка архива;
+    возвращает True, когда обработку надо прервать.
+    """
+    data = await state.get_data()
+    if data.get(M_ARCH_TS) is None:
+        return False
+    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await callback.answer()
+    return True
 
 
 async def _confirm_value(state: FSMContext, raw: str) -> Optional[str]:
@@ -394,6 +417,7 @@ async def _save(
     telegram_id: int,
     *,
     via_message: bool = False,
+    user: Optional[User] = None,
 ) -> None:
     """Сохранить черновик: INSERT новой записи или UPDATE правки (§6.3).
 
@@ -401,7 +425,8 @@ async def _save(
     внутри транзакции); дубль за минуту — «Это давление уже записано» (только
     для новой записи); правка — UPDATE без дедупа и без смены времени записи.
     Архив (`M_ARCH_TS`) — INSERT с указанным `timestamp` (§6.10); строка
-    «обсудить с врачом» для архива не показывается.
+    «обсудить с врачом» для архива не показывается. `user` — уже
+    загруженный пользователь (без повторного запроса).
     """
     data = await state.get_data()
     if M_SYS not in data or M_DIA not in data:
@@ -410,7 +435,8 @@ async def _save(
         )
         return
     sys_v, dia_v, pulse = data[M_SYS], data[M_DIA], data.get(M_PULSE)
-    user = await measurements_service.get_or_create_user(session, telegram_id)
+    if user is None:
+        user = await measurements_service.get_or_create_user(session, telegram_id)
     edit_id = data.get(M_EDIT_ID)
     arch_ts = data.get(M_ARCH_TS)
     if edit_id is None:
@@ -474,12 +500,7 @@ async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -
     await measurements_service.add_note(session, user, data[M_ID], note)
     await session.commit()
     await state.set_state(None)
-    markup = (
-        keyboards.archive_saved_kb()
-        if data.get(M_ARCH_TS) is not None
-        else keyboards.saved_kb()
-    )
-    await message.answer(texts.NOTE_SAVED, reply_markup=markup)
+    await message.answer(texts.NOTE_SAVED, reply_markup=_saved_markup(data))
 
 
 # ─────────────────────────── «Приняли лекарство?» ───────────────────────────
@@ -487,6 +508,9 @@ async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -
 
 @router.callback_query(F.data == "m:med")
 async def cb_med(callback: CallbackQuery, state: FSMContext) -> None:
+    """«Приняли лекарство?» обычной сводки (§6.3); при архиве — сводка архива."""
+    if await _archive_guard(callback, state):
+        return
     if await _measurement_id(callback, state) is None:
         return
     await callback.message.edit_text(  # type: ignore[union-attr]
@@ -508,7 +532,10 @@ async def cb_med_yes(
     настроенных лекарствах — мультивыбор «Какие лекарства приняли?» («✓» — у
     отмеченных и уже отмеченных за сегодня). После первой «Да» без
     настроенных лекарств — мягкая подсказка добавить их (один раз).
+    Устаревшая кнопка при архивном черновике ничего не планирует (§6.10).
     """
+    if await _archive_guard(callback, state):
+        return
     measurement_id = await _measurement_id(callback, state)
     if measurement_id is None:
         return
@@ -605,6 +632,8 @@ async def cb_med_pick(
     Чужой или удалённый id проверяется по владельцу и мягко отклоняется
     (§7.1); экран редактируется на каждое нажатие.
     """
+    if await _archive_guard(callback, state):
+        return
     data = await state.get_data()
     if M_ID not in data:
         await _to_menu(callback)
@@ -644,8 +673,11 @@ async def cb_med_done(
     (`measurement_medications`, §4.11) — перечень для «Истории записей»
     кабинета (§16.2). Повторное «Готово» за те же локальные сутки новые
     записи и связи не создаёт (§7.2) — идемпотентно. Ответ —
-    «💊 Принято: …» + кнопки сводки.
+    «💊 Принято: …» + кнопки сводки. При архивном черновике (устаревшая
+    кнопка) `medication_logs` не создаются (§6.10).
     """
+    if await _archive_guard(callback, state):
+        return
     data = await state.get_data()
     if M_ID not in data:
         await _to_menu(callback)
@@ -744,12 +776,7 @@ async def msg_feeling_other(
     )
     await session.commit()
     await state.set_state(None)
-    markup = (
-        keyboards.archive_saved_kb()
-        if data.get(M_ARCH_TS) is not None
-        else keyboards.saved_kb()
-    )
-    await message.answer(texts.NOTE_SAVED, reply_markup=markup)
+    await message.answer(texts.NOTE_SAVED, reply_markup=_saved_markup(data))
 
 
 # ─────────────────────────── «Не надо» (отмена повтора) ───────────────────────────
@@ -992,7 +1019,7 @@ async def msg_archive_quick(
             M_ARCH_LABEL: parsed.moment.strftime("%d.%m.%Y, %H:%M"),
         }
     )
-    await _save(message, state, session, tg_id, via_message=True)
+    await _save(message, state, session, tg_id, via_message=True, user=user)
 
 
 @router.callback_query(F.data == "m:arch:edit")
@@ -1087,6 +1114,7 @@ async def cb_arch_feel_set(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
+    """Самочувствие архивной записи (`m:arch:feel:*`, §6.10) — назад к сводке."""
     if await _measurement_id(callback, state) is None:
         return
     data = await state.get_data()

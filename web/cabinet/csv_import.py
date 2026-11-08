@@ -19,19 +19,29 @@ import csv
 import io
 import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import date, datetime, time, timezone
 from typing import Mapping, Optional
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
+from sqlalchemy import insert, literal, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import schemas, texts
 from bot.models import Measurement, User
 from bot.services import csv_export
+from bot.services.measurements import (
+    _current_save_lock,
+    duplicate_in_minute,
+    minute_window,
+)
 
 #: Лимит строк данных на файл (§16.2); больше — «Слишком много строк…».
 MAX_IMPORT_ROWS = 5000
+
+#: Лимит размера файла в байтах: 5000 строк с заметкой в 500 символов
+#: кириллицей (~1,1 КБ на строку) с запасом. Больше — тот же ответ, что и при
+#: превышении лимита строк; файл не читается в память целиком.
+MAX_IMPORT_BYTES = 8 * 1024 * 1024
 
 #: Сколько ошибочных строк перечисляется в отчёте (§16.2).
 MAX_ERRORS_SHOWN = 10
@@ -114,13 +124,10 @@ def _parse_row(record: Mapping[str, str], tz_name: str, current: datetime) -> Im
         moment_time = time(int(hour_s), int(minute_s))
     except ValueError:
         raise ValueError(_ERR_TIMESTAMP) from None
-    moment = datetime(
-        day.year, day.month, day.day,
-        moment_time.hour, moment_time.minute,
-        tzinfo=ZoneInfo(tz_name),
-    )
-    if moment > current:
-        raise ValueError(_ERR_FUTURE)
+    try:
+        moment = schemas.combine_moment(day, moment_time, tz_name, now=current)
+    except ValueError:  # единственная причина — момент в будущем (§9)
+        raise ValueError(_ERR_FUTURE) from None
     systolic = schemas.validate_int(record.get("systolic", ""), 70, 260, "систолическое")
     diastolic = schemas.validate_int(record.get("diastolic", ""), 40, 160, "диастолическое")
     schemas.validate_pair(systolic, diastolic)
@@ -136,9 +143,11 @@ def _parse_row(record: Mapping[str, str], tz_name: str, current: datetime) -> Im
         feeling = _FEELING_VALUES[feeling_raw]
     else:
         raise ValueError(_ERR_FEELING)
-    note = record.get("note", "").strip() or None
-    if note is not None and len(note) > 500:
-        raise ValueError(_ERR_NOTE)
+    note_raw = record.get("note", "").strip()
+    try:
+        note = schemas.validate_note(note_raw) if note_raw else None
+    except ValueError:
+        raise ValueError(_ERR_NOTE) from None
     return ImportRow(
         moment=moment,
         systolic=systolic,
@@ -229,48 +238,39 @@ async def import_rows(
 
     Дубль — запись за ту же минуту, уже существующая в БД; коммитит вызывающий
     код. Дубли внутри файла уже посчитаны при разборе (`parsed.duplicates`).
+    Каждая строка — `INSERT … SELECT … WHERE NOT EXISTS` под общим локом
+    сохранений (как `save_measurement`, §7.2): проверка дубля и вставка
+    атомарны, поэтому и параллельная двойная отправка формы дублей не создаёт.
     """
     duplicates = parsed.duplicates
     imported = 0
-    taken: set[datetime] = set()
-    if parsed.rows:
-        buckets = [
-            row.moment.astimezone(timezone.utc).replace(second=0, microsecond=0)
-            for row in parsed.rows
-        ]
-        stamps = (
-            await db.execute(
-                select(Measurement.timestamp).where(
-                    Measurement.user_id == user.id,
-                    Measurement.timestamp >= min(buckets),
-                    Measurement.timestamp < max(buckets) + timedelta(minutes=1),
+    async with _current_save_lock():
+        for row in parsed.rows:
+            moment_utc, minute_start, minute_end = minute_window(row.moment)
+            duplicate = duplicate_in_minute(user.id, minute_start, minute_end)
+            result = await db.execute(
+                insert(Measurement).from_select(
+                    [
+                        "user_id", "timestamp", "systolic", "diastolic", "pulse",
+                        "medication_taken", "feeling", "note",
+                    ],
+                    select(
+                        literal(user.id),
+                        literal(moment_utc),
+                        literal(row.systolic),
+                        literal(row.diastolic),
+                        literal(row.pulse),
+                        literal(row.medication_taken),
+                        literal(row.feeling),
+                        literal(row.note),
+                    ).where(~duplicate),
                 )
             )
-        ).scalars()
-        taken = {
-            ts.astimezone(timezone.utc).replace(second=0, microsecond=0) for ts in stamps
-        }
-    for row in parsed.rows:
-        moment_utc = row.moment.astimezone(timezone.utc)
-        bucket = moment_utc.replace(second=0, microsecond=0)
-        if bucket in taken:
-            duplicates += 1
-            continue
-        taken.add(bucket)
-        db.add(
-            Measurement(
-                user_id=user.id,
-                timestamp=moment_utc,
-                systolic=row.systolic,
-                diastolic=row.diastolic,
-                pulse=row.pulse,
-                medication_taken=row.medication_taken,
-                feeling=row.feeling,
-                note=row.note,
-            )
-        )
-        imported += 1
-    await db.flush()
+            if result.rowcount == 0:
+                duplicates += 1
+            else:
+                imported += 1
+        await db.flush()
     return ImportReport(
         imported=imported,
         duplicates=duplicates,
