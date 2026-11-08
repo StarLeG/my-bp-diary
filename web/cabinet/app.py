@@ -47,7 +47,7 @@ from bot.services.measurements import (
     save_measurement,
     update_measurement_values,
 )
-from bot.services.reminders import next_slot_occurrence
+from bot.services.reminders import enable_slot_row, next_slot_occurrence
 from web.cabinet import auth, csv_import, doctor_auth
 from web.cabinet.chart_zones import CHART_ZONES
 
@@ -1060,11 +1060,10 @@ def create_app(
                     )
                     db.add(reminder)
                 else:
-                    reminder.local_time = local_time
-                    reminder.next_trigger_time = next_slot_occurrence(
-                        local_time, user.timezone, now
+                    # Все поля слота — одним UPDATE, без смеси с параллельной правкой (§7.2).
+                    await enable_slot_row(
+                        db, reminder, local_time, next_slot_occurrence(local_time, user.timezone, now)
                     )
-                    reminder.enabled = True
             elif reminder is not None:
                 reminder.enabled = False
         delay_raw = str(form.get("med_remeasure_delay", ""))

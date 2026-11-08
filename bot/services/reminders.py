@@ -33,6 +33,7 @@ from apscheduler.triggers.date import DateTrigger
 from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+from sqlalchemy.orm.attributes import set_committed_value
 
 from bot import keyboards, texts
 from bot.models import Reminder, User
@@ -86,6 +87,28 @@ def next_slot_occurrence(local_time: str, tz_name: str, now: datetime) -> dateti
     if candidate <= local_now:
         candidate += timedelta(days=1)
     return candidate.astimezone(timezone.utc)
+
+
+async def enable_slot_row(
+    session: AsyncSession, reminder: Reminder, local_time: str, next_time: datetime
+) -> None:
+    """Включить существующую строку слота: время, следующий момент и `enabled` — одним UPDATE.
+
+    Не через атрибуты прочитанного объекта (§7.2): flush пишет только поля,
+    отличающиеся от прочитанных, и две параллельные перенастройки слота,
+    прочитавшие строку до коммита друг друга, оставили бы `local_time` от
+    одной и `next_trigger_time` от другой — напоминание пришло бы не во
+    время настройки. Объект в identity map обновляется без пометки «грязный».
+    """
+    await session.execute(
+        update(Reminder)
+        .where(Reminder.id == reminder.id)
+        .values(local_time=local_time, next_trigger_time=next_time, enabled=True)
+        .execution_options(synchronize_session=False)
+    )
+    set_committed_value(reminder, "local_time", local_time)
+    set_committed_value(reminder, "next_trigger_time", next_time)
+    set_committed_value(reminder, "enabled", True)
 
 
 class RemindersService:
@@ -161,9 +184,7 @@ class RemindersService:
                 )
                 session.add(reminder)
             else:
-                reminder.local_time = local_time
-                reminder.next_trigger_time = next_time
-                reminder.enabled = True
+                await enable_slot_row(session, reminder, local_time, next_time)
             await session.commit()
             reminder_id = reminder.id
         self._add_job(reminder_id, next_time, MODE_SLOT)

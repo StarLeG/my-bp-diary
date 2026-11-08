@@ -33,7 +33,7 @@ from bot.models import (
 )
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
-from bot.services.reminders import RemindersService
+from bot.services.reminders import RemindersService, next_slot_occurrence
 
 TG_ID = 111_111
 
@@ -347,6 +347,63 @@ class TestParallelValueEdits:
             assert await measurements_service.update_measurement_values(
                 session, user, 999_999, 120, 80, None
             ) is None
+
+
+class TestParallelSlotReconfigure:
+    """Две перенастройки одного слота: `local_time` и `next_trigger_time` — из одной (§7.2).
+
+    Детерминированно: обёртка фабрики сессий держит каждую `ensure_slot` после
+    её первого SELECT, пока строку не прочитают обе. Исходная строка частично
+    совпадает с обоими наборами (время — с одним, следующий момент — с другим),
+    поэтому запись «только изменённых полей» дала бы смесь в любом порядке
+    коммитов.
+    """
+
+    async def test_interleaved_reconfigure_is_consistent(
+        self, session_factory, user: DbUser
+    ) -> None:
+        tz = "UTC"
+        now = datetime.now(timezone.utc)
+        early, late = "07:00", "08:00"
+        async with session_factory() as session:
+            session.add(Reminder(
+                user_id=user.id, type="morning", local_time=early,
+                next_trigger_time=next_slot_occurrence(late, tz, now), enabled=False,
+            ))
+            await session.commit()
+
+        both_read = asyncio.Barrier(2)
+
+        def gated_factory():
+            session = session_factory()
+            execute, calls = session.execute, [0]
+
+            async def gated_execute(*args, **kwargs):
+                result = await execute(*args, **kwargs)
+                calls[0] += 1
+                if calls[0] == 1:  # строка слота прочитана — ждём вторую правку
+                    await asyncio.wait_for(both_read.wait(), 5)
+                return result
+
+            session.execute = gated_execute
+            return session
+
+        async def sender(user_id: int, text: str, markup) -> None:
+            pass
+
+        svc = RemindersService(gated_factory, sender, FakeScheduler())
+        await asyncio.gather(
+            svc.ensure_slot(user.id, "morning", late, tz),
+            svc.ensure_slot(user.id, "morning", early, tz),
+        )
+        async with session_factory() as session:
+            row = (await session.execute(select(Reminder).where(Reminder.user_id == user.id))).scalar_one()
+        assert row.enabled is True
+        assert row.local_time in (early, late)
+        expected = next_slot_occurrence(row.local_time, tz, now)
+        assert abs(row.next_trigger_time - expected) < timedelta(minutes=1), (
+            f"смесь: local_time {row.local_time}, next_trigger_time {row.next_trigger_time}"
+        )
 
 
 class TestParallelCsvImport:
