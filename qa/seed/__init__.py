@@ -13,8 +13,15 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from datetime import date, datetime, timezone
 from pathlib import Path
-from typing import Union
+from typing import TYPE_CHECKING, Union
+from zoneinfo import ZoneInfo
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    from bot.models import User
 
 #: Метка, которая обязана быть в имени файла БД стенда (SPEC §22).
 STAND_MARK = "test-stand"
@@ -126,6 +133,51 @@ SMOKE = Scale(
 )
 
 SCALES: dict[str, Scale] = {FULL.name: FULL, SMOKE.name: SMOKE}
+
+
+#: Секунда-метка моментов сида: форма кабинета пишет время с точностью до
+#: минуты (секунды = 0), поэтому сидированные записи стенда отличимы от
+#: добавленных нагрузкой (E2: «сидированные 5000 на месте»).
+SEED_SECOND = 17
+
+#: Часовые пояса пациентов по кругу: моменты сида — в таймзоне пользователя.
+PATIENT_TIMEZONES = ("Europe/Minsk", "Europe/Moscow", "Asia/Yekaterinburg")
+
+
+def patient_timezone(n: int) -> str:
+    """Часовой пояс нагрузочного пациента номер `n`."""
+    return PATIENT_TIMEZONES[(n - 1) % len(PATIENT_TIMEZONES)]
+
+
+def anchor_day(created_at: datetime, tz_name: str) -> date:
+    """Последний день окна сида (не включается): локальная дата создания пациента.
+
+    Расписание сида привязано к `users.created_at`, а не к «сегодня»: повторный
+    запуск в другой день даёт те же моменты и ничего не дублирует. Окно —
+    `[anchor − days, anchor)`, поэтому моментов в будущем не бывает.
+    """
+    return created_at.astimezone(ZoneInfo(tz_name)).date()
+
+
+def seed_moment(day: date, hour: int, minute: int, tz_name: str) -> datetime:
+    """Момент сида: локальные дата и время пользователя с секундой-меткой, в UTC."""
+    local = datetime(
+        day.year, day.month, day.day, hour, minute, SEED_SECOND, tzinfo=ZoneInfo(tz_name)
+    )
+    return local.astimezone(timezone.utc)
+
+
+async def load_patients(session: "AsyncSession", scale: Scale) -> list[tuple[int, "User"]]:
+    """Нагрузочные пациенты профиля, которые уже есть в БД: пары (n, User)."""
+    from sqlalchemy import select
+
+    from bot.models import User
+
+    ids = {patient_tg_id(n): n for n in range(1, scale.patients + 1)}
+    users = (
+        await session.execute(select(User).where(User.telegram_id.in_(ids)))
+    ).scalars()
+    return sorted(((ids[user.telegram_id], user) for user in users), key=lambda pair: pair[0])
 
 
 def load_password_from_env() -> str:

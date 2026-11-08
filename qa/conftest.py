@@ -777,3 +777,46 @@ def load_report(load_full: bool) -> Callable[[str, dict], Optional[str]]:
         return path
 
     return _write
+
+
+# ─────────────── Шаблонная БД стенда (SPEC §22, «Изоляция») ───────────────
+
+
+@pytest.fixture(scope="session")
+def load_template(tmp_path_factory: pytest.TempPathFactory, load_scale, load_password: str):
+    """Шаблонная БД стенда: один `seed_all` за сессию pytest (масштаб по профилю).
+
+    Лежит во временной папке сессии под именем `test-stand.sqlite3` — защита
+    стенда действует и здесь. Тесты получают копии (`load_db`), сам шаблон
+    не меняется.
+    """
+    from qa.seed.seed_all import seed_all
+
+    path = tmp_path_factory.mktemp("load-template") / "test-stand.sqlite3"
+    started = time.perf_counter()
+    asyncio.run(seed_all(path, load_scale, load_password, verbose=False))
+    print(
+        f"\n[qa.load] шаблон стенда ({load_scale.name}): "
+        f"{load_scale.measurements} измерений за {time.perf_counter() - started:.1f} с"
+    )
+    return path
+
+
+@pytest.fixture
+def load_db(tmp_path, load_template) -> str:
+    """Копия шаблона для одного теста — через Online Backup API SQLite.
+
+    Копия согласована (backup, а не копирование файла), режим WAL
+    сохраняется; путь — `<tmp_path>/test-stand.sqlite3`.
+    """
+    from qa.seed import ensure_stand_db
+
+    target = ensure_stand_db(tmp_path / "test-stand.sqlite3")
+    source = sqlite3.connect(load_template)
+    destination = sqlite3.connect(target)
+    try:
+        source.backup(destination)
+    finally:
+        destination.close()
+        source.close()
+    return str(target)
