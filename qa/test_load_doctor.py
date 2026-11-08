@@ -23,7 +23,6 @@ pytest, без сервера); у каждого врача свой клиен
 from __future__ import annotations
 
 import asyncio
-import copy
 import statistics
 import time
 from collections import defaultdict
@@ -37,6 +36,7 @@ from sqlalchemy import func, select
 from bot.config import Settings
 from bot.db import create_engine, create_session_factory
 from bot.models import Doctor, DoctorNote, DoctorPatient
+from qa.conftest import CPU_BENCH_REFERENCE_MS, machine_calibration
 from qa.seed import doctor_email
 from web.cabinet.app import create_app
 from web.cabinet.doctor_auth import DoctorMagicLink
@@ -56,7 +56,7 @@ CALIBRATION_KINDS = ("login", "dashboard", "export.csv", "export.pdf")
 
 #: Ориентиры калибровки на машине разработчика без троттлинга (для сравнения, не порог).
 REFERENCE_CALIBRATION_MS = {
-    "cpu_bench": 65.0,
+    "cpu_bench": CPU_BENCH_REFERENCE_MS,
     "login": 8.0,
     "dashboard": 44.0,
     "export.csv": 20.0,
@@ -153,23 +153,6 @@ async def run_doctor(doctor: DoctorSession, magic: DoctorMagicLink) -> None:
         )
 
 
-def cpu_bench_ms() -> float:
-    """Скорость машины: 60 000 `copy.copy` на чистом Python (медиана из трёх), мс."""
-
-    class Probe:
-        def __init__(self) -> None:
-            self.x, self.y, self.z = 1, [1, 2], {"k": 1}
-
-    def once() -> float:
-        probe = Probe()
-        started = time.perf_counter()
-        for _ in range(60_000):
-            copy.copy(probe)
-        return (time.perf_counter() - started) * 1000
-
-    return statistics.median(once() for _ in range(3))
-
-
 async def calibrate(
     transport: httpx.ASGITransport, magic: DoctorMagicLink, doctor_id: int, user_id: int
 ) -> dict[str, float]:
@@ -186,8 +169,7 @@ async def calibrate(
             for kind in CALIBRATION_KINDS:
                 samples[kind].extend(doctor.timings[kind])
     result = {kind: round(statistics.median(values), 1) for kind, values in samples.items()}
-    result["cpu_bench"] = round(cpu_bench_ms(), 1)
-    result["slowdown_vs_reference"] = round(result["cpu_bench"] / REFERENCE_CALIBRATION_MS["cpu_bench"], 2)
+    result.update(machine_calibration())
     return result
 
 

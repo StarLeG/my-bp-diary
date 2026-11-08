@@ -22,10 +22,12 @@ Telegram уходит краткий отчёт (§22): «✅ Все тесты 
 from __future__ import annotations
 
 import asyncio
+import copy
 import json
 import logging
 import os
 import sqlite3
+import statistics
 import threading
 import time
 import urllib.request
@@ -982,6 +984,33 @@ def lock_counter() -> Iterator[LockCounter]:
         yield handler
     finally:
         logger.removeHandler(handler)
+
+
+#: CPU-бенчмарк на машине разработчика без троттлинга (решение V3/V6 А; ориентир, не порог).
+CPU_BENCH_REFERENCE_MS = 65.0
+
+
+def cpu_bench_ms() -> float:
+    """Скорость машины: 60 000 `copy.copy` на чистом Python (медиана из трёх), мс."""
+
+    class Probe:
+        def __init__(self) -> None:
+            self.x, self.y, self.z = 1, [1, 2], {"k": 1}
+
+    def once() -> float:
+        probe = Probe()
+        started = time.perf_counter()
+        for _ in range(60_000):
+            copy.copy(probe)
+        return (time.perf_counter() - started) * 1000
+
+    return statistics.median(once() for _ in range(3))
+
+
+def machine_calibration() -> dict[str, float]:
+    """Калибровка без порога: CPU-бенчмарк и множитель к эталону (≈ 2–3 — троттлинг, ≈ 1 — норма)."""
+    bench = round(cpu_bench_ms(), 1)
+    return {"cpu_bench": bench, "slowdown_vs_reference": round(bench / CPU_BENCH_REFERENCE_MS, 2)}
 
 
 def percentile(values: list[float], share: float) -> float:

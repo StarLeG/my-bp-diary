@@ -5,9 +5,12 @@ AES-GCM) запускается посреди burst-нагрузки: 20 пац
 (дымовой профиль — 3 × 5); бэкап стартует, пока burst ещё идёт.
 
 «Основной поток не заблокирован» проверяется пробой на всё окно нагрузки
-(burst + бэкап), раз в 100 мс: задержка event loop (насколько опоздал
-`asyncio.sleep`) и пробная запись мимо лока дедупа (`UPDATE users` в своей
-сессии — сколько запись SQLite ждёт бэкап и чужие коммиты). Очередь самих
+(burst + бэкап): тик строго по расписанию раз в 100 мс — задержка event loop
+(насколько тик опоздал против расписания) и пробная запись мимо лока дедупа
+(`UPDATE users` в своей сессии — сколько запись SQLite ждёт бэкап и чужие
+коммиты). Каждая запись — отдельной задачей, не дожидаясь предыдущей
+(решение V6 Б): медленная проба не вытесняет быстрые из выборки, и p95
+отражает долю медленных записей, а не их длительность. Очередь самих
 сохранений за общим локом дедупа (§7.2) сюда не входит — её меряет
 `test_load_burst.py`. Ключ шифрования — тестовый, S3 выключен.
 
@@ -19,7 +22,8 @@ AES-GCM) запускается посреди burst-нагрузки: 20 пац
 записи не ограничен: под искусственным потоком ~64 записи/с запись изредка
 ждёт блокировку до `busy_timeout` (неравноправность busy-обработчика SQLite,
 не бэкап) и проходит повтором `run_with_retry`; max и медленные пробы > 1 с —
-в отчёте.
+в отчёте. Калибровка машины (V6 А, без порога) — в отчёте и в сообщении о
+падении: под троттлингом ноутбука медленных проб больше.
 Итог — `qa/reports/load/test_load_backup.json`.
 """
 from __future__ import annotations
@@ -36,6 +40,7 @@ from bot.db import create_engine, create_session_factory, run_with_retry
 from bot.models import Measurement, Medication, MedicationLog, Reminder, User
 from bot.services import measurements as measurements_service
 from bot.services.backup import BackupService, decrypt_file, derive_key
+from qa.conftest import CPU_BENCH_REFERENCE_MS, machine_calibration
 from qa.seed import load_patients
 
 #: Тестовый ключ шифрования копий (не прод-ключ).
@@ -110,29 +115,37 @@ async def test_backup_under_load(
     marks: dict[str, float] = {}
     probe_errors: list[str] = []
 
+    async def probe_write(value: int) -> None:
+        """Одна пробная запись мимо лока дедупа; длительность — в выборку."""
+
+        async def _write() -> None:
+            async with session_factory() as session:
+                user = await session.get(User, probe_user.id)
+                user.target_systolic = value
+                await session.commit()
+
+        started = time.perf_counter()
+        try:
+            await run_with_retry(_write)
+        except Exception as exc:  # noqa: BLE001 — в отчёт
+            probe_errors.append(repr(exc))
+        probes.append(time.perf_counter() - started)
+        if probes[-1] > 1.0:
+            slow_probes.append((started, probes[-1]))
+
     async def probe() -> None:
-        """Раз в 100 мс: задержка loop и запись мимо лока дедупа, до конца нагрузки."""
+        """Тик по расписанию раз в 100 мс до конца нагрузки: задержка loop и запись-задача."""
+        loop = asyncio.get_running_loop()
+        writes: list[asyncio.Task] = []
+        tick = loop.time()
         target = 120
         while not load_done.is_set():
-            slept = time.perf_counter()
-            await asyncio.sleep(PROBE_EVERY_S)
-            loop_lags.append(max(0.0, time.perf_counter() - slept - PROBE_EVERY_S))
+            tick += PROBE_EVERY_S
+            await asyncio.sleep(max(0.0, tick - loop.time()))
+            loop_lags.append(max(0.0, loop.time() - tick))
             target = 121 if target == 120 else 120
-
-            async def _write(value: int = target) -> None:
-                async with session_factory() as session:
-                    user = await session.get(User, probe_user.id)
-                    user.target_systolic = value
-                    await session.commit()
-
-            started = time.perf_counter()
-            try:
-                await run_with_retry(_write)
-            except Exception as exc:  # noqa: BLE001 — в отчёт
-                probe_errors.append(repr(exc))
-            probes.append(time.perf_counter() - started)
-            if probes[-1] > 1.0:
-                slow_probes.append((started, probes[-1]))
+            writes.append(asyncio.create_task(probe_write(target)))
+        await asyncio.gather(*writes)
 
     service = BackupService(load_db, tmp_path / "backups", BACKUP_KEY)
     burst = asyncio.gather(
@@ -152,6 +165,7 @@ async def test_backup_under_load(
         load_done.set()
         await probe_task
     final = await table_counts(session_factory)
+    calibration = machine_calibration()
 
     restored = tmp_path / "restored.sqlite3"
     decrypt_file(service.backup_dir / result.name, restored, derive_key(BACKUP_KEY))
@@ -206,13 +220,16 @@ async def test_backup_under_load(
         "probe_p95_limit_s": PROBE_P95_LIMIT_S,
         "loop_lag_limit_s": PROBE_LIMIT_S,
         "probe_errors": probe_errors[:5],
+        "calibration_ms": calibration,
+        "reference_cpu_bench_ms": CPU_BENCH_REFERENCE_MS,
     }
     load_report("test_load_backup", report)
     load_log.summary(
         f"backup: {result.size_bytes} байт за {backup_s:.2f} с под нагрузкой "
         f"({len(patients) * ops} сохранений), integrity {integrity}, "
         f"задержка loop max {max_lag * 1000:.0f} мс, запись-проба max "
-        f"{max_probe * 1000:.0f} мс, p95 {probe_p95 * 1000:.0f} мс из {len(probes)}",
+        f"{max_probe * 1000:.0f} мс, p95 {probe_p95 * 1000:.0f} мс из {len(probes)}; "
+        f"калибровка: CPU {calibration['cpu_bench']:.0f} мс (×{calibration['slowdown_vs_reference']} к эталону)",
         **{key: value for key, value in report.items() if key not in {"burst_errors", "probe_errors"}},
     )
     assert integrity == "ok" and result.integrity_ok, f"integrity_check копии: {integrity}"
@@ -220,7 +237,10 @@ async def test_backup_under_load(
     assert overlapped, "бэкап стартовал уже после burst — нагрузки не было"
     assert max_lag < PROBE_LIMIT_S, f"event loop стоял {max_lag:.2f} с (предел {PROBE_LIMIT_S} с)"
     assert probe_p95 < PROBE_P95_LIMIT_S, (
-        f"p95 пробной записи мимо лока {probe_p95:.2f} с (предел {PROBE_P95_LIMIT_S} с): БД деградирует под бэкапом"
+        f"p95 пробной записи мимо лока {probe_p95:.2f} с (предел {PROBE_P95_LIMIT_S} с), медленных > 1 с — "
+        f"{len(slow_probes)} из {len(probes)}. Калибровка машины: CPU-бенчмарк {calibration['cpu_bench']:.0f} мс — "
+        f"×{calibration['slowdown_vs_reference']} к эталону {CPU_BENCH_REFERENCE_MS:.0f} мс. Множитель ≈ 2–3 — "
+        "машина в троттлинге, повторите на машине без него (qa/README.md, «Подготовка»); ≈ 1 — БД деградирует под бэкапом"
     )
     assert not burst_errors, f"ошибки burst: {burst_errors[:3]}"
     assert not probe_errors, f"ошибки пробы: {probe_errors[:3]}"
