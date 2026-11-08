@@ -37,6 +37,8 @@ uv sync --group load                      # Locust, pytest-html, Playwright
 uv run playwright install chromium        # для скриншотов (один раз)
 ```
 
+**Машина для приёмки — без троттлинга.** Тайминговые пороги (p95 карточки врача, Locust) снимаются на сервере или на ПК со схемой питания «Высокая производительность» и без фоновой нагрузки. Ноутбук на «Сбалансированной» схеме через 1–2 с нагрузки замедляет процесс до ~3×, и p95 врача выходит за 2 с без всякой вины кода. `test_load_doctor` пишет калибровку (`calibration_ms`, множитель `slowdown_vs_reference`) в JSON и в сообщение о падении: множитель ≈ 2–3 — машина, ≈ 1 — код.
+
 Важно: `uv sync` без `--group load` удалит эти пакеты из `.venv`. Под Windows Locust без `PYTHONUTF8=1` пишет CSV в системной кодировке. Регрессия читает оба варианта, но UTF-8 удобнее.
 
 ## Запуск
@@ -69,7 +71,7 @@ LOAD_TEST=1 uv run pytest qa/test_load_regression.py -v
 | `seed/` (`seed_all.py` и шесть сидов) | данные стенда, `--scale=full\|smoke`, `--clean` | готово (юнит-тесты — `tests/test_qa_seed.py`, 100% веток) |
 | `test_load_burst.py` | сервисный слой: 20 × 50 операций, двойные нажатия, правки, «Принял всё ✓», `/start` | готово |
 | `test_load_bot.py` | 20 пользователей через Dispatcher: 10 записей, 3 правки, лекарства, 2 архивные, напоминание, дневник, статистика, CSV | готово |
-| `test_load_doctor.py` | 20 врачей: magic link, карточка, 5 выгрузок, 3 комментария — 200 запросов | готово |
+| `test_load_doctor.py` | 20 врачей: magic link, карточка, 5 выгрузок, 3 комментария — 200 запросов; калибровка машины | готово |
 | `test_load_reminders.py` | 100 напоминаний на настоящем планировщике, двойной тик | готово |
 | `test_load_backup.py` | бэкап во время burst, `integrity_check`, event loop не стоит дольше 5 с, p95 записи мимо лока < 1 с | готово |
 | `test_load_concurrent.py` | гонки §7.2 в масштабе: 20 × 10 на гонку, повтор замера — на прод-планировщике | готово |
@@ -145,7 +147,7 @@ LOAD_TEST=1 uv run pytest qa/test_load_regression.py -v
 | `test_artifact_passed[<тест>]` — «не запускался» | был ли `test_load_<тест>` в сессии и не SKIP ли он | регрессия запущена без полного прогона; скриншоты — без запущенного кабинета или `LOAD_PASSWORD` |
 | Любой тест — `database is locked` | `failure_samples` в JSON, `qa-load.jsonl` | ожидание asyncio-лока с незакоммиченной записью SQLite (§7.2) — так нашлись T1, U1, U2 |
 | `test_load_bot` — не все строки / ошибки | `errors`, `rows_added` в JSON; `qa-load.jsonl` по `user_id` | исключение в хендлере, дедуп минуты (время виртуальных часов), debounce |
-| p95 (врач, Locust) выше порога | `p95_ms` в JSON, `locust_stats.csv`; время `test_load_bot` в том же прогоне | синхронная тяжёлая работа в event loop — или троттлинг машины (бот тоже вдвое медленнее обычного) |
+| p95 (врач, Locust) выше порога | `p95_ms` и `calibration_ms.slowdown_vs_reference` в JSON, `locust_stats.csv`; время `test_load_bot` в том же прогоне | синхронная тяжёлая работа в event loop — или троттлинг машины (бот тоже вдвое медленнее обычного) |
 | `test_load_backup` — p95 пробы ≥ 1 с | `slow_probes`, `probe_p95_s` | массовая деградация записи под бэкапом; одиночные выбросы max допустимы |
 | `test_load_reminders` — дубли / недоставка | `duplicates`, `sent`, `timed_out` | атомарный захват `last_sent_date`, перепланировка job'ов |
 | Регрессия БД стенда | сообщение с `user_id` | стенд пересеян без `--clean` другим масштабом или Locust не тем паролем |

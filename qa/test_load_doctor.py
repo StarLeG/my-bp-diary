@@ -11,10 +11,20 @@ pytest, без сервера); у каждого врача свой клиен
 карточка и выгрузки — 200 с нужным типом, комментарий — 303 с
 `saved=note`), p95 карточки < 2 с, комментарии привязаны к своим
 `doctor_id` / `user_id`. Итог — `qa/reports/load/test_load_doctor.json`.
+
+Калибровка (решение V3 А, без порога): перед пачкой — последовательные GET
+одного врача (вход, карточка, CSV, PDF; медиана из трёх) и CPU-микробенчмарк
+на чистом Python. Врачи стартуют разом, поэтому p95 карточки — доля общего
+времени пачки и растёт вместе с замедлением машины (троттлинг ноутбука —
+до ~3×). Калибровка в JSON и в сообщении о падении отделяет «медленную
+машину» от «медленного кода». Приёмочный прогон — на машине без троттлинга
+(qa/README.md, «Подготовка»).
 """
 from __future__ import annotations
 
 import asyncio
+import copy
+import statistics
 import time
 from collections import defaultdict
 from typing import Optional
@@ -40,6 +50,18 @@ DASHBOARD_P95_LIMIT_MS = 2000.0
 #: Выгрузки и комментарии на врача (SPEC §22: 5 + 3, итого 10 запросов с входом).
 EXPORTS = ("export.csv", "export.pdf", "export.csv", "export.pdf", "export.csv")
 NOTES = 3
+
+#: Калибровка: запросы одного врача по очереди (без комментариев — их число проверяется).
+CALIBRATION_KINDS = ("login", "dashboard", "export.csv", "export.pdf")
+
+#: Ориентиры калибровки на машине разработчика без троттлинга (для сравнения, не порог).
+REFERENCE_CALIBRATION_MS = {
+    "cpu_bench": 65.0,
+    "login": 8.0,
+    "dashboard": 44.0,
+    "export.csv": 20.0,
+    "export.pdf": 85.0,
+}
 
 
 @pytest_asyncio.fixture
@@ -131,6 +153,44 @@ async def run_doctor(doctor: DoctorSession, magic: DoctorMagicLink) -> None:
         )
 
 
+def cpu_bench_ms() -> float:
+    """Скорость машины: 60 000 `copy.copy` на чистом Python (медиана из трёх), мс."""
+
+    class Probe:
+        def __init__(self) -> None:
+            self.x, self.y, self.z = 1, [1, 2], {"k": 1}
+
+    def once() -> float:
+        probe = Probe()
+        started = time.perf_counter()
+        for _ in range(60_000):
+            copy.copy(probe)
+        return (time.perf_counter() - started) * 1000
+
+    return statistics.median(once() for _ in range(3))
+
+
+async def calibrate(
+    transport: httpx.ASGITransport, magic: DoctorMagicLink, doctor_id: int, user_id: int
+) -> dict[str, float]:
+    """Последовательная стоимость запросов врача и CPU-микробенчмарк, мс (медианы)."""
+    samples: dict[str, list[float]] = defaultdict(list)
+    patient_url = f"/doctor/patient/{user_id}"
+    for _ in range(3):
+        async with httpx.AsyncClient(transport=transport, base_url="http://testserver") as client:
+            doctor = DoctorSession(client, doctor_id, user_id)
+            await doctor.request("login", "GET", "/doctor", params={"token": magic.make(doctor_id, user_id)})
+            await doctor.request("dashboard", "GET", patient_url, params={"days": "30"})
+            for name in ("export.csv", "export.pdf"):
+                await doctor.request(name, "GET", f"{patient_url}/{name}", params={"days": "30"})
+            for kind in CALIBRATION_KINDS:
+                samples[kind].extend(doctor.timings[kind])
+    result = {kind: round(statistics.median(values), 1) for kind, values in samples.items()}
+    result["cpu_bench"] = round(cpu_bench_ms(), 1)
+    result["slowdown_vs_reference"] = round(result["cpu_bench"] / REFERENCE_CALIBRATION_MS["cpu_bench"], 2)
+    return result
+
+
 def p95(values: list[float]) -> float:
     """p95 по ближайшему рангу."""
     ordered = sorted(values)
@@ -155,6 +215,7 @@ async def test_doctors_burst(load_db, doctor_pairs, load_log, load_report, tmp_p
         DoctorSession(client, doctor_id, user_id)
         for client, (doctor_id, user_id) in zip(clients, doctor_pairs)
     ]
+    calibration = await calibrate(transport, magic, *doctor_pairs[0])
     started = time.perf_counter()
     try:
         await asyncio.gather(*(run_doctor(doctor, magic) for doctor in doctors))
@@ -203,6 +264,8 @@ async def test_doctors_burst(load_db, doctor_pairs, load_log, load_report, tmp_p
         "elapsed_s": round(elapsed, 3),
         "p95_ms": {kind: round(p95(values), 2) for kind, values in timings.items()},
         "dashboard_p95_limit_ms": DASHBOARD_P95_LIMIT_MS,
+        "calibration_ms": calibration,
+        "reference_calibration_ms": REFERENCE_CALIBRATION_MS,
         "errors": errors,
         "misplaced_notes": misplaced,
         "missing_notes": [list(pair) for pair in missing],
@@ -215,11 +278,19 @@ async def test_doctors_burst(load_db, doctor_pairs, load_log, load_report, tmp_p
                             doctor_id=doctor.doctor_id)
     load_log.summary(
         f"doctor: {len(doctors)} врачей, {requests} запросов за {elapsed:.2f} с, "
-        f"p95 карточки {dashboard_p95:.0f} мс, ошибок {sum(len(e) for e in errors.values())}",
+        f"p95 карточки {dashboard_p95:.0f} мс, ошибок {sum(len(e) for e in errors.values())}; "
+        f"калибровка: CPU {calibration['cpu_bench']:.0f} мс (×{calibration['slowdown_vs_reference']} "
+        f"к эталону), PDF {calibration['export.pdf']:.0f} мс",
         **{key: value for key, value in report.items() if key not in {"errors"}},
     )
     assert not errors, f"неуспешные запросы врачей: {errors}"
     assert requests == expected_requests, f"запросов {requests}, ожидалось {expected_requests}"
-    assert dashboard_p95 < DASHBOARD_P95_LIMIT_MS, f"p95 карточки {dashboard_p95:.0f} мс"
+    assert dashboard_p95 < DASHBOARD_P95_LIMIT_MS, (
+        f"p95 карточки {dashboard_p95:.0f} мс ≥ {DASHBOARD_P95_LIMIT_MS:.0f} мс. Калибровка машины: "
+        f"CPU-бенчмарк {calibration['cpu_bench']:.0f} мс — ×{calibration['slowdown_vs_reference']} к эталону "
+        f"{REFERENCE_CALIBRATION_MS['cpu_bench']:.0f} мс; PDF {calibration['export.pdf']:.0f} мс "
+        f"(эталон {REFERENCE_CALIBRATION_MS['export.pdf']:.0f}). Множитель ≈ 2–3 — машина в "
+        "троттлинге, повторите на машине без него (qa/README.md, «Подготовка»); ≈ 1 — медленный код"
+    )
     assert not misplaced, f"комментарии не на своих местах: {misplaced}"
     assert not missing, f"нет комментариев у пар (doctor_id, user_id): {missing}"
