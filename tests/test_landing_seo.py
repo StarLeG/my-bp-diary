@@ -336,3 +336,9 @@ def test_yandex_verification_file() -> None:
     """Файл подтверждения Яндекс.Вебмастера (способ «HTML-файл») с тем же кодом, что в метатеге."""
     page = (LANDING / "yandex_4226e1494c17becc.html").read_text(encoding="utf-8")
     assert "Verification: 4226e1494c17becc" in page
+
+
+def test_google_verification_file() -> None:
+    """Файл подтверждения Google Search Console (способ «HTML-файл»)."""
+    page = (LANDING / "googlecdb45f49ef70d555.html").read_text(encoding="utf-8")
+    assert page.strip() == "google-site-verification: googlecdb45f49ef70d555.html"
