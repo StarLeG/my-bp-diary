@@ -7,12 +7,13 @@
 история создаются одной транзакцией — сбой посреди запуска не оставляет
 «пустый» аккаунт, который повторный запуск пропустил бы молча.
 
-ТОЛЬКО для тестового стенда: в прод-БД запускать нельзя.
+ТОЛЬКО для тестового стенда: БД без «test-stand» в имени отклоняется
+(`qa.seed.ensure_stand_db`, SPEC.md §22).
 
 Запуск (из корня репозитория):
 
     LOAD_PASSWORD='<пароль стенда>' \\
-        uv run python qa/seed_load_users.py --db data/test-stand.sqlite3 --count 20
+        uv run python qa/seed/seed_load_users.py --db data/test-stand.sqlite3 --count 20
 
 Пароль берётся из `LOAD_PASSWORD` или `--password`; в коде его нет
 (CLAUDE.md, «Правила для Claude Code» §2).
@@ -21,26 +22,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import os
 import sys
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
 from sqlalchemy import select  # noqa: E402
 
 from bot.db import create_engine, create_session_factory, init_db  # noqa: E402
 from bot.models import WebUser  # noqa: E402
 from bot.services import measurements as measurements_service  # noqa: E402
+from qa.seed import ensure_stand_db, load_password_from_env, patient_email, patient_tg_id  # noqa: E402
 from web.cabinet import auth as web_auth  # noqa: E402
-
-#: Telegram ID нагрузочных пользователей (вне диапазона живых).
-TG_ID_BASE = 990_000
 
 
 async def seed(db_path: str, count: int, password: str, days: int) -> None:
     """Создать нагрузочные аккаунты и историю измерений (идемпотентно)."""
+    ensure_stand_db(db_path)
     engine = create_engine(db_path)
     await init_db(engine)
     factory = create_session_factory(engine)
@@ -48,10 +47,10 @@ async def seed(db_path: str, count: int, password: str, days: int) -> None:
     backfilled = 0
     untouched = 0
     for n in range(1, count + 1):
-        email = f"load{n}@load.test"
+        email = patient_email(n)
         async with factory() as session:
             user = await measurements_service.get_or_create_user(
-                session, TG_ID_BASE + n
+                session, patient_tg_id(n)
             )
             existing = (
                 await session.execute(select(WebUser).where(WebUser.email == email))
@@ -110,7 +109,7 @@ def main() -> None:
     parser.add_argument("--count", type=int, default=20, help="число аккаунтов")
     parser.add_argument(
         "--password",
-        default=os.environ.get("LOAD_PASSWORD", ""),
+        default=load_password_from_env(),
         help="пароль аккаунтов (по умолчанию — LOAD_PASSWORD из окружения)",
     )
     parser.add_argument("--days", type=int, default=30, help="дней истории измерений")

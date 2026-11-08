@@ -3,13 +3,13 @@
 20 одновременных пользователей проходят типовой сценарий: вход → дашборд →
 экспорт CSV за 30 дней → добавление лекарства → профиль и настройки. Каждый
 виртуальный пользователь работает под своей учётной записью
-(см. `qa/seed_load_users.py`).
+(см. `qa/seed/seed_all.py`).
 
 Запуск (против ТЕСТОВОГО стенда, не против прод-данных):
 
     # 1. один раз подготовить учётные записи и историю измерений:
     LOAD_PASSWORD='<пароль стенда>' \\
-        uv run python qa/seed_load_users.py --db data/test-stand.sqlite3
+        uv run python qa/seed/seed_all.py --db data/test-stand.sqlite3
 
     # 2. нагрузить кабинет: 20 пользователей, вход 2/сек, 5 минут
     LOAD_PASSWORD='<пароль стенда>' \\
@@ -112,7 +112,7 @@ class CabinetUser(HttpUser):
             response.failure(
                 f"сессия не открыта для {self.email}: "
                 f"{response.status_code} → {location or '(без Location)'} "
-                f"(проверьте seed_load_users.py и LOAD_PASSWORD)"
+                f"(проверьте qa/seed/seed_all.py и LOAD_PASSWORD)"
             )
         self.stop()  # без входа метрики задач были бы ложно-зелёными
 

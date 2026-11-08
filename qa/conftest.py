@@ -439,9 +439,14 @@ _e2e_started = False
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Запомнить, что E2E-тесты реально запускались (хотя бы один)."""
+    """Запомнить, что E2E-тесты реально запускались (хотя бы один).
+
+    Считается только выполненное тело теста (`when == "call"`): пропуск из-за
+    ненастроенного стенда (SKIP на этапе setup) — не запуск, иначе дымовой
+    `pytest qa/` слал бы админу отчёт QA-стенда.
+    """
     global _e2e_started
-    if _e2e_started:
+    if _e2e_started or report.when != "call" or report.skipped:
         return
     if report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1] in _E2E_TEST_FILES:
         _e2e_started = True
@@ -492,11 +497,16 @@ def tg_loop() -> Iterator[TgLoop]:
 
 @pytest.fixture(scope="session")
 def tg_client(tg_loop: TgLoop) -> Iterator[TelegramClient]:
-    """Юзербот Telethon: авторизация по TELEGRAM_TEST_PHONE (§3, §22)."""
-    from telethon import TelegramClient
+    """Юзербот Telethon: авторизация по TELEGRAM_TEST_PHONE (§3, §22).
+
+    Сначала окружение, потом импорт: без настроенного стенда или без группы
+    зависимостей `qa` (`uv sync --group qa`) тесты пропускаются, а не падают.
+    """
+    env = _required_env("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_TEST_PHONE")
+    telethon = pytest.importorskip("telethon", reason="нет Telethon: uv sync --group qa")
+    TelegramClient = telethon.TelegramClient
     from telethon.sessions import StringSession
 
-    env = _required_env("TELEGRAM_API_ID", "TELEGRAM_API_HASH", "TELEGRAM_TEST_PHONE")
     api_id = int(env["TELEGRAM_API_ID"])  # type: ignore[index]
     api_hash = env["TELEGRAM_API_HASH"]  # type: ignore[index]
     phone = env["TELEGRAM_TEST_PHONE"]  # type: ignore[index]
@@ -553,10 +563,22 @@ def cabinet_url() -> str:
 
 @pytest.fixture(scope="session")
 def browser() -> Iterator[Browser]:
-    from playwright.sync_api import sync_playwright
-
-    with sync_playwright() as playwright:
-        yield playwright.chromium.launch(headless=True)
+    """Chromium Playwright; без группы `load` или без браузера — SKIP, а не ошибка."""
+    sync_api = pytest.importorskip(
+        "playwright.sync_api", reason="нет Playwright: uv sync --group load"
+    )
+    with sync_api.sync_playwright() as playwright:
+        try:
+            launched = playwright.chromium.launch(headless=True)
+        except sync_api.Error as exc:
+            pytest.skip(
+                f"Chromium не установлен ({exc.message.splitlines()[0]}): "
+                "uv run playwright install chromium"
+            )
+        try:
+            yield launched
+        finally:
+            launched.close()
 
 
 @pytest.fixture
@@ -592,3 +614,166 @@ def ensure_onboarded(dialog, db, tg_me, onboard):
         onboard()
 
     return _ensure
+
+
+# ─────────────────── Нагрузочные тесты (SPEC.md, §22) ───────────────────
+#
+# Профиль: без флага — дымовой (`qa.seed.SMOKE`, секунды), `LOAD_TEST=1` —
+# полный (`qa.seed.FULL`). Артефакты полного прогона — `qa/reports/load/`:
+# `<тест>.json` (итоги для `test_load_regression.py`) и `qa-load.jsonl`
+# (структурированный лог `qa.load`). Дымовой прогон артефактов не пишет —
+# не затирает результаты полного.
+
+#: Полный профиль нагрузки (SPEC §3, `LOAD_TEST`).
+LOAD_FULL = os.environ.get("LOAD_TEST", "").strip() == "1"
+
+#: Артефакты нагрузочных тестов (вне git: `qa/reports/` в .gitignore).
+LOAD_REPORTS_DIR = os.path.join(REPORTS_DIR, "load")
+
+#: Структурированный лог `qa.load` (JSON-строки, SPEC §22 «Логи и отчёты»).
+LOAD_LOG_PATH = os.path.join(LOAD_REPORTS_DIR, "qa-load.jsonl")
+
+#: Регрессия читает артефакты, а не производит их.
+_REGRESSION_FILE = "test_load_regression.py"
+
+
+def _test_file(nodeid: str) -> str:
+    """Имя файла теста из nodeid (`qa/test_x.py::Test::test` → `test_x.py`)."""
+    return nodeid.split("::", 1)[0].replace("\\", "/").rsplit("/", 1)[-1]
+
+
+def pytest_collection_finish(session: pytest.Session) -> None:
+    """Начало полного прогона: убрать JSON прошлого прогона и начать лог заново.
+
+    Срабатывает, только если в сессии есть хотя бы один `test_load_*`, кроме
+    регрессии: отдельный запуск регрессии (после Locust) должен видеть
+    артефакты, а не стирать их. Locust CSV не трогается (SPEC §22).
+    """
+    if not LOAD_FULL:
+        return
+    files = {_test_file(item.nodeid) for item in session.items}
+    if not any(name.startswith("test_load_") and name != _REGRESSION_FILE for name in files):
+        return
+    os.makedirs(LOAD_REPORTS_DIR, exist_ok=True)
+    for name in os.listdir(LOAD_REPORTS_DIR):
+        if name.endswith(".json"):
+            os.remove(os.path.join(LOAD_REPORTS_DIR, name))
+    with open(LOAD_LOG_PATH, "w", encoding="utf-8"):
+        pass
+
+
+class _JsonLineFormatter(logging.Formatter):
+    """Одна запись лога — одна JSON-строка: время, уровень, сообщение и поля."""
+
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "ts": round(record.created, 3),
+            "level": record.levelname,
+            "msg": record.getMessage(),
+            **getattr(record, "fields", {}),
+        }
+        return json.dumps(payload, ensure_ascii=False, default=str)
+
+
+class LoadLog:
+    """Структурированный лог нагрузки `qa.load` (user_id, op, duration_ms, …)."""
+
+    def __init__(self, logger: logging.Logger) -> None:
+        self.logger = logger
+
+    def op(
+        self,
+        op: str,
+        *,
+        user_id: Optional[int] = None,
+        duration_ms: Optional[float] = None,
+        **fields: object,
+    ) -> None:
+        """Записать одну операцию: только в файл (в консоль — сводки)."""
+        record_fields = {"op": op, "user_id": user_id, "duration_ms": duration_ms, **fields}
+        self.logger.debug(op, extra={"fields": record_fields})
+
+    def summary(self, text: str, **fields: object) -> None:
+        """Сводка шага: в файл и кратко в консоль."""
+        self.logger.info(text, extra={"fields": fields})
+
+
+@pytest.fixture(scope="session")
+def load_full() -> bool:
+    """True — полный профиль (`LOAD_TEST=1`), False — дымовой."""
+    return LOAD_FULL
+
+
+@pytest.fixture(scope="session")
+def load_scale(load_full: bool):
+    """Объёмы сида профиля: `qa.seed.FULL` или `qa.seed.SMOKE`."""
+    from qa.seed import FULL, SMOKE
+
+    return FULL if load_full else SMOKE
+
+
+@pytest.fixture(scope="session")
+def load_password() -> str:
+    """Пароль нагрузочных аккаунтов: `LOAD_PASSWORD` или случайный на сессию.
+
+    Случайный пароль живёт только в памяти процесса pytest: не пишется ни в
+    файлы, ни в логи (SPEC §22, CLAUDE.md — пароли не хардкодятся).
+    """
+    import secrets
+
+    from qa.seed import load_password_from_env
+
+    return load_password_from_env() or secrets.token_urlsafe(24)
+
+
+@pytest.fixture(scope="session")
+def load_log(load_full: bool) -> Iterator[LoadLog]:
+    """Логгер `qa.load`: JSON-строки в `qa-load.jsonl` (полный профиль) + консоль."""
+    logger = logging.getLogger("qa.load")
+    logger.setLevel(logging.DEBUG)
+    logger.propagate = False
+    handlers: list[logging.Handler] = []
+    console = logging.StreamHandler()
+    console.setLevel(logging.INFO)
+    console.setFormatter(logging.Formatter("[qa.load] %(message)s"))
+    handlers.append(console)
+    if load_full:
+        os.makedirs(LOAD_REPORTS_DIR, exist_ok=True)
+        file_handler = logging.FileHandler(LOAD_LOG_PATH, mode="a", encoding="utf-8")
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(_JsonLineFormatter())
+        handlers.append(file_handler)
+    for handler in handlers:
+        logger.addHandler(handler)
+    try:
+        yield LoadLog(logger)
+    finally:
+        for handler in handlers:
+            logger.removeHandler(handler)
+            handler.close()
+
+
+@pytest.fixture(scope="session")
+def load_report(load_full: bool) -> Callable[[str, dict], Optional[str]]:
+    """Записать итог нагрузочного теста в `qa/reports/load/<name>.json`.
+
+    Только в полном профиле (дымовой не затирает артефакты полного); возвращает
+    путь к файлу или None. Формат: `{"name", "profile", "finished_at", **payload}`.
+    """
+
+    def _write(name: str, payload: dict) -> Optional[str]:
+        if not load_full:
+            return None
+        os.makedirs(LOAD_REPORTS_DIR, exist_ok=True)
+        path = os.path.join(LOAD_REPORTS_DIR, f"{name}.json")
+        document = {
+            "name": name,
+            "profile": "full",
+            "finished_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+            **payload,
+        }
+        with open(path, "w", encoding="utf-8") as fh:
+            json.dump(document, fh, ensure_ascii=False, indent=2, default=str)
+        return path
+
+    return _write

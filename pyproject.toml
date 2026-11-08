@@ -27,11 +27,21 @@ dependencies = [
 [dependency-groups]
 dev = [
     "httpx>=0.28.1",
-    "locust>=2.47.0",
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov>=5.0",
     "pytest-mock>=3.14",
+]
+# Нагрузочные тесты qa/ (SPEC §22): Locust, HTML-отчёт pytest, Playwright.
+load = [
+    "locust>=2.47.0",
+    "pytest-html>=4.1",
+    "playwright>=1.45",
+]
+# E2E QA-стенда (SPEC §22): Telethon + всё для pytest; образ qa/Dockerfile.
+qa = [
+    "telethon>=1.36",
+    {include-group = "dev"},
 ]
 
 [build-system]
