@@ -673,6 +673,35 @@ async def intake_labels_by_measurement(
     return result
 
 
+#: Статус флага «Принял лекарство» в ячейке «Лекарство» истории (§16.2).
+MEDICATION_TAKEN_LABELS: dict[Optional[bool], str] = {
+    True: "Принято",
+    False: "Пропущено",
+    None: "—",
+}
+
+
+def medication_cell(flag: Optional[bool], intake: list[str]) -> str:
+    """Ячейка «Лекарство» «Истории записей» и PDF-отчёта (SPEC.md, §16.2, §10.1).
+
+    Есть отмеченные приёмы (`measurement_medications`, §4.11) — перечень:
+    «Принято: Лозартан 50 мг, Амлодипин 5 мг»; нет — статус флага
+    «Принято» / «Пропущено» / «—» (`measurements.medication_taken`).
+    """
+    if intake:
+        return f"{MEDICATION_TAKEN_LABELS[True]}: {', '.join(intake)}"
+    return MEDICATION_TAKEN_LABELS[flag]
+
+
+async def medication_cells(
+    session: AsyncSession, user: User, measurements: Iterable[Measurement]
+) -> dict[int, str]:
+    """Ячейки «Лекарство» для всех записей одним запросом связей (§16.2, §10.1)."""
+    rows = list(measurements)
+    intake = await intake_labels_by_measurement(session, user, [m.id for m in rows])
+    return {m.id: medication_cell(m.medication_taken, intake.get(m.id, [])) for m in rows}
+
+
 # ─────────────── Выбор лекарств в форме записи кабинета (§16.2) ───────────────
 #
 # Журнал записи из кабинета — строки `medication_logs` с моментом самой записи

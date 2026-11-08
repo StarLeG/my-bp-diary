@@ -60,7 +60,7 @@ REFERENCE_CALIBRATION_MS = {
     "login": 8.0,
     "dashboard": 44.0,
     "export.csv": 20.0,
-    "export.pdf": 85.0,
+    "export.pdf": 115.0,  # общий отчёт §10.1: сводка, перечень лекарств, два шрифта
 }
 
 

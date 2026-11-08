@@ -95,9 +95,12 @@ def build_meds_csv(
     return _render(MEDS_HEADER, rows)
 
 
-def file_name(kind: str, start_day: date, end_day: date) -> str:
-    """Имя файла: `bp_diary_<дата1>-<дата2>.csv` (даты ГГГГММДД)."""
-    return f"{kind}_{start_day:%Y%m%d}-{end_day:%Y%m%d}.csv"
+def file_name(kind: str, start_day: date, end_day: date, ext: str = "csv") -> str:
+    """Имя файла: `bp_diary_<дата1>-<дата2>.csv` (даты ГГГГММДД).
+
+    `ext` — расширение: тем же правилом называется PDF-отчёт (§10.1).
+    """
+    return f"{kind}_{start_day:%Y%m%d}-{end_day:%Y%m%d}.{ext}"
 
 
 async def export_measurements(

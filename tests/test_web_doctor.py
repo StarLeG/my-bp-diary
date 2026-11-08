@@ -16,7 +16,7 @@ from itsdangerous import URLSafeTimedSerializer
 
 from bot.config import Settings
 from bot.handlers import doctor as doctor_handlers
-from bot.services import doctor as doctor_service
+from bot.services import pdf_report
 from web.cabinet import auth, doctor_auth
 from web.cabinet.app import DOCTOR_COOKIE, create_app
 
@@ -607,7 +607,7 @@ class TestDoctorBlockingOffLoop:
         _add_measurement(settings, user_id)
         _login_doctor(client, doctor_id)
         gate = loop_gate(b"%PDF-gate")
-        monkeypatch.setattr(doctor_service, "build_report_pdf", gate)
+        monkeypatch.setattr(pdf_report, "build_pdf", gate)
         pdf, page = gate.assert_loop_free(
             heavy=lambda: client.get(f"/doctor/patient/{user_id}/export.pdf"),
             light=lambda: client.get("/doctor"),

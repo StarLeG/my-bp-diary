@@ -99,6 +99,8 @@
 
       {% if error == "too_many" %}
         <p class="alert alert-error">Слишком много записей, выберите период поменьше.</p>
+      {% elif error == "empty" %}
+        <p class="alert alert-error">За этот период записей нет.</p>
       {% elif error == "note" %}
         <p class="alert alert-error">Заметка не сохранена: нужен текст до 1000 символов.</p>
       {% elif saved == "note" %}

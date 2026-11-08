@@ -1,4 +1,6 @@
-"""Логика связей врача и пациента, генерация отчётов (SPEC.md, §4.8–4.10, §21).
+"""Логика связей врача и пациента (SPEC.md, §4.8–4.10, §21).
+
+PDF-отчёт для врача — общий генератор `bot/services/pdf_report.py` (§10.1).
 
 Связи живут в `doctor_patients`: `pending` — пациент добавил врача, `active` —
 врач открыл ссылку-приглашение (доступ к данным открыт), `revoked` — пациент
@@ -12,41 +14,20 @@ from __future__ import annotations
 
 import re
 import secrets
-from datetime import datetime, timezone
-from pathlib import Path
-from typing import Optional, Sequence
-from zoneinfo import ZoneInfo
+from typing import Optional
 
 from argon2 import PasswordHasher
-from fpdf import FPDF
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot import texts
-from bot.models import Doctor, DoctorNote, DoctorPatient, Measurement, User
+from bot.models import Doctor, DoctorNote, DoctorPatient, User
 
 #: Проверка формата e-mail при добавлении врача (как в §16.2 для ЛК).
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
 #: Хеш пароля врача — только Argon2id (CLAUDE.md, «Безопасность и платежи»).
 _password_hasher = PasswordHasher()
-
-#: Шрифт отчёта PDF: DejaVuSans покрывает кириллицу (лицензия свободная).
-REPORT_FONT_PATH = Path(__file__).resolve().parent / "fonts" / "DejaVuSans.ttf"
-
-#: Заголовки таблицы отчёта PDF.
-_REPORT_COLUMNS = ("Дата", "Сист.", "Диаст.", "Пульс", "Лекарство", "Самочувствие")
-
-#: Отметка приёма лекарства в отчёте PDF.
-_REPORT_MED_LABELS = {True: "да", False: "нет", None: "—"}
-
-
-def _report_feeling(feeling: Optional[str]) -> str:
-    """Самочувствие в таблице отчёта — по-русски, как в боте («головная боль»), не ключ модели."""
-    if not feeling:
-        return "—"
-    return texts.FEELING_LABELS.get(feeling, feeling)[:20]
 
 
 def valid_email(email: str) -> bool:
@@ -225,76 +206,3 @@ async def notes_for_patient(
         .order_by(DoctorNote.created_at.desc(), DoctorNote.id.desc())
     )
     return list(rows.all())
-
-
-# ─────────────────────────── Отчёт PDF ───────────────────────────
-
-
-def build_report_pdf(
-    patient_label: str,
-    measurements: Sequence[Measurement],
-    tz_name: str = "Europe/Minsk",
-    generated_at: Optional[datetime] = None,
-) -> bytes:
-    """PDF-отчёт для врача: сводка и таблица измерений (§21).
-
-    Кириллица — встроенным шрифтом DejaVuSans (`REPORT_FONT_PATH`).
-    """
-    pdf = FPDF(format="A4")
-    pdf.set_auto_page_break(auto=True, margin=15)
-    pdf.add_font("DejaVu", fname=str(REPORT_FONT_PATH))
-    pdf.add_page()
-    pdf.set_font("DejaVu", size=14)
-    pdf.cell(text="Отчёт по давлению", new_x="LMARGIN", new_y="NEXT")
-    pdf.set_font("DejaVu", size=10)
-    moment = (generated_at or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    pdf.cell(
-        text=f"{patient_label} · сформирован {moment:%d.%m.%Y %H:%M} UTC",
-        new_x="LMARGIN",
-        new_y="NEXT",
-    )
-    pdf.ln(2)
-    pdf.multi_cell(w=0, text=_summary_text(measurements), new_x="LMARGIN", new_y="NEXT")
-    pdf.ln(2)
-    _report_table(pdf, measurements, tz_name)
-    return bytes(pdf.output())
-
-
-def _summary_text(measurements: Sequence[Measurement]) -> str:
-    """Сводка отчёта: количество и средние значения."""
-    if not measurements:
-        return "Записей нет."
-    sys_avg = sum(m.systolic for m in measurements) / len(measurements)
-    dia_avg = sum(m.diastolic for m in measurements) / len(measurements)
-    pulses = [m.pulse for m in measurements if m.pulse is not None]
-    lines = [
-        f"Измерений: {len(measurements)}",
-        f"Систолическое: в среднем {sys_avg:.0f}",
-        f"Диастолическое: в среднем {dia_avg:.0f}",
-    ]
-    if pulses:
-        lines.append(f"Пульс: в среднем {sum(pulses) / len(pulses):.0f}")
-    return "\n".join(lines)
-
-
-def _report_table(pdf: FPDF, measurements: Sequence[Measurement], tz_name: str) -> None:
-    """Таблица измерений отчёта (по локальному времени пациента)."""
-    widths = (38, 18, 18, 18, 28, 50)
-    pdf.set_font("DejaVu", size=9)
-    for title, width in zip(_REPORT_COLUMNS, widths):
-        pdf.cell(width, 7, text=title, border=1)
-    pdf.ln()
-    tz = ZoneInfo(tz_name)
-    for m in measurements:
-        moment: datetime = m.timestamp.astimezone(tz)
-        values = (
-            f"{moment:%d.%m.%Y %H:%M}",
-            str(m.systolic),
-            str(m.diastolic),
-            str(m.pulse) if m.pulse is not None else "—",
-            _REPORT_MED_LABELS.get(m.medication_taken, "—"),
-            _report_feeling(m.feeling),
-        )
-        for value, width in zip(values, widths):
-            pdf.cell(width, 6, text=value, border=1)
-        pdf.ln()

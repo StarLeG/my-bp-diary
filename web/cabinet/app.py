@@ -19,6 +19,7 @@ from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import AsyncIterator, Mapping, Optional
+from urllib.parse import urlencode
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request
@@ -38,6 +39,7 @@ from bot.models import Doctor, Measurement, Medication, Reminder, User, WebUser
 from bot.services import csv_export
 from bot.services import doctor as doctor_service
 from bot.services import medications as medications_service
+from bot.services import pdf_report
 from bot.services import stats
 from bot.services.measurements import (
     DuplicateMeasurementError,
@@ -70,34 +72,6 @@ SLOT_ORDER = ("morning", "noon", "evening")
 
 #: Окно предотметки лекарств в форме записи: слот не дальше 2 ч от времени (§16.2).
 PREFILL_WINDOW_MINUTES = 120
-
-#: Человекочитаемые отметки приёма лекарства в истории.
-MEDICATION_TAKEN_LABELS = {True: "Принято", False: "Пропущено", None: "—"}
-
-
-def _medication_cell(flag: bool | None, intake: list[str]) -> str:
-    """Ячейка «Лекарство» в «Истории записей» (SPEC.md, раздел 16.2).
-
-    Есть отмеченные приёмы (`measurement_medications`, §4.11) — перечень:
-    «Принято: Лозартан 50 мг, Амлодипин 5 мг»; нет — статус флага
-    «Принято» / «Пропущено» / «—» (`measurements.medication_taken`).
-    """
-    if intake:
-        return f"{MEDICATION_TAKEN_LABELS[True]}: {', '.join(intake)}"
-    return MEDICATION_TAKEN_LABELS[flag]
-
-
-async def _medication_cells(
-    db: AsyncSession, user: User, measurements: list[Measurement]
-) -> dict[int, str]:
-    """Ячейки «Лекарство» для всех записей истории одним запросом связей (§16.2)."""
-    intake = await medications_service.intake_labels_by_measurement(
-        db, user, [m.id for m in measurements]
-    )
-    return {
-        m.id: _medication_cell(m.medication_taken, intake.get(m.id, []))
-        for m in measurements
-    }
 
 _BASE_DIR = Path(__file__).resolve().parent
 _templates = Jinja2Templates(directory=str(_BASE_DIR / "templates"))
@@ -144,6 +118,40 @@ def _resolve_period(
         return start, end
     span = 30 if days == "30" else 7
     return today - timedelta(days=span - 1), today
+
+
+async def _pdf_report_response(
+    db: AsyncSession,
+    user: User,
+    start_day: date,
+    end_day: date,
+    *,
+    subject: str,
+    back_url: str,
+    period: Mapping[str, str],
+) -> Response:
+    """PDF-отчёт за период — общий для ЛК и кабинета врача (§10.1).
+
+    Пустой период и лимит — файл не формируется: редирект на страницу
+    (`back_url`) с тем же периодом и `error=empty` / `error=too_many`.
+    Транзакция чтения закрывается до генерации; сам PDF рисуется в thread
+    pool, чтобы не стоял весь кабинет (§7.2 п.7).
+    """
+    try:
+        data = await pdf_report.collect_report(
+            db, user, start_day, end_day, subject=subject
+        )
+    except (pdf_report.ReportEmptyError, pdf_report.ReportTooLargeError) as exc:
+        error = "empty" if isinstance(exc, pdf_report.ReportEmptyError) else "too_many"
+        query = urlencode({**period, "error": error})
+        return RedirectResponse(url=f"{back_url}?{query}", status_code=303)
+    await db.commit()
+    payload = await asyncio.to_thread(pdf_report.build_pdf, data)
+    return Response(
+        content=payload,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{data.file_name}"'},
+    )
 
 
 def _chart_payload(measurements: list[Measurement], tz_name: str) -> list[dict]:
@@ -713,7 +721,7 @@ def create_app(
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
-        medication_cells = await _medication_cells(db, user, measurements)
+        medication_cells = await medications_service.medication_cells(db, user, measurements)
         medications = await medications_service.list_medications(db, user)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         reminders = list(
@@ -1260,6 +1268,28 @@ def create_app(
             },
         )
 
+    @app.get("/export/report.pdf")
+    async def export_report_pdf(
+        request: Request,
+        days: str = Query("7"),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """PDF-отчёт пациента за период фильтра — только свои данные (§16.2, §10.1)."""
+        user = await load_user(db, web_user)
+        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        return await _pdf_report_response(
+            db,
+            user,
+            start_day,
+            end_day,
+            subject=pdf_report.PATIENT_SUBJECT,
+            back_url="/",
+            period={"days": days, "date_from": date_from, "date_to": date_to},
+        )
+
     # ───────────────────── Кабинет врача (SPEC.md, раздел 21) ─────────────────────
 
     def set_csrf_cookie(request: Request, response: Response, csrf_token: str) -> None:
@@ -1404,7 +1434,7 @@ def create_app(
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
-        medication_cells = await _medication_cells(db, user, measurements)
+        medication_cells = await medications_service.medication_cells(db, user, measurements)
         notes = await doctor_service.notes_for_patient(db, user.id)
         csrf_token = csrf.issue()
         response = _templates.TemplateResponse(
@@ -1473,25 +1503,17 @@ def create_app(
         db: AsyncSession = Depends(get_db),
         doctor: Doctor = Depends(require_doctor),
     ) -> Response:
-        """PDF-отчёт по пациенту за период (только `status='active'`, §21)."""
+        """PDF-отчёт по пациенту за период (только `status='active'`, §21, §10.1)."""
         user = await require_patient_link(db, doctor, user_id)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
-        measurements = await measurements_for_period(db, user, start_day, end_day)
-        # FPDF — ~90 мс на 30 дней: в thread pool, чтобы не стоял весь кабинет (§7.2 п.7).
-        payload = await asyncio.to_thread(
-            doctor_service.build_report_pdf,
-            patient_label=f"Пациент {user.telegram_id}",
-            measurements=measurements,
-            tz_name=user.timezone,
-        )
-        return Response(
-            content=payload,
-            media_type="application/pdf",
-            headers={
-                "Content-Disposition": (
-                    f'attachment; filename="bp-{start_day.isoformat()}-{end_day.isoformat()}.pdf"'
-                )
-            },
+        return await _pdf_report_response(
+            db,
+            user,
+            start_day,
+            end_day,
+            subject=pdf_report.doctor_subject(user.telegram_id),
+            back_url=f"/doctor/patient/{user_id}",
+            period={"days": days, "date_from": date_from, "date_to": date_to},
         )
 
     @app.post("/doctor/patient/{user_id}/note")

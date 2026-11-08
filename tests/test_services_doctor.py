@@ -1,7 +1,7 @@
 """Сервис связей врача и пациента (SPEC.md, разделы 4.8–4.10, 21).
 
 Покрывается: валидация e-mail, создание врача с Argon2id-паролем, жизненный
-цикл связи (`pending` → `active` → `revoked`), заметки врача, PDF-отчёт и
+цикл связи (`pending` → `active` → `revoked`), заметки врача и
 гонки вставок (§7.2): UNIQUE по e-mail врача и паре врач–пациент отсекают
 конкурентов, проигравший получает уже существующую строку.
 """
@@ -15,7 +15,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bot.db import create_engine, create_session_factory, init_db
-from bot.models import Doctor, DoctorNote, DoctorPatient, Measurement, User
+from bot.models import Doctor, DoctorNote, DoctorPatient, User
 from bot.services import doctor as doctor_service
 
 TG_ID = 111_111
@@ -354,78 +354,6 @@ class TestNotes:
         await session.commit()
         await doctor_service.add_note(session, doctor.id, user.id, "Пациенту 111111")
         assert await doctor_service.notes_for_patient(session, other.id) == []
-
-
-# ─────────────────────────── PDF-отчёт ───────────────────────────
-
-
-def _measurement(**overrides) -> Measurement:
-    from datetime import datetime, timezone
-
-    data = {
-        "user_id": 1,
-        "timestamp": datetime(2026, 1, 10, 8, 30, tzinfo=timezone.utc),
-        "systolic": 130,
-        "diastolic": 85,
-    }
-    data.update(overrides)
-    return Measurement(**data)
-
-
-class TestBuildReportPdf:
-    def test_empty_measurements(self) -> None:
-        payload = doctor_service.build_report_pdf("Пациент 111111", [])
-        assert payload.startswith(b"%PDF")
-        assert len(payload) > 500
-
-    def test_with_measurements(self) -> None:
-        measurements = [
-            _measurement(),
-            _measurement(pulse=72, medication_taken=True, feeling="normal"),
-            _measurement(pulse=None, medication_taken=None, feeling=None),
-        ]
-        payload = doctor_service.build_report_pdf(
-            "Пациент 111111", measurements, tz_name="Europe/Minsk"
-        )
-        assert payload.startswith(b"%PDF")
-        assert len(payload) > 500
-
-    def test_cyrillic_patient_label(self) -> None:
-        payload = doctor_service.build_report_pdf("Пациент 111111", [], tz_name="UTC")
-        assert payload.startswith(b"%PDF")
-
-    def test_custom_generated_at(self) -> None:
-        from datetime import datetime, timezone
-
-        payload = doctor_service.build_report_pdf(
-            "Пациент 111111",
-            [],
-            generated_at=datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc),
-        )
-        assert payload.startswith(b"%PDF")
-
-    def test_summary_text_without_pulse(self) -> None:
-        text = doctor_service._summary_text([_measurement(pulse=None)])
-        assert "Измерений: 1" in text
-        assert "Пульс" not in text
-
-    def test_summary_text_empty(self) -> None:
-        assert doctor_service._summary_text([]) == "Записей нет."
-
-    @pytest.mark.parametrize(
-        ("feeling", "expected"),
-        [
-            ("headache", "головная боль"),
-            ("weakness", "слабость"),
-            ("normal", "норма"),
-            ("other", "другое"),
-            (None, "—"),
-            ("", "—"),
-        ],
-    )
-    def test_feeling_in_russian(self, feeling, expected) -> None:
-        """Самочувствие в PDF — как в боте, а не ключ модели (`weakness`)."""
-        assert doctor_service._report_feeling(feeling) == expected
 
 
 # ─────────────────────────── Конкурентность (§7.2) ───────────────────────────
