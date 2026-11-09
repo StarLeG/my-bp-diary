@@ -14,14 +14,15 @@ from __future__ import annotations
 
 import re
 import secrets
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 from argon2 import PasswordHasher
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models import Doctor, DoctorNote, DoctorPatient, User
+from bot.models import Doctor, DoctorInvite, DoctorNote, DoctorPatient, User
 
 #: Проверка формата e-mail при добавлении врача (как в §16.2 для ЛК).
 EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
@@ -170,6 +171,237 @@ async def activate_link(session: AsyncSession, doctor_id: int, user_id: int) -> 
         link.status = "active"
         await session.commit()
     return True
+
+
+# ─────────────────── Врач в Telegram и приглашения (§4.13, §21) ───────────────────
+
+#: Срок ссылки-приглашения в бота (§4.13).
+INVITE_TTL = timedelta(hours=72)
+
+#: Максимальная длина имени пациента в приглашении (§4.13).
+PATIENT_NAME_MAX = 64
+
+#: Максимальная длина ФИО врача (§4.8).
+DOCTOR_NAME_MAX = 100
+
+#: Минимальная длина ФИО врача в `/iamdoctor` (§21).
+DOCTOR_NAME_MIN = 2
+
+#: Имя пользователя Telegram: 5–32 латинских букв, цифр и «_», «@» — по желанию.
+USERNAME_RE = re.compile(r"^@?([A-Za-z0-9_]{5,32})$")
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def normalize_username(raw: Optional[str]) -> Optional[str]:
+    """`@Ivanova_Doc` → `ivanova_doc`; неверный формат — None (§21)."""
+    match = USERNAME_RE.match((raw or "").strip())
+    return match.group(1).lower() if match else None
+
+
+def doctor_label(doctor: Doctor) -> str:
+    """Строка врача у пациента: ФИО → @username → e-mail (§21, C3).
+
+    Врач из Telegram — ФИО (из профиля или `/iamdoctor`); врач по e-mail —
+    адрес: его «ФИО» — лишь часть адреса до «@».
+    """
+    if doctor.telegram_id is not None:
+        if doctor.name:
+            return doctor.name
+        if doctor.telegram_username:
+            return f"@{doctor.telegram_username}"
+    return doctor.email or doctor.name
+
+
+def full_name(first_name: Optional[str], last_name: Optional[str]) -> str:
+    """«Имя Фамилия» из профиля Telegram, не длиннее 100 символов (§21, N4)."""
+    name = " ".join(part for part in (first_name, last_name) if part).strip()
+    return (name or "Врач")[:DOCTOR_NAME_MAX]
+
+
+async def doctor_by_telegram(session: AsyncSession, telegram_id: int) -> Optional[Doctor]:
+    """Врач по Telegram-аккаунту (или None — человек не врач)."""
+    return (
+        await session.execute(select(Doctor).where(Doctor.telegram_id == telegram_id))
+    ).scalar_one_or_none()
+
+
+async def doctor_by_username(session: AsyncSession, username: str) -> Optional[Doctor]:
+    """Поиск по @username — только среди врачей с Telegram (§21, T3).
+
+    Пациенты не ищутся никогда: по боту нельзя проверить, пользуется ли им
+    человек.
+    """
+    return (
+        await session.execute(
+            select(Doctor).where(
+                Doctor.telegram_username == username.lower(),
+                Doctor.telegram_id.is_not(None),
+            )
+        )
+    ).scalars().first()
+
+
+async def get_or_create_telegram_doctor(
+    session: AsyncSession, telegram_id: int, username: Optional[str], name: str
+) -> tuple[Doctor, bool]:
+    """Врач по Telegram-аккаунту; новый — с именем из профиля (§21, N4).
+
+    Гонка двух созданий отсекается UNIQUE по `doctors.telegram_id` (§7.2).
+    Возвращает (врач, создан ли новый).
+    """
+    doctor = await doctor_by_telegram(session, telegram_id)
+    if doctor is not None:
+        return doctor, False
+    doctor = Doctor(
+        telegram_id=telegram_id,
+        telegram_username=(username or "").lower() or None,
+        name=name[:DOCTOR_NAME_MAX],
+        password_hash=_password_hasher.hash(_random_password()),
+    )
+    session.add(doctor)
+    try:
+        await session.flush()
+        await session.commit()
+    except IntegrityError:
+        await session.rollback()
+        doctor = await doctor_by_telegram(session, telegram_id)
+        assert doctor is not None  # noqa: S101 — строка появилась от конкурента
+        return doctor, False
+    return doctor, True
+
+
+async def register_doctor(
+    session: AsyncSession, telegram_id: int, username: Optional[str], name: str
+) -> Doctor:
+    """`/iamdoctor`: зарегистрировать врача или сменить ФИО (§21, T4)."""
+    doctor, created = await get_or_create_telegram_doctor(session, telegram_id, username, name)
+    if not created and doctor.name != name:
+        doctor.name = name
+        await session.commit()
+    return doctor
+
+
+async def touch_username(
+    session: AsyncSession, telegram_id: int, username: Optional[str]
+) -> bool:
+    """Обновить username врача, если он изменился (§21, T10). True — обновлён.
+
+    Вызывается на каждое сообщение боту, поэтому сначала чтение: запись (и
+    блокировка SQLite на запись) — только если человек врач и username
+    действительно сменился.
+    """
+    value = (username or "").lower() or None
+    doctor = await doctor_by_telegram(session, telegram_id)
+    if doctor is None or doctor.telegram_username == value:
+        return False
+    doctor.telegram_username = value
+    await session.commit()
+    return True
+
+
+async def create_invite(
+    session: AsyncSession, user_id: int, patient_name: str, now: Optional[datetime] = None
+) -> DoctorInvite:
+    """Новая ссылка-приглашение пациента; прежние неиспользованные списываются (§4.13)."""
+    now = now or _utcnow()
+    await session.execute(
+        update(DoctorInvite)
+        .where(DoctorInvite.user_id == user_id, DoctorInvite.used_at.is_(None))
+        .values(used_at=now)
+    )
+    invite = DoctorInvite(
+        code=secrets.token_urlsafe(16),
+        user_id=user_id,
+        patient_name=(patient_name or "Пациент")[:PATIENT_NAME_MAX],
+        created_at=now,
+        expires_at=now + INVITE_TTL,
+    )
+    session.add(invite)
+    await session.commit()
+    return invite
+
+
+async def current_invite(
+    session: AsyncSession, user_id: int, patient_name: str, now: Optional[datetime] = None
+) -> DoctorInvite:
+    """Действующее приглашение пациента или новое (§4.13).
+
+    Повторный заход на экран «Через Telegram» или поиск по @username не
+    списывают ссылку, которую пациент, возможно, уже переслал врачу.
+    """
+    now = now or _utcnow()
+    invite = (
+        await session.execute(
+            select(DoctorInvite)
+            .where(
+                DoctorInvite.user_id == user_id,
+                DoctorInvite.used_at.is_(None),
+                DoctorInvite.expires_at > now,
+            )
+            .order_by(DoctorInvite.created_at.desc())
+        )
+    ).scalars().first()
+    if invite is not None:
+        return invite
+    return await create_invite(session, user_id, patient_name, now)
+
+
+async def active_invite(
+    session: AsyncSession, code: str, now: Optional[datetime] = None
+) -> Optional[DoctorInvite]:
+    """Действующее приглашение: не списано и не просрочено (или None)."""
+    now = now or _utcnow()
+    return (
+        await session.execute(
+            select(DoctorInvite).where(
+                DoctorInvite.code == code,
+                DoctorInvite.used_at.is_(None),
+                DoctorInvite.expires_at > now,
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def close_invite(
+    session: AsyncSession, code: str, now: Optional[datetime] = None
+) -> Optional[DoctorInvite]:
+    """Списать приглашение атомарно («Принять» / «Отклонить», §4.13).
+
+    `UPDATE … WHERE used_at IS NULL AND expires_at > now`: из двух
+    одновременных нажатий проходит одно (§7.2). Возвращает приглашение
+    или None — уже списано, просрочено или не существует.
+    """
+    now = now or _utcnow()
+    result = await session.execute(
+        update(DoctorInvite)
+        .where(
+            DoctorInvite.code == code,
+            DoctorInvite.used_at.is_(None),
+            DoctorInvite.expires_at > now,
+        )
+        .values(used_at=now)
+    )
+    if result.rowcount != 1:
+        await session.rollback()
+        return None
+    await session.commit()
+    # populate_existing: объект из identity map иначе остался бы с used_at=None
+    return await session.get(DoctorInvite, code, populate_existing=True)
+
+
+async def grant_access(session: AsyncSession, doctor_id: int, user_id: int) -> DoctorPatient:
+    """Принятое приглашение: связь врач–пациент сразу `active` (§21, п.5).
+
+    Отозванная ранее связь открывается снова — пациент пригласил заново.
+    """
+    link, _ = await link_patient(session, doctor_id, user_id)
+    if link.status != "active":
+        link.status = "active"
+        await session.commit()
+    return link
 
 
 # ─────────────────────────── Заметки врача ───────────────────────────

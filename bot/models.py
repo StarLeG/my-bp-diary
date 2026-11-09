@@ -306,12 +306,17 @@ class Doctor(Base):
 
     Пароль хранится только как хеш Argon2id; запись создаётся ботом при
     добавлении врача пациентом (пароль — случайный, вход по ссылке).
+    Врач опознаётся e-mail (приглашение по почте) или Telegram-аккаунтом
+    (приглашение в бота, `/iamdoctor`) — хотя бы одним из них (CHECK).
+    Записи одного врача, добавленного разными путями, не объединяются.
     """
 
     __tablename__ = "doctors"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
-    email: Mapped[str] = mapped_column(String(255), nullable=False, unique=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True, unique=True)
+    telegram_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True, unique=True)
+    telegram_username: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     clinic: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     password_hash: Mapped[str] = mapped_column(String(255), nullable=False)
@@ -324,6 +329,10 @@ class Doctor(Base):
         CheckConstraint(
             "clinic IS NULL OR length(clinic) <= 100", name="ck_doctors_clinic_length"
         ),
+        CheckConstraint(
+            "email IS NOT NULL OR telegram_id IS NOT NULL", name="ck_doctors_identity"
+        ),
+        Index("ix_doctors_telegram_username", "telegram_username"),
     )
 
 
@@ -426,3 +435,33 @@ class UsedToken(Base):
 
     jti: Mapped[str] = mapped_column(String(64), primary_key=True)
     expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+
+
+class DoctorInvite(Base):
+    """Ссылка-приглашение врача в бота `?start=doc_<code>` (SPEC.md, раздел 4.13).
+
+    72 часа, одноразовая: `used_at` ставится при «Принять» / «Отклонить».
+    Новое приглашение пациента списывает его прежние неиспользованные коды.
+    `patient_name` — имя пациента из Telegram на момент приглашения: врач
+    открывает ссылку позже, и имени пациента у бота в этот момент нет.
+    """
+
+    __tablename__ = "doctor_invites"
+
+    code: Mapped[str] = mapped_column(String(32), primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    patient_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=_utcnow
+    )
+    expires_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    used_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(patient_name) BETWEEN 1 AND 64", name="ck_doctor_invites_patient_name"
+        ),
+        Index("ix_doctor_invites_user", "user_id"),
+    )

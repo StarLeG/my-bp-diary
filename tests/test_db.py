@@ -247,3 +247,108 @@ class TestMigrateMedications:
             assert version == SCHEMA_VERSION
         finally:
             await engine.dispose()
+
+
+# ─────────────────── Миграция doctors (SCHEMA_VERSION 3, §4.8) ───────────────────
+
+#: DDL таблицы `doctors` до 0.4.14: e-mail обязателен, Telegram-полей нет.
+OLD_DOCTORS_DDL = """
+CREATE TABLE doctors (
+    id INTEGER NOT NULL,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(100) NOT NULL,
+    clinic VARCHAR(100),
+    password_hash VARCHAR(255) NOT NULL,
+    created_at DATETIME NOT NULL,
+    PRIMARY KEY (id),
+    CONSTRAINT ck_doctors_name_length CHECK (length(name) BETWEEN 1 AND 100),
+    CONSTRAINT ck_doctors_clinic_length CHECK (clinic IS NULL OR length(clinic) <= 100),
+    UNIQUE (email)
+)
+"""
+
+
+async def _install_old_doctors(engine: AsyncEngine) -> None:
+    """БД «как в 0.4.13»: старый `doctors` + пациент, связь и заметка врача."""
+    async with engine.connect() as conn:
+        await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+        await conn.exec_driver_sql("DROP TABLE doctors")
+        await conn.exec_driver_sql(OLD_DOCTORS_DDL)
+        await conn.exec_driver_sql(
+            "INSERT INTO users (id, telegram_id, timezone, target_systolic, "
+            "target_diastolic, onboarded, created_at) "
+            "VALUES (1, 111111, 'Europe/Minsk', 130, 80, 1, '2026-11-01 08:00:00')"
+        )
+        await conn.exec_driver_sql(
+            "INSERT INTO doctors (id, email, name, password_hash, created_at) "
+            "VALUES (7, 'doc@example.org', 'doc', 'hash', '2026-11-01 08:00:00')"
+        )
+        await conn.exec_driver_sql(
+            "INSERT INTO doctor_patients (id, doctor_id, user_id, status, created_at) "
+            "VALUES (1, 7, 1, 'active', '2026-11-01 08:00:00')"
+        )
+        await conn.exec_driver_sql(
+            "INSERT INTO doctor_notes (id, doctor_id, user_id, text, created_at) "
+            "VALUES (1, 7, 1, 'Совет', '2026-11-01 08:00:00')"
+        )
+        await conn.commit()
+        await conn.exec_driver_sql("PRAGMA foreign_keys=ON")
+
+
+class TestMigrateDoctors:
+    async def test_old_schema_rebuilt(self, tmp_path) -> None:
+        """Врач, связь и заметка сохранены; e-mail необязателен; CHECK «e-mail или Telegram»."""
+        engine = create_engine(str(tmp_path / "doctors.sqlite3"))
+        try:
+            await init_db(engine)
+            await _install_old_doctors(engine)
+            await init_db(engine)  # миграция
+            await init_db(engine)  # повторно — без изменений
+            async with engine.connect() as conn:
+                row = (
+                    await conn.exec_driver_sql(
+                        "SELECT id, email, telegram_id, telegram_username, name FROM doctors"
+                    )
+                ).first()
+                assert tuple(row) == (7, "doc@example.org", None, None, "doc")
+                links = (await conn.exec_driver_sql("SELECT COUNT(*) FROM doctor_patients")).scalar()
+                notes = (await conn.exec_driver_sql("SELECT COUNT(*) FROM doctor_notes")).scalar()
+                assert (links, notes) == (1, 1)  # DROP TABLE не съел связи каскадом
+                assert (await conn.exec_driver_sql("PRAGMA foreign_key_check")).all() == []
+                await conn.exec_driver_sql(
+                    "INSERT INTO doctors (email, telegram_id, telegram_username, name, "
+                    "password_hash, created_at) VALUES (NULL, 555, 'doc_tg', 'Врач', 'h', "
+                    "'2026-11-09 08:00:00')"
+                )
+                with pytest.raises(IntegrityError):
+                    await conn.exec_driver_sql(
+                        "INSERT INTO doctors (email, telegram_id, name, password_hash, created_at) "
+                        "VALUES (NULL, NULL, 'Никто', 'h', '2026-11-09 08:00:00')"
+                    )
+                await conn.rollback()
+                indexes = {
+                    r[0] for r in (await conn.exec_driver_sql(
+                        "SELECT name FROM sqlite_master WHERE type='index' AND tbl_name='doctors'"
+                    )).all()
+                }
+                assert "ix_doctors_telegram_username" in indexes
+                version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
+                assert version == SCHEMA_VERSION == 3
+                tables = {
+                    r[0] for r in (await conn.exec_driver_sql(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    )).all()
+                }
+                assert {"doctor_invites", "doctors"} <= tables
+                assert "doctors_migrate" not in tables
+        finally:
+            await engine.dispose()
+
+    async def test_no_doctors_table_is_skipped(self, tmp_path) -> None:
+        from bot.db import _migrate_doctors
+
+        engine = create_engine(str(tmp_path / "empty.sqlite3"))
+        try:
+            await _migrate_doctors(engine)  # таблицы нет — тихо выходим
+        finally:
+            await engine.dispose()

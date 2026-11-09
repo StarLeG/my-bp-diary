@@ -472,3 +472,200 @@ class TestLinkPatientRaceRecovery:
         assert created is False
         assert link is existing
         assert existing_id is not None
+
+
+# ─────────────────── Врач в Telegram и приглашения (§4.8, §4.13, §21) ───────────────────
+
+from datetime import datetime, timedelta, timezone  # noqa: E402
+
+from bot.models import DoctorInvite  # noqa: E402
+
+DOC_TG = 555_555
+
+
+class TestUsernameAndLabels:
+    @pytest.mark.parametrize(
+        ("raw", "expected"),
+        [
+            ("@Ivanova_Doc", "ivanova_doc"),
+            ("ivanova_doc", "ivanova_doc"),
+            ("  @abcde ", "abcde"),
+            ("@abcd", None),  # короче 5
+            ("@" + "a" * 33, None),  # длиннее 32
+            ("иванова", None),
+            ("@ivan-ova", None),
+            ("", None),
+            (None, None),
+        ],
+    )
+    def test_normalize_username(self, raw, expected) -> None:
+        assert doctor_service.normalize_username(raw) == expected
+
+    def test_label_priority(self) -> None:
+        """ФИО → @username → e-mail (C3); у врача по e-mail — адрес."""
+        assert doctor_service.doctor_label(Doctor(name="Иванова И.", telegram_id=1)) == "Иванова И."
+        assert doctor_service.doctor_label(
+            Doctor(name="", telegram_id=1, telegram_username="ivanova")
+        ) == "@ivanova"
+        assert doctor_service.doctor_label(Doctor(name="doc", email="doc@e.org")) == "doc@e.org"
+        assert doctor_service.doctor_label(Doctor(name="", telegram_id=1)) == ""
+
+    def test_full_name(self) -> None:
+        assert doctor_service.full_name("Анна", "Иванова") == "Анна Иванова"
+        assert doctor_service.full_name("Анна", None) == "Анна"
+        assert doctor_service.full_name(None, None) == "Врач"
+        assert len(doctor_service.full_name("А" * 80, "Б" * 80)) == 100
+
+
+class TestTelegramDoctor:
+    async def test_create_and_reuse(self, session: AsyncSession) -> None:
+        doctor, created = await doctor_service.get_or_create_telegram_doctor(
+            session, DOC_TG, "Ivanova_Doc", "Анна Иванова"
+        )
+        assert created and doctor.email is None
+        assert (doctor.telegram_id, doctor.telegram_username, doctor.name) == (
+            DOC_TG, "ivanova_doc", "Анна Иванова",
+        )
+        assert doctor.password_hash.startswith("$argon2id$")
+        again, created = await doctor_service.get_or_create_telegram_doctor(
+            session, DOC_TG, None, "Другое"
+        )
+        assert not created and again.id == doctor.id and again.name == "Анна Иванова"
+
+    async def test_without_username(self, session: AsyncSession) -> None:
+        doctor, _ = await doctor_service.get_or_create_telegram_doctor(session, DOC_TG, None, "Врач")
+        assert doctor.telegram_username is None
+
+    async def test_register_updates_name(self, session: AsyncSession) -> None:
+        await doctor_service.register_doctor(session, DOC_TG, "doc_tg", "Старое")
+        doctor = await doctor_service.register_doctor(session, DOC_TG, "doc_tg", "Новое ФИО")
+        assert doctor.name == "Новое ФИО"
+        assert await session.scalar(select(func.count(Doctor.id))) == 1
+        same = await doctor_service.register_doctor(session, DOC_TG, "doc_tg", "Новое ФИО")
+        assert same.id == doctor.id
+
+    async def test_search_only_doctors(self, session: AsyncSession, user: User) -> None:
+        """По @username находятся только врачи с Telegram, регистр не важен (T3)."""
+        await doctor_service.get_or_create_telegram_doctor(session, DOC_TG, "Ivanova_Doc", "Врач")
+        found = await doctor_service.doctor_by_username(session, "IVANOVA_DOC")
+        assert found is not None and found.telegram_id == DOC_TG
+        assert await doctor_service.doctor_by_username(session, "someone_else") is None
+        await doctor_service.find_or_create_doctor(session, "mail@example.org")
+        assert await doctor_service.doctor_by_username(session, "mail") is None
+
+    async def test_touch_username(self, session: AsyncSession) -> None:
+        assert await doctor_service.touch_username(session, DOC_TG, "x_user") is False  # не врач
+        await doctor_service.get_or_create_telegram_doctor(session, DOC_TG, "old_name", "Врач")
+        assert await doctor_service.touch_username(session, DOC_TG, "old_name") is False
+        assert await doctor_service.touch_username(session, DOC_TG, "New_Name") is True
+        doctor = await doctor_service.doctor_by_telegram(session, DOC_TG)
+        assert doctor.telegram_username == "new_name"
+        assert await doctor_service.touch_username(session, DOC_TG, None) is True
+        assert doctor.telegram_username is None
+
+    async def test_parallel_create_one_row(self, file_session_factory) -> None:
+        async def attempt():
+            async with file_session_factory() as session:
+                doctor, _ = await doctor_service.get_or_create_telegram_doctor(
+                    session, DOC_TG, "doc_tg", "Врач"
+                )
+                return doctor.id
+
+        ids = await asyncio.gather(attempt(), attempt())
+        assert ids[0] == ids[1]
+
+    async def test_identity_check(self, session: AsyncSession) -> None:
+        from sqlalchemy.exc import IntegrityError
+
+        session.add(Doctor(name="Никто", password_hash="h"))
+        with pytest.raises(IntegrityError):
+            await session.commit()
+
+
+class TestInvites:
+    async def test_create_and_lookup(self, session: AsyncSession, user: User) -> None:
+        invite = await doctor_service.create_invite(session, user.id, "Анна")
+        assert len(invite.code) == 22
+        assert invite.expires_at - invite.created_at == timedelta(hours=72)
+        found = await doctor_service.active_invite(session, invite.code)
+        assert found is not None and found.patient_name == "Анна"
+
+    async def test_new_invite_revokes_previous(self, session: AsyncSession, user: User) -> None:
+        first = await doctor_service.create_invite(session, user.id, "Анна")
+        second = await doctor_service.create_invite(session, user.id, "Анна")
+        assert await doctor_service.active_invite(session, first.code) is None
+        assert await doctor_service.active_invite(session, second.code) is not None
+
+    async def test_current_invite_reused(self, session: AsyncSession, user: User) -> None:
+        first = await doctor_service.current_invite(session, user.id, "Анна")
+        again = await doctor_service.current_invite(session, user.id, "Анна")
+        assert again.code == first.code
+        later = datetime.now(timezone.utc) + timedelta(hours=73)
+        fresh = await doctor_service.current_invite(session, user.id, "Анна", now=later)
+        assert fresh.code != first.code
+
+    async def test_expired_and_unknown(self, session: AsyncSession, user: User) -> None:
+        invite = await doctor_service.create_invite(session, user.id, "Анна")
+        later = datetime.now(timezone.utc) + timedelta(hours=72, seconds=1)
+        assert await doctor_service.active_invite(session, invite.code, now=later) is None
+        assert await doctor_service.close_invite(session, invite.code, now=later) is None
+        assert await doctor_service.active_invite(session, "nope") is None
+
+    async def test_close_once(self, session: AsyncSession, user: User) -> None:
+        invite = await doctor_service.create_invite(session, user.id, "Анна")
+        closed = await doctor_service.close_invite(session, invite.code)
+        assert closed is not None and closed.used_at is not None
+        assert await doctor_service.close_invite(session, invite.code) is None
+
+    async def test_parallel_close_one_wins(self, file_session_factory) -> None:
+        """Двойное «Принять» — проходит одно (§7.2)."""
+        async with file_session_factory() as session:
+            patient = User(telegram_id=111_111)
+            session.add(patient)
+            await session.commit()
+            invite = await doctor_service.create_invite(session, patient.id, "Анна")
+            code = invite.code
+
+        async def attempt():
+            async with file_session_factory() as session:
+                return await doctor_service.close_invite(session, code) is not None
+
+        results = await asyncio.gather(attempt(), attempt())
+        assert sorted(results) == [False, True]
+
+    async def test_patient_name_trimmed(self, session: AsyncSession, user: User) -> None:
+        invite = await doctor_service.create_invite(session, user.id, "Я" * 100)
+        assert len(invite.patient_name) == 64
+        empty = await doctor_service.create_invite(session, user.id, "")
+        assert empty.patient_name == "Пациент"
+
+    async def test_invites_deleted_with_patient(self, session: AsyncSession, user: User) -> None:
+        from sqlalchemy import delete
+
+        await doctor_service.create_invite(session, user.id, "Анна")
+        await session.execute(delete(User).where(User.id == user.id))
+        await session.commit()
+        assert await session.scalar(select(func.count()).select_from(DoctorInvite)) == 0
+
+    async def test_grant_access(self, session: AsyncSession, user: User) -> None:
+        doctor, _ = await doctor_service.get_or_create_telegram_doctor(session, DOC_TG, None, "Врач")
+        link = await doctor_service.grant_access(session, doctor.id, user.id)
+        assert link.status == "active"
+        await doctor_service.revoke_access(session, user.id, doctor.id)
+        again = await doctor_service.grant_access(session, doctor.id, user.id)
+        assert again.status == "active" and again.id == link.id
+
+
+async def test_create_telegram_doctor_lost_race(session: AsyncSession, mocker) -> None:
+    """Конкурент создал врача между проверкой и вставкой — UNIQUE, возврат существующего."""
+    existing, _ = await doctor_service.get_or_create_telegram_doctor(session, DOC_TG, "doc_tg", "Врач")
+    real = doctor_service.doctor_by_telegram
+    calls = {"n": 0}
+
+    async def first_miss(sess, telegram_id):
+        calls["n"] += 1
+        return None if calls["n"] == 1 else await real(sess, telegram_id)
+
+    mocker.patch.object(doctor_service, "doctor_by_telegram", side_effect=first_miss)
+    doctor, created = await doctor_service.get_or_create_telegram_doctor(session, DOC_TG, "doc_tg", "Врач")
+    assert (doctor.id, created) == (existing.id, False)

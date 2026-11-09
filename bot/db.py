@@ -15,7 +15,7 @@ from typing import TypeVar
 
 from sqlalchemy import event
 from sqlalchemy.exc import OperationalError
-from sqlalchemy.schema import CreateTable
+from sqlalchemy.schema import CreateIndex, CreateTable
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
     AsyncSession,
@@ -33,7 +33,9 @@ RETRY_BASE_DELAY = 0.05
 #: Поколение схемы БД (`PRAGMA user_version`); сравнивается при восстановлении
 #: бэкапов (backup.verify_compatibility: копия не должна быть новее схемы).
 #: 2 — дозировка лекарства опциональна, слот приёма `crisis` (§4.4).
-SCHEMA_VERSION = 2
+#: 3 — врач через Telegram: `doctors.telegram_id` / `telegram_username`, e-mail
+#:     необязателен (§4.8), `doctor_invites` (§4.13).
+SCHEMA_VERSION = 3
 
 T = TypeVar("T")
 
@@ -78,7 +80,7 @@ async def init_db(engine: AsyncEngine) -> None:
     """Создать таблицы по моделям и обновить схему существующих БД (идемпотентно).
 
     `create_all` не трогает уже существующие таблицы, поэтому старые БД
-    обновляются миграциями (сейчас — `_migrate_medications`). В конце
+    обновляются миграциями (`_migrate_medications`, `_migrate_doctors`). В конце
     поднимается `PRAGMA user_version` до `SCHEMA_VERSION`.
     """
     from bot.models import Base
@@ -86,6 +88,7 @@ async def init_db(engine: AsyncEngine) -> None:
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_medications(engine)
+    await _migrate_doctors(engine)
     async with engine.connect() as conn:
         current = int((await conn.exec_driver_sql("PRAGMA user_version")).scalar() or 0)
         if current < SCHEMA_VERSION:
@@ -132,6 +135,56 @@ async def _migrate_medications(engine: AsyncEngine) -> None:
             )
             await conn.commit()
             logger.info("Схема medications обновлена (дозировка опциональна, слот crisis)")
+        finally:
+            await conn.exec_driver_sql("PRAGMA foreign_keys=ON")  # вернуть в пул
+
+
+async def _migrate_doctors(engine: AsyncEngine) -> None:
+    """Пересобрать `doctors` под приглашения через Telegram (SPEC.md, §4.8).
+
+    `email` становится NULL-able, добавляются `telegram_id` (UNIQUE) и
+    `telegram_username`, CHECK «e-mail или Telegram». Тот же приём, что у
+    `_migrate_medications`: новая таблица → перенос строк → замена старой.
+    Признак старой схемы — нет колонки `telegram_id`; повторный запуск ничего
+    не меняет. `PRAGMA foreign_keys=OFF` обязателен: иначе `DROP TABLE
+    doctors` каскадно удалит `doctor_patients` и `doctor_notes`.
+    """
+    from bot.models import Doctor
+
+    async with engine.connect() as conn:
+        exists = (
+            await conn.exec_driver_sql(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name='doctors'"
+            )
+        ).first()
+        if exists is None:
+            return
+        columns_now = {
+            row[1] for row in (await conn.exec_driver_sql("PRAGMA table_info(doctors)")).all()
+        }
+        if "telegram_id" in columns_now:
+            return  # схема уже новая
+        ddl = str(CreateTable(Doctor.__table__).compile(dialect=engine.dialect))
+        ddl = ddl.replace("CREATE TABLE doctors", "CREATE TABLE doctors_migrate", 1)
+        columns = ", ".join(
+            column.name for column in Doctor.__table__.columns if column.name in columns_now
+        )
+        try:
+            await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            await conn.exec_driver_sql("DROP TABLE IF EXISTS doctors_migrate")
+            await conn.exec_driver_sql("BEGIN")  # пересборка — одной транзакцией
+            await conn.exec_driver_sql(ddl)
+            await conn.exec_driver_sql(
+                f"INSERT INTO doctors_migrate ({columns}) SELECT {columns} FROM doctors"
+            )
+            await conn.exec_driver_sql("DROP TABLE doctors")
+            await conn.exec_driver_sql("ALTER TABLE doctors_migrate RENAME TO doctors")
+            for index in Doctor.__table__.indexes:
+                await conn.exec_driver_sql(
+                    str(CreateIndex(index).compile(dialect=engine.dialect))
+                )
+            await conn.commit()
+            logger.info("Схема doctors обновлена (приглашение врача через Telegram)")
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")  # вернуть в пул
 
