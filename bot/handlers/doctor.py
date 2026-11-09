@@ -1,21 +1,28 @@
 """Хендлеры «Мой врач» и «Отправить отчет» (SPEC.md, §21).
 
-Пациент добавляет врача по e-mail (FSM `DoctorAccess.email`), бот создаёт
+Пациент выбирает способ: «По e-mail» или «Через Telegram» (§21, п.2).
+
+По e-mail (FSM `DoctorAccess.email`) бот создаёт
 запись в `doctors` / `doctor_patients` (статус `pending`), отправляет врачу
 письмо со ссылкой (если настроен SMTP, `services/mailer`) и отдаёт ту же
 ссылку пациенту для пересылки. Ссылка доступа — 72 часа, одноразовая; её
-открытие врачом активирует доступ (`status='active'`). Пациент может отозвать доступ в любой момент
-(`status='revoked'`).
+открытие врачом активирует доступ (`status='active'`). Через Telegram — ссылка-приглашение в бота
+(`?start=doc_<code>`, `doctor_invites`) и поиск врача по @username (только
+среди врачей); принимает приглашение врач (`doctor_menu.py`). Пациент может
+отозвать доступ в любой момент (`status='revoked'`); врачу в Telegram —
+уведомление.
 
 Ссылки и контакты берутся только из конфига (`CABINET_URL`, `WEB_SECRET_KEY`):
 кабинет врача — часть веб-приложения, в коде бота его данных нет.
 """
 from __future__ import annotations
 
+import logging
 import secrets
-from typing import Sequence
+from typing import Optional, Sequence
 
-from aiogram import F, Router
+from aiogram import Bot, F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -27,9 +34,13 @@ from bot import keyboards, texts
 from bot.config import Settings, get_settings
 from bot.models import Doctor, DoctorPatient
 from bot.services.doctor import (
+    current_invite,
+    doctor_by_username,
+    doctor_label,
     find_or_create_doctor,
     link_patient,
     links_for_patient,
+    normalize_username,
     revoke_access,
     valid_email,
 )
@@ -43,11 +54,17 @@ DOCTOR_SALT = "doctor-access"
 
 router = Router(name="doctor")
 
+logger = logging.getLogger(__name__)
+
+#: Канал приглашений по @username в `invite_log` (лимиты — как у писем, §21).
+CHANNEL_TELEGRAM = "telegram"
+
 
 class DoctorAccess(StatesGroup):
     """FSM добавления врача (SPEC.md, раздел 8)."""
 
     email = State()
+    username = State()
 
 
 def make_doctor_link(settings: Settings, doctor_id: int, patient_user_id: int) -> str:
@@ -69,13 +86,13 @@ def _doctor_screen(
     links: Sequence[tuple[DoctorPatient, Doctor]],
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Экран «Мой врач»: список связей и кнопки отзыва (§21)."""
-    rows = [(doctor.id, doctor.email, link.status) for link, doctor in links]
+    rows = [(doctor.id, doctor_label(doctor), link.status) for link, doctor in links]
     lines = [texts.DOCTOR_MENU, ""]
     lines.extend(
         texts.DOCTOR_LINK_ITEM.format(
-            email=email, status=texts.DOCTOR_STATUS_LABELS[status]
+            label=label, status=texts.DOCTOR_STATUS_LABELS[status]
         )
-        for _, email, status in rows
+        for _, label, status in rows
     )
     return "\n".join(lines), keyboards.doctor_kb(rows)
 
@@ -85,21 +102,46 @@ async def _doctor_entry(
 ) -> tuple[str, InlineKeyboardMarkup]:
     """Экран «Мой врач» / `/doctor` (§21).
 
-    Два исхода: кабинет не развёрнут → «пока не развёрнут»; открытого врача
-    нет → FSM `DoctorAccess.email` (запрос e-mail, минимум трения); врач
-    добавлен → экран связей с отзывом доступа. Связи ищутся по `users.id`
-    (внутренний ключ), а не по telegram_id.
+    Три исхода: кабинет не развёрнут → «пока не развёрнут»; открытого врача
+    нет → выбор способа «По e-mail» / «Через Telegram»; врач добавлен →
+    экран связей с отзывом доступа. Связи ищутся по `users.id` (внутренний
+    ключ), а не по telegram_id.
     """
+    await state.clear()
     settings = get_settings()
     if not settings.cabinet_button_visible:
         return texts.DOCTOR_WEB_DISABLED, keyboards.back_to_menu()
     user = await get_or_create_user(session, telegram_id)
     links = await links_for_patient(session, user.id)
     if not any(link.status != "revoked" for link, _ in links):
-        await state.set_state(DoctorAccess.email)
-        prompt = texts.DOCTOR_NO_LINK_EMAIL if settings.smtp_configured else texts.DOCTOR_NO_LINK
-        return prompt, keyboards.input_cancel_kb("set:doctor:cancel")
+        return texts.DOCTOR_NO_LINK, keyboards.doctor_choice_kb()
     return _doctor_screen(links)
+
+
+async def _has_doctor(session: AsyncSession, user_id: int) -> bool:
+    """Есть ли у пациента врач (`pending`/`active`): второго добавить нельзя (C1)."""
+    links = await links_for_patient(session, user_id)
+    return any(link.status != "revoked" for link, _ in links)
+
+
+async def _invite_url(bot: Bot, code: str) -> str:
+    """Ссылка-приглашение в бота: `https://t.me/<бот>?start=doc_<code>` (§4.13)."""
+    me = await bot.me()
+    return f"https://t.me/{me.username}?start=doc_{code}"
+
+
+async def _notify(bot: Bot, telegram_id: int, text: str, markup=None) -> bool:
+    """Сообщение второй стороне (врачу или пациенту); False — не доставлено.
+
+    Человек мог заблокировать бота — это не ошибка сценария: пишем в лог без
+    текста и id, пациент получает запасной путь (ссылку для пересылки).
+    """
+    try:
+        await bot.send_message(telegram_id, text, reply_markup=markup)
+    except TelegramAPIError as exc:
+        logger.warning("Сообщение второй стороне не доставлено: %s", type(exc).__name__)
+        return False
+    return True
 
 
 # ─────────────────────────── Экраны ───────────────────────────
@@ -110,7 +152,7 @@ async def cmd_doctor(message: Message, state: FSMContext, session: AsyncSession)
     """/doctor: экран «Мой врач» (§5: команда /doctor, управление доступом).
 
     Сбрасывает FSM, чтобы пользователь не застрял в режиме ввода; без
-    открытого врача сразу просит e-mail.
+    открытого врача — выбор способа приглашения.
     """
     await state.clear()
     text, markup = await _doctor_entry(session, state, message.from_user.id)  # type: ignore[union-attr]
@@ -119,7 +161,7 @@ async def cmd_doctor(message: Message, state: FSMContext, session: AsyncSession)
 
 @router.callback_query(F.data == "set:doctor")
 async def cb_doctor(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
-    """«Мой врач» из настроек: список врачей или запрос e-mail (§21, п.1).
+    """«Мой врач» из настроек: список врачей или выбор способа (§21, п.1–2).
 
     Сообщение редактируется, чтобы не плодить визуальный шум (§6.2).
     """
@@ -129,6 +171,98 @@ async def cb_doctor(callback: CallbackQuery, state: FSMContext, session: AsyncSe
 
 
 # ─────────────────────────── Добавление врача ───────────────────────────
+
+
+@router.callback_query(F.data == "set:doctor:email")
+async def cb_doctor_by_email(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«📧 По e-mail»: ввод e-mail врача (§21, п.3); без почты — про ссылку."""
+    user = await get_or_create_user(session, callback.from_user.id)
+    if await _has_doctor(session, user.id):
+        text, markup = await _doctor_entry(session, state, callback.from_user.id)
+    else:
+        await state.set_state(DoctorAccess.email)
+        settings = get_settings()
+        text = texts.DOCTOR_EMAIL_ASK if settings.smtp_configured else texts.DOCTOR_EMAIL_ASK_NO_SMTP
+        markup = keyboards.input_cancel_kb("set:doctor:cancel")
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:doctor:tg")
+async def cb_doctor_by_telegram(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    """«✈️ Через Telegram»: ссылка-приглашение и «Найти по @username» (§21, п.4)."""
+    await state.clear()
+    user = await get_or_create_user(session, callback.from_user.id)
+    if await _has_doctor(session, user.id):
+        text, markup = await _doctor_entry(session, state, callback.from_user.id)
+        await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+        await callback.answer()
+        return
+    invite = await current_invite(session, user.id, callback.from_user.first_name)
+    url = await _invite_url(bot, invite.code)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.DOCTOR_TG_INVITE.format(invite_url=url),
+        reply_markup=keyboards.doctor_tg_invite_kb(),
+        link_preview_options=keyboards.NO_LINK_PREVIEW,
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "set:doctor:tg:find")
+async def cb_doctor_find(callback: CallbackQuery, state: FSMContext) -> None:
+    """«🔎 Найти по @username»: ввод имени пользователя врача (§21, п.4)."""
+    await state.set_state(DoctorAccess.username)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.DOCTOR_USERNAME_ASK, reply_markup=keyboards.input_cancel_kb("set:doctor:cancel")
+    )
+    await callback.answer()
+
+
+@router.message(DoctorAccess.username)
+async def msg_doctor_username(
+    message: Message, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    """@username врача: поиск только среди врачей, приглашение в Telegram (§21, п.4).
+
+    Ответ «не найден» одинаков для «нет в боте» и «не врач» (T3). Лимит —
+    3 приглашения в сутки на пациента и 1 в час одному врачу (`invite_log`,
+    `channel='telegram'`); сверх лимита и при недоставке — ссылка-приглашение.
+    """
+    username = normalize_username(message.text)
+    if username is None:
+        await message.answer(
+            texts.DOCTOR_USERNAME_BAD, reply_markup=keyboards.input_cancel_kb("set:doctor:cancel")
+        )
+        return
+    await state.clear()
+    tg_user = message.from_user
+    user = await get_or_create_user(session, tg_user.id)  # type: ignore[union-attr]
+    invite = await current_invite(session, user.id, tg_user.first_name)  # type: ignore[union-attr]
+    url = await _invite_url(bot, invite.code)
+    doctor = await doctor_by_username(session, username)
+    code, patient_name = invite.code, invite.patient_name
+    text = texts.DOCTOR_TG_NOT_FOUND.format(invite_url=url)
+    if doctor is not None and doctor.telegram_id not in (None, tg_user.id):  # type: ignore[union-attr]
+        doctor_tg = doctor.telegram_id
+        await session.commit()
+        log_id = await mailer.reserve(session, user.id, CHANNEL_TELEGRAM, username, "invite")
+        if log_id is None:
+            text = texts.DOCTOR_TG_LIMIT.format(invite_url=url)
+        elif await _notify(
+            bot,
+            doctor_tg,  # type: ignore[arg-type]
+            texts.DOCTOR_INVITE_FOR_DOCTOR.format(name=patient_name),
+            keyboards.doctor_invite_kb(code),
+        ):
+            await mailer.mark_sent(session, log_id)
+            text = texts.DOCTOR_TG_SENT
+    await message.answer(
+        text, reply_markup=keyboards.back_to_menu(), link_preview_options=keyboards.NO_LINK_PREVIEW
+    )
 
 
 @router.message(DoctorAccess.email)
@@ -185,7 +319,7 @@ async def cb_doctor_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 @router.callback_query(F.data.startswith("set:doctor:revoke:"))
 async def cb_doctor_revoke(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     """«Отозвать доступ»: связь переводится в `revoked` (§21, п. «Безопасность»).
 
@@ -201,7 +335,16 @@ async def cb_doctor_revoke(
     if not await revoke_access(session, user_id=user.id, doctor_id=doctor_id):
         await callback.answer(texts.NOT_YOUR_RECORD)
         return
+    doctor = await session.get(Doctor, doctor_id)
+    doctor_tg = doctor.telegram_id if doctor is not None else None
+    await session.commit()
     await callback.answer(texts.DOCTOR_REVOKED)
+    if doctor_tg is not None:
+        await _notify(
+            bot,
+            doctor_tg,
+            texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name=callback.from_user.first_name),
+        )
     text, markup = await _doctor_entry(session, state, callback.from_user.id)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
 
@@ -216,11 +359,26 @@ async def _report_text(
     doctor: Doctor,
     callback: CallbackQuery,
     link: str,
+    bot: Optional[Bot] = None,
 ) -> str:
-    """Текст «Отправить отчет»: письмо врачу (если есть e-mail и SMTP) + ссылка (§21).
+    """Текст «Отправить отчет»: письмо или сообщение врачу + ссылка (§21, п.6).
 
-    Без почты — прежнее сообщение для пересылки (§21, п.6).
+    Врач в Telegram — уведомление с «Открыть в кабинете» (N6); врач по
+    e-mail — письмо (если настроен SMTP). Не доставлено / без почты —
+    прежнее сообщение для пересылки.
     """
+    if doctor.telegram_id is not None and bot is not None:
+        doctor_tg = doctor.telegram_id
+        await session.commit()  # транзакция закрыта до отправки
+        delivered = await _notify(
+            bot,
+            doctor_tg,
+            texts.DOCTOR_REPORT_FOR_DOCTOR.format(name=callback.from_user.first_name),
+            keyboards.doctor_open_kb(user_id),
+        )
+        if delivered:
+            return texts.DOCTOR_REPORT_TELEGRAM.format(url=link)
+        return texts.DOCTOR_REPORT_LINK.format(url=link)
     if not doctor.email:
         return texts.DOCTOR_REPORT_LINK.format(url=link)
     await session.commit()  # транзакция закрыта до сетевой отправки
@@ -242,7 +400,7 @@ async def _report_text(
 
 @router.callback_query(F.data == "menu:report")
 async def cb_send_report(
-    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
     """«Отправить отчет» из главного меню: ссылка для врача (§21, п.4–5).
 
@@ -265,7 +423,7 @@ async def cb_send_report(
         else:
             _, doctor = active[0]
             link = make_doctor_link(settings, doctor.id, user.id)
-            text = await _report_text(session, settings, user.id, doctor, callback, link)
+            text = await _report_text(session, settings, user.id, doctor, callback, link, bot)
             markup = keyboards.back_to_menu()
     await callback.message.edit_text(  # type: ignore[union-attr]
         text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW

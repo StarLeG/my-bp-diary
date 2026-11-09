@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, schemas, texts
 from bot.config import DEFAULT_TIMEZONE
+from bot.services import doctor as doctor_service
 from bot.services import measurements as measurements_service
 from bot.services.reminders import DEFAULT_SLOT_TIMES, RemindersService
 
@@ -87,14 +88,28 @@ async def cmd_start(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    """Первый /start — онбординг; повторный — главное меню (§6.1)."""
+    """Первый /start — онбординг; повторный — главное меню (§6.1).
+
+    Врач (§21, N5): не прошёл онбординг пациента — меню врача (строка
+    `users` не создаётся); прошёл — меню пациента с кнопкой «🩺 Кабинет врача».
+    """
     current = await state.get_state()
     await state.clear()
     tg_user: User = message.from_user  # type: ignore[assignment]
+    doctor = await doctor_service.doctor_by_telegram(session, tg_user.id)
+    if doctor is not None:
+        existing = await measurements_service.get_user(session, tg_user.id)
+        if existing is None or not existing.onboarded:
+            await message.answer(
+                texts.DOCTOR_PANEL, reply_markup=keyboards.doctor_panel_kb(show_diary=True)
+            )
+            return
     user = await measurements_service.get_or_create_user(session, tg_user.id)
     await session.commit()
     if user.onboarded:
-        await message.answer(texts.MAIN_MENU, reply_markup=keyboards.main_menu())
+        await message.answer(
+            texts.MAIN_MENU, reply_markup=keyboards.main_menu(is_doctor=doctor is not None)
+        )
         return
     if current is not None and current.startswith(f"{Onboarding.__name__}:"):
         text, markup = f"{texts.ONB_RESTARTED}\n\n{texts.WELCOME}", keyboards.onboarding_start_kb()
@@ -104,10 +119,16 @@ async def cmd_start(
 
 
 @router.callback_query(F.data == "menu:back")
-async def cb_menu_back(callback: CallbackQuery, state: FSMContext) -> None:
-    """«В меню» / «Назад» — главное меню (сообщение редактируется, §6.2)."""
+async def cb_menu_back(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«В меню» / «Назад» — главное меню (сообщение редактируется, §6.2).
+
+    Врачу — с кнопкой «🩺 Кабинет врача» (§21, N5).
+    """
     await state.clear()
-    text, markup = texts.MAIN_MENU, keyboards.main_menu()
+    is_doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id) is not None
+    text, markup = texts.MAIN_MENU, keyboards.main_menu(is_doctor=is_doctor)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 

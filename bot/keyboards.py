@@ -32,6 +32,7 @@ CALLBACK_DATA_LIMIT = 64
 # rem:   напоминания (кнопки слот-сообщений)
 # about: «О боте / Поддержать»
 # adm:   административная панель
+# doc:   сторона врача в боте (приглашение, меню врача, §21)
 
 #: Целевые значения по умолчанию (кнопка → (систолическое, диастолическое)).
 TARGET_PRESETS = {
@@ -83,8 +84,12 @@ SLOT_TIME_PRESETS = {
 # ─────────────────────────── Главное меню ───────────────────────────
 
 
-def main_menu() -> InlineKeyboardMarkup:
-    """Главное меню (SPEC.md, раздел 6.2; «Отправить отчет» — §21)."""
+def main_menu(is_doctor: bool = False) -> InlineKeyboardMarkup:
+    """Главное меню (SPEC.md, раздел 6.2; «Отправить отчет» — §21).
+
+    `is_doctor` — пользователь ещё и врач: внизу кнопка «🩺 Кабинет врача»
+    (меню врача, §21, N5).
+    """
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
     builder.row(InlineKeyboardButton(text=texts.BTN_DIARY, callback_data="menu:diary"))
@@ -93,6 +98,8 @@ def main_menu() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text=texts.BTN_CABINET, callback_data="menu:cabinet"))
     builder.row(InlineKeyboardButton(text=texts.BTN_SEND_REPORT, callback_data="menu:report"))
     builder.row(InlineKeyboardButton(text=texts.BTN_ABOUT, callback_data="menu:about"))
+    if is_doctor:
+        builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_PANEL, callback_data="doc:menu"))
     return builder.as_markup()
 
 
@@ -456,21 +463,102 @@ def settings_kb() -> InlineKeyboardMarkup:
 def doctor_kb(links: Sequence[tuple[int, str, str]]) -> InlineKeyboardMarkup:
     """Экран «Мой врач»: отзыв доступа по связям и «Назад» (§21).
 
-    `links` — кортежи (id врача, e-mail, статус); ожидающие и открытые
+    `links` — кортежи (id врача, подпись врача, статус); ожидающие и открытые
     связи получают кнопку отзыва. Врач у пациента один: пока связь есть,
-    добавить вторую нельзя (отзыв → повторный ввод e-mail).
+    добавить вторую нельзя (отзыв → снова выбор способа приглашения).
     """
     builder = InlineKeyboardBuilder()
-    for doctor_id, email, status in links:
+    for doctor_id, label, status in links:
         if status == "revoked":
             continue
         builder.row(
             InlineKeyboardButton(
-                text=f"{texts.BTN_REVOKE_DOCTOR}: {email}",
+                text=f"{texts.BTN_REVOKE_DOCTOR}: {label}",
                 callback_data=f"set:doctor:revoke:{doctor_id}",
             )
         )
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def doctor_choice_kb() -> InlineKeyboardMarkup:
+    """«Мой врач» без врача: «По e-mail» / «Через Telegram» / «Назад» (§21, п.2)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_BY_EMAIL, callback_data="set:doctor:email"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_BY_TELEGRAM, callback_data="set:doctor:tg"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def doctor_tg_invite_kb() -> InlineKeyboardMarkup:
+    """Под ссылкой-приглашением: «🔎 Найти по @username» и «Назад» (§21, п.4)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_FIND, callback_data="set:doctor:tg:find"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:doctor"))
+    return builder.as_markup()
+
+
+def doctor_invite_kb(code: str) -> InlineKeyboardMarkup:
+    """Приглашение у врача: «✅ Принять» / «Отклонить» (§21, п.5)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ACCEPT, callback_data=f"doc:accept:{code}"),
+        InlineKeyboardButton(text=texts.BTN_DECLINE, callback_data=f"doc:decline:{code}"),
+    )
+    return builder.as_markup()
+
+
+def doctor_panel_kb(show_diary: bool) -> InlineKeyboardMarkup:
+    """Меню врача (§21): кабинет, пациенты, свой дневник (если онбординг не пройден)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_CABINET, callback_data="doc:cabinet"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_PATIENTS, callback_data="doc:patients"))
+    if show_diary:
+        builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_DIARY, callback_data="doc:diary"))
+    return builder.as_markup()
+
+
+def doctor_patients_kb(patients: Sequence[tuple[int, int]]) -> InlineKeyboardMarkup:
+    """«Мои пациенты»: «Пациент {telegram_id}» → «Открыть в кабинете» и «Назад».
+
+    `patients` — пары (users.id, telegram_id); в callback — users.id,
+    владение проверяется по связи `active` при нажатии.
+    """
+    builder = InlineKeyboardBuilder()
+    for user_id, telegram_id in patients:
+        builder.row(
+            InlineKeyboardButton(
+                text=texts.DOCTOR_PATIENT_ITEM.format(telegram_id=telegram_id),
+                callback_data=f"doc:open:{user_id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="doc:menu"))
+    return builder.as_markup()
+
+
+def doctor_registered_kb() -> InlineKeyboardMarkup:
+    """`/iamdoctor` для зарегистрированного врача: «Изменить» / «Назад»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_CHANGE, callback_data="doc:name"),
+        InlineKeyboardButton(text=texts.BTN_BACK, callback_data="doc:menu"),
+    )
+    return builder.as_markup()
+
+
+def doctor_back_kb() -> InlineKeyboardMarkup:
+    """Единственная кнопка «Назад» в меню врача (`doc:menu`)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="doc:menu"))
+    return builder.as_markup()
+
+
+def doctor_open_kb(user_id: int) -> InlineKeyboardMarkup:
+    """Уведомление врачу об отчёте: «Открыть в кабинете» (§21, N6)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_OPEN_IN_CABINET, callback_data=f"doc:open:{user_id}")
+    )
     return builder.as_markup()
 
 

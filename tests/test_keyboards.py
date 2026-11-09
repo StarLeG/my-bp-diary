@@ -10,7 +10,7 @@ from bot import keyboards, texts
 from bot.models import Medication
 
 #: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
-KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "set", "med", "rem", "about", "adm"}
+KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm"}
 
 CALLBACK_RE = re.compile(r"^(?P<area>[a-z]+):(?P<action>[a-z0-9_-]+)(?::(?P<value>.*))?$")
 
@@ -60,6 +60,15 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("stats_result_kb", keyboards.stats_result_kb()),
         ("csv_period_kb", keyboards.csv_period_kb()),
         ("pdf_period_kb", keyboards.pdf_period_kb()),
+        ("main_menu_doctor", keyboards.main_menu(is_doctor=True)),
+        ("doctor_choice_kb", keyboards.doctor_choice_kb()),
+        ("doctor_tg_invite_kb", keyboards.doctor_tg_invite_kb()),
+        ("doctor_invite_kb", keyboards.doctor_invite_kb("A" * 22)),
+        ("doctor_panel_kb", keyboards.doctor_panel_kb(show_diary=True)),
+        ("doctor_patients_kb", keyboards.doctor_patients_kb([(1, 111111), (2, 222222)])),
+        ("doctor_registered_kb", keyboards.doctor_registered_kb()),
+        ("doctor_back_kb", keyboards.doctor_back_kb()),
+        ("doctor_open_kb", keyboards.doctor_open_kb(42)),
         ("settings_kb", keyboards.settings_kb()),
         ("targets_kb", keyboards.targets_kb()),
         (

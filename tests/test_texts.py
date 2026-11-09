@@ -13,6 +13,10 @@ def all_text_values() -> list[str]:
     ]
 
 
+
+#: Имена собственные, допустимые латиницей в текстах (§21: «через Telegram»).
+PROPER_NOUNS = {"Telegram"}
+
 class TestFormatting:
     def test_fmt_saved_without_pulse(self) -> None:
         # SPEC.md, §6.3 — сводка дословно, без пульса — «Пульс: —».
@@ -294,6 +298,7 @@ class TestTone:
         for value in all_text_values():
             assert "замер" not in value.lower()
 
+    #: Имена собственные — латиницей в утверждённых текстах (§21: «Telegram»).
     def test_all_texts_are_russian_or_symbols(self) -> None:
         # Тексты не пустые и без латинских предложений (кроме IANA-примеров
         # и технических статусов SPEC.md, §18.3–§18.4: «integrity_check: FAIL»,
@@ -314,6 +319,7 @@ class TestTone:
                 word
                 for word in value.split()
                 if word.isascii() and word.isalpha() and len(word) > 3
+                and word not in PROPER_NOUNS
             ]
             assert not latin_words, f"латиница в тексте: {value!r}"
 

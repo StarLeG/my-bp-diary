@@ -25,7 +25,12 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
 from bot.handlers import router
-from bot.middlewares import DbSessionMiddleware, DebounceMiddleware, ThrottleMiddleware
+from bot.middlewares import (
+    DbSessionMiddleware,
+    DebounceMiddleware,
+    DoctorUsernameMiddleware,
+    ThrottleMiddleware,
+)
 from bot.services.admin import AdminService, ErrorCounter
 from bot.services.backup import BackupService, S3Uploader, bind_backup
 from bot.services.reminders import RemindersService, bind_service
@@ -160,6 +165,7 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     dp.update.outer_middleware.register(DbSessionMiddleware(session_factory))
     dp.callback_query.outer_middleware.register(DebounceMiddleware())
     dp.callback_query.outer_middleware.register(ThrottleMiddleware())
+    dp.message.outer_middleware.register(DoctorUsernameMiddleware())
     dp.workflow_data["reminders"] = reminders
     dp.workflow_data["backup"] = backup
     dp.workflow_data["admin"] = admin

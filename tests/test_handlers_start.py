@@ -129,10 +129,10 @@ class TestCmdStart:
 
 
 class TestCbMenuBack:
-    async def test_menu_back_edits_to_menu(self, edit, cb_answer) -> None:
+    async def test_menu_back_edits_to_menu(self, edit, cb_answer, session) -> None:
         state = make_state()
         await state.set_state(start.Onboarding.tz_input)
-        await start.cb_menu_back(make_callback("menu:back", make_message()), state)
+        await start.cb_menu_back(make_callback("menu:back", make_message()), state, session)
         assert edit.call_args.args[0] == texts.MAIN_MENU
         assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
         cb_answer.assert_awaited_once()

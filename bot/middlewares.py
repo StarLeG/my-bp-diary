@@ -8,6 +8,9 @@
   дебаунсом не защищаются — экран редактируется на каждое нажатие (§6.3).
 - `ThrottleMiddleware` — не более одного действия в секунду на остальные
   callback'и: быстрые повторы игнорируются молча (снятие «часиков»).
+- `DoctorUsernameMiddleware` — на каждое сообщение врача обновляет его
+  `doctors.telegram_username`, если он сменился (§21, T10): по нему врача
+  находят пациенты.
 
 Время берётся из инжектируемого `clock` (по умолчанию `time.monotonic`) —
 тесты управляют временем без sleep. Служебные словари живут в одном процессе
@@ -20,7 +23,7 @@ import time
 from typing import Any, Awaitable, Callable
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, TelegramObject
+from aiogram.types import CallbackQuery, Message, TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot import texts
@@ -154,4 +157,28 @@ class ThrottleMiddleware(BaseMiddleware):
         if now - self._last_cleanup >= CLEANUP_INTERVAL:
             self._last_cleanup = now
             _drop_stale(self._last_seen, now, self._seconds)
+        return await handler(event, data)
+
+
+class DoctorUsernameMiddleware(BaseMiddleware):
+    """Обновить username врача при каждом его сообщении (SPEC.md, §21, T10).
+
+    Сначала чтение (врач ли это и сменился ли username) — запись только при
+    расхождении, так что обычные сообщения пациентов БД не нагружают.
+    Ошибка обновления не мешает обработке сообщения.
+    """
+
+    async def __call__(
+        self, handler: Handler, event: TelegramObject, data: dict[str, Any]
+    ) -> Any:
+        session = data.get(SESSION_KEY)
+        if isinstance(event, Message) and event.from_user is not None and session is not None:
+            from bot.services import doctor as doctor_service
+
+            try:
+                await doctor_service.touch_username(
+                    session, event.from_user.id, event.from_user.username
+                )
+            except Exception:  # noqa: BLE001 — сообщение важнее username
+                await session.rollback()
         return await handler(event, data)

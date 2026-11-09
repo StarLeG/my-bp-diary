@@ -11,9 +11,23 @@ from aiogram.types import Message
 
 from bot import keyboards, texts
 from bot.config import admin_ids_from_env
-from bot.handlers import admin, diary, doctor, measure, reminders, settings, start, stats, support
+from bot.handlers import (
+    admin,
+    diary,
+    doctor,
+    doctor_menu,
+    measure,
+    reminders,
+    settings,
+    start,
+    stats,
+    support,
+)
 
 router = Router(name="root")
+# Сторона врача — до start: `/start doc_<code>` (приглашение) не должен уйти
+# в онбординг пациента (§21).
+router.include_router(doctor_menu.router)
 router.include_router(start.router)
 router.include_router(measure.router)
 router.include_router(diary.router)

@@ -23,7 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import keyboards, texts
 from bot.config import Settings
 from bot.handlers import doctor
-from bot.models import Doctor as DbDoctor, DoctorPatient
+from bot.models import Doctor as DbDoctor, DoctorPatient, User as User_
 from bot.services import doctor as doctor_service
 
 TG_ID = 111_111
@@ -57,9 +57,24 @@ def make_state(user_id: int = TG_ID) -> FSMContext:
     return FSMContext(storage=storage, key=key)
 
 
+def make_bot(username: str = "my_bp_diary_bot"):
+    """Подмена Bot: `me()` с username и `send_message` (AsyncMock)."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    bot = MagicMock()
+    bot.me = AsyncMock(return_value=MagicMock(username=username))
+    bot.send_message = AsyncMock()
+    return bot
+
+
 async def call(handler, **kwargs) -> None:
-    """Вызвать хендлер как aiogram DI: только параметры из его сигнатуры."""
+    """Вызвать хендлер как aiogram DI: только параметры из его сигнатуры.
+
+    `bot` по умолчанию — подмена (`make_bot`), если хендлер его просит.
+    """
     wanted = inspect.signature(handler).parameters
+    if "bot" in wanted and "bot" not in kwargs:
+        kwargs["bot"] = make_bot()
     await handler(**{name: value for name, value in kwargs.items() if name in wanted})
 
 
@@ -137,16 +152,17 @@ class TestDoctorEntry:
         assert answer.call_args.args[0] == texts.DOCTOR_WEB_DISABLED
         assert answer.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
 
-    async def test_no_link_prompts_email(
+    async def test_no_link_shows_choice(
         self, answer, state, with_settings, session, user
     ) -> None:
+        """Врача нет — выбор способа «По e-mail» / «Через Telegram» (§21, п.2)."""
         with_settings(**cabinet_on())
         await call(doctor.cmd_doctor, message=make_message(), state=state, session=session)
-        assert answer.call_args.args[0] == texts.DOCTOR_NO_LINK
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb(
-            "set:doctor:cancel"
+        assert answer.call_args.args[0] == texts.DOCTOR_NO_LINK == (
+            "Врач пока не добавлен.\nКак пригласить врача?"
         )
-        assert await state.get_state() == doctor.DoctorAccess.email.state
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.doctor_choice_kb()
+        assert await state.get_state() is None
 
     async def test_open_link_shows_screen(
         self, answer, state, with_settings, session, user
@@ -157,7 +173,7 @@ class TestDoctorEntry:
         text = answer.call_args.args[0]
         assert text.startswith(texts.DOCTOR_MENU)
         assert texts.DOCTOR_LINK_ITEM.format(
-            email="doc@example.org",
+            label="doc@example.org",
             status=texts.DOCTOR_STATUS_LABELS["pending"],
         ) in text
         assert answer.call_args.kwargs["reply_markup"] == keyboards.doctor_kb(
@@ -165,14 +181,14 @@ class TestDoctorEntry:
         )
         assert await state.get_state() is None
 
-    async def test_revoked_only_prompts_email_again(
+    async def test_revoked_only_shows_choice_again(
         self, answer, state, with_settings, session, user
     ) -> None:
         with_settings(**cabinet_on())
         await make_link(session, status="revoked")
         await call(doctor.cmd_doctor, message=make_message(), state=state, session=session)
         assert answer.call_args.args[0] == texts.DOCTOR_NO_LINK
-        assert await state.get_state() == doctor.DoctorAccess.email.state
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.doctor_choice_kb()
 
     async def test_menu_callback_edits_message(
         self, edit, cb_answer, state, with_settings, session, user
@@ -544,12 +560,23 @@ async def _email_state() -> FSMContext:
 
 
 class TestDoctorEmailSending:
-    async def test_prompt_mentions_invitation(self, answer, state, with_settings, session, user) -> None:
+    async def test_prompt_mentions_invitation(self, edit, cb_answer, with_settings, session, user) -> None:
         with_settings(**smtp_on())
-        await call(doctor.cmd_doctor, message=make_message(), state=state, session=session)
-        assert answer.call_args.args[0] == texts.DOCTOR_NO_LINK_EMAIL == (
-            "Врач пока не добавлен.\nОтправьте e-mail врача сообщением — отправлю ему приглашение."
+        state = make_state()
+        await call(doctor.cb_doctor_by_email, callback=make_callback("set:doctor:email"), state=state, session=session)
+        assert edit.call_args.args[0] == texts.DOCTOR_EMAIL_ASK == (
+            "Отправьте e-mail врача сообщением — отправлю ему приглашение."
         )
+        assert await state.get_state() == doctor.DoctorAccess.email.state
+
+    async def test_prompt_without_smtp(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        state = make_state()
+        await call(doctor.cb_doctor_by_email, callback=make_callback("set:doctor:email"), state=state, session=session)
+        assert edit.call_args.args[0] == texts.DOCTOR_EMAIL_ASK_NO_SMTP == (
+            "Отправьте e-mail врача сообщением — подготовлю ссылку для него."
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb("set:doctor:cancel")
 
     async def test_invite_sent_same_link_as_forward(
         self, answer, with_settings, session, user, sent
@@ -694,3 +721,224 @@ async def test_report_text_doctor_without_email() -> None:
         make_callback("menu:report"), "https://x/doctor?token=t",
     )
     assert text == texts.DOCTOR_REPORT_LINK.format(url="https://x/doctor?token=t")
+
+
+# ─────────────────── Приглашение через Telegram — пациент (§21, релиз 0.4.14) ───────────────────
+
+from aiogram.exceptions import TelegramForbiddenError  # noqa: E402
+from aiogram.methods import SendMessage  # noqa: E402
+
+from bot.models import DoctorInvite, InviteLog  # noqa: E402
+
+DOC_TG = 555_555
+
+
+async def make_tg_doctor(session: AsyncSession, username: str = "ivanova_doc") -> DbDoctor:
+    doctor, _ = await doctor_service.get_or_create_telegram_doctor(
+        session, DOC_TG, username, "Анна Иванова"
+    )
+    return doctor
+
+
+def forbidden() -> TelegramForbiddenError:
+    return TelegramForbiddenError(method=SendMessage(chat_id=1, text="x"), message="blocked")
+
+
+class TestDoctorByTelegram:
+    async def test_invite_link_screen(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        bot = make_bot("my_bp_diary_bot")
+        await call(
+            doctor.cb_doctor_by_telegram,
+            callback=make_callback("set:doctor:tg"),
+            state=make_state(),
+            session=session,
+            bot=bot,
+        )
+        text = edit.call_args.args[0]
+        [invite] = (await session.execute(select(DoctorInvite))).scalars().all()
+        url = f"https://t.me/my_bp_diary_bot?start=doc_{invite.code}"
+        assert text == texts.DOCTOR_TG_INVITE.format(invite_url=url)
+        assert text.startswith("Перешлите врачу в Telegram ссылку-приглашение")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.doctor_tg_invite_kb()
+        assert edit.call_args.kwargs["link_preview_options"] is keyboards.NO_LINK_PREVIEW
+        assert invite.patient_name == "Тест"
+        # повторный заход — та же ссылка (уже пересланная не сгорает)
+        await call(
+            doctor.cb_doctor_by_telegram,
+            callback=make_callback("set:doctor:tg"),
+            state=make_state(),
+            session=session,
+            bot=bot,
+        )
+        assert edit.call_args.args[0] == text
+
+    async def test_doctor_already_added(self, edit, cb_answer, with_settings, session, user) -> None:
+        """Один врач на пациента (C1): вместо приглашения — экран «Мой врач»."""
+        with_settings(**cabinet_on())
+        await make_link(session)
+        await call(
+            doctor.cb_doctor_by_telegram,
+            callback=make_callback("set:doctor:tg"),
+            state=make_state(),
+            session=session,
+        )
+        assert edit.call_args.args[0].startswith(texts.DOCTOR_MENU)
+        assert (await session.execute(select(DoctorInvite))).scalars().all() == []
+
+    async def test_email_choice_with_doctor_already(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        await make_link(session)
+        state = make_state()
+        await call(doctor.cb_doctor_by_email, callback=make_callback("set:doctor:email"), state=state, session=session)
+        assert edit.call_args.args[0].startswith(texts.DOCTOR_MENU)
+        assert await state.get_state() is None
+
+    async def test_find_prompt(self, edit, cb_answer) -> None:
+        state = make_state()
+        await call(doctor.cb_doctor_find, callback=make_callback("set:doctor:tg:find"), state=state)
+        assert edit.call_args.args[0] == texts.DOCTOR_USERNAME_ASK
+        assert await state.get_state() == doctor.DoctorAccess.username.state
+
+
+class TestFindByUsername:
+    async def _send(self, session, text, bot=None, user_id=TG_ID):
+        state = make_state(user_id)
+        await state.set_state(doctor.DoctorAccess.username)
+        bot = bot or make_bot()
+        await call(
+            doctor.msg_doctor_username,
+            message=make_message(text, user_id=user_id),
+            state=state,
+            session=session,
+            bot=bot,
+        )
+        return state, bot
+
+    async def test_bad_format_keeps_state(self, answer, session, user) -> None:
+        state, _ = await self._send(session, "иванова")
+        assert answer.call_args.args[0] == texts.DOCTOR_USERNAME_BAD
+        assert await state.get_state() == doctor.DoctorAccess.username.state
+
+    async def test_found_sends_invite_to_doctor(self, answer, session, user) -> None:
+        await make_tg_doctor(session)
+        state, bot = await self._send(session, "@Ivanova_Doc")
+        assert answer.call_args.args[0] == texts.DOCTOR_TG_SENT == (
+            "Приглашение отправлено врачу в Telegram. Сообщу, когда он ответит."
+        )
+        assert await state.get_state() is None
+        [invite] = (await session.execute(select(DoctorInvite))).scalars().all()
+        bot.send_message.assert_awaited_once()
+        args, kwargs = bot.send_message.call_args
+        assert args[0] == DOC_TG
+        assert args[1] == texts.DOCTOR_INVITE_FOR_DOCTOR.format(name="Тест")
+        assert kwargs["reply_markup"] == keyboards.doctor_invite_kb(invite.code)
+        [row] = (await session.execute(select(InviteLog))).scalars().all()
+        assert (row.channel, row.target, row.kind, row.ok) == ("telegram", "ivanova_doc", "invite", True)
+
+    async def test_not_found_same_answer_for_patient(self, answer, session, user) -> None:
+        """«Не найден» одинаков для «нет в боте» и «не врач» — пациенты не ищутся (T3)."""
+        other = User_(telegram_id=222_222)
+        session.add(other)
+        await session.commit()
+        _, bot = await self._send(session, "@somebody")
+        [invite] = (await session.execute(select(DoctorInvite))).scalars().all()
+        url = f"https://t.me/my_bp_diary_bot?start=doc_{invite.code}"
+        assert answer.call_args.args[0] == texts.DOCTOR_TG_NOT_FOUND.format(invite_url=url)
+        bot.send_message.assert_not_awaited()
+
+    async def test_self_is_not_found(self, answer, session, user) -> None:
+        """Пациент, который сам врач, не приглашает себя."""
+        await doctor_service.get_or_create_telegram_doctor(session, TG_ID, "self_doc", "Я")
+        _, bot = await self._send(session, "@self_doc")
+        assert answer.call_args.args[0].startswith("Врач с таким именем не найден.")
+        bot.send_message.assert_not_awaited()
+
+    async def test_limit_one_per_hour_per_doctor(self, answer, session, user) -> None:
+        await make_tg_doctor(session)
+        await self._send(session, "@ivanova_doc")
+        _, bot = await self._send(session, "@ivanova_doc")
+        assert answer.call_args.args[0].startswith("Приглашение уже отправлено недавно.")
+        bot.send_message.assert_not_awaited()
+
+    async def test_doctor_blocked_bot(self, answer, session, user) -> None:
+        await make_tg_doctor(session)
+        bot = make_bot()
+        bot.send_message.side_effect = forbidden()
+        await self._send(session, "@ivanova_doc", bot=bot)
+        assert answer.call_args.args[0].startswith("Врач с таким именем не найден.")
+        [row] = (await session.execute(select(InviteLog))).scalars().all()
+        assert row.ok is False
+
+
+class TestTelegramDoctorReportAndRevoke:
+    async def _tg_link(self, session) -> DbDoctor:
+        tg_doctor = await make_tg_doctor(session)
+        await doctor_service.grant_access(session, tg_doctor.id, 1)
+        return tg_doctor
+
+    async def test_report_notifies_doctor(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        await self._tg_link(session)
+        bot = make_bot()
+        await call(
+            doctor.cb_send_report, callback=make_callback("menu:report"),
+            state=make_state(), session=session, bot=bot,
+        )
+        text = edit.call_args.args[0]
+        assert text == texts.DOCTOR_REPORT_TELEGRAM.format(url=extract_url(text))
+        args, kwargs = bot.send_message.call_args
+        assert args == (DOC_TG, texts.DOCTOR_REPORT_FOR_DOCTOR.format(name="Тест"))
+        assert kwargs["reply_markup"] == keyboards.doctor_open_kb(1)
+
+    async def test_report_doctor_unreachable(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        await self._tg_link(session)
+        bot = make_bot()
+        bot.send_message.side_effect = forbidden()
+        await call(
+            doctor.cb_send_report, callback=make_callback("menu:report"),
+            state=make_state(), session=session, bot=bot,
+        )
+        text = edit.call_args.args[0]
+        assert text == texts.DOCTOR_REPORT_LINK.format(url=extract_url(text))
+
+    async def test_list_shows_doctor_name(self, answer, state, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        await self._tg_link(session)
+        await call(doctor.cmd_doctor, message=make_message(), state=state, session=session)
+        assert "• Анна Иванова — доступ открыт" in answer.call_args.args[0]
+
+    async def test_revoke_notifies_doctor(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        tg_doctor = await self._tg_link(session)
+        bot = make_bot()
+        await call(
+            doctor.cb_doctor_revoke, callback=make_callback(f"set:doctor:revoke:{tg_doctor.id}"),
+            state=make_state(), session=session, bot=bot,
+        )
+        bot.send_message.assert_awaited_once_with(
+            DOC_TG, texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name="Тест"), reply_markup=None
+        )
+
+    async def test_revoke_email_doctor_no_notification(self, edit, cb_answer, with_settings, session, user) -> None:
+        with_settings(**cabinet_on())
+        db_doctor = await make_link(session)
+        bot = make_bot()
+        await call(
+            doctor.cb_doctor_revoke, callback=make_callback(f"set:doctor:revoke:{db_doctor.id}"),
+            state=make_state(), session=session, bot=bot,
+        )
+        bot.send_message.assert_not_awaited()
+
+
+def test_telegram_texts_verbatim() -> None:
+    assert texts.DOCTOR_TG_NOT_FOUND.format(invite_url="U") == (
+        "Врач с таким именем не найден. Перешлите ему ссылку-приглашение:\nU"
+    )
+    assert texts.DOCTOR_TG_DECLINED == (
+        "Врач не принял приглашение. Можно пригласить другого врача: «Настройки» → «Мой врач»."
+    )
+    assert texts.DOCTOR_USERNAME_BAD == (
+        "Имя пользователя — от 5 до 32 латинских букв, цифр и «_». Попробуйте ещё раз:"
+    )
