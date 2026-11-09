@@ -198,6 +198,7 @@ class TestGetSettings:
         monkeypatch.setenv("BOT_TOKEN", "env-token")
         monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "1, 2, 2, три")
         monkeypatch.setenv("BACKUP_ENCRYPTION_KEY", "backup-key")
+        monkeypatch.setenv("DELETION_LOG_KEY", "deletion-key")  # обязателен при бэкапах (§3)
         monkeypatch.setenv("BACKUP_DIR", "tmp/backups")
         monkeypatch.setenv("S3_ENDPOINT_URL", "https://s3.example")
         monkeypatch.setenv("S3_BUCKET", "bp-diary")

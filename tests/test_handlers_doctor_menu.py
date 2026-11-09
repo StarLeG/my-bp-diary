@@ -95,6 +95,14 @@ def cb_answer(mocker):
     return mocker.patch.object(CallbackQuery, "answer", new_callable=mocker.AsyncMock)
 
 
+@pytest.fixture(autouse=True)
+def default_settings(mocker) -> Settings:
+    """Настройки без `.env`: экраны врача (Б8) читают `PRIVACY_URL` (§6.11)."""
+    settings = Settings(bot_token="123:TEST")
+    mocker.patch.object(doctor_menu, "get_settings", return_value=settings)
+    return settings
+
+
 @pytest.fixture
 def cabinet(mocker) -> Settings:
     settings = Settings(bot_token="123:TEST", web_secret_key=SECRET, cabinet_url=CABINET_URL)
