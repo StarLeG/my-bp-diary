@@ -109,6 +109,11 @@ class TestManualSync:
             "Самочувствие",  # BTN_FEELING
             "Пропускаю",  # BTN_SKIP_SLOT
             "Оставить как есть",  # BTN_KEEP_AS_IS
+            "Экспорт PDF",  # BTN_EXPORT_PDF
+            "Архивные записи",  # BTN_ARCHIVE
+            "👤 Мои данные",  # BTN_PROFILE (§6.12)
+            "Согласие на обработку данных",  # BTN_CONSENT_SETTINGS (§6.11)
+            "privacy.html#consent",  # согласие — до первых вопросов (§6.1)
         ],
     )
     def test_marker_present(self, html: str, marker: str) -> None:
@@ -119,6 +124,7 @@ class TestManualSync:
         [
             "или в личном кабинете",  # записи в ЛК нет — там только просмотр
             "Напишите автору",  # удаление аккаунта — самоудаление в боте
+            "хранятся на сервере проекта",  # сервер в Германии, Telegram (§16.1, Т6)
         ],
     )
     def test_stale_phrase_absent(self, html: str, stale: str) -> None:

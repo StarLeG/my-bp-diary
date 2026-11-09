@@ -465,6 +465,7 @@
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <p>Откройте бота в Telegram и нажмите «Старт». Регистрация не нужна — дальше всё кнопками.</p>
+              <p>Сначала бот попросит согласие на обработку данных: давление, пульс и лекарства по закону — данные о здоровье, и без согласия хранить их нельзя. Полный текст — на странице <a class="text-blue-600 hover:underline font-medium" href="privacy.html#consent">«Персональные данные»</a>. Бот — для тех, кому исполнилось 16 лет.</p>
               <p>При первом запуске бот задаст три коротких вопроса:</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Часовой пояс.</b> По нему считаются «сегодня» и приходят напоминания. Выберите из списка или напишите свой — например, Europe/Minsk.</span></li>
@@ -573,8 +574,9 @@
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Дневник за сегодня»</b> — все записи за день: время, давление, пульс, отметки о лекарствах, самочувствие и заметки.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Статистика»</b> — сводка за 7 или 30 дней: среднее давление, минимум и максимум, количество измерений и тренд (растёт, падает или стабильно; если измерений меньше четырёх — «мало данных для тренда»). Отдельно — сравнение с вашей целью и приверженность приёму лекарств.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Статистика»</b> — за 7 или 30 дней: гистограмма по дням (верхнее давление — вверх, нижнее — вниз, пульс — на средней линии, цвет — зона давления) и под ней сводка: среднее давление, минимум и максимум, количество измерений, тренд (если измерений меньше четырёх — «мало данных для тренда»), сравнение с целью и приём лекарств.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> — файл за 7 дней, 30 дней или всё время (не больше 5000 записей: если их больше, бот предложит выбрать 7 или 30 дней). Открывается в Excel: можно показать врачу, распечатать или приложить к письму. Отдельным файлом выгружаются и приёмы лекарств.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт PDF»</b> — отчёт за 7 дней, 30 дней или всё время: сводка и таблица записей с цветом зон — удобно распечатать для врача.</span></li>
               </ul>
             </div>
           </details>
@@ -594,6 +596,7 @@
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Вход:</b> «Личный кабинет» в меню бота или команда /cabinet. В первый раз бот попросит e-mail и создаст аккаунт.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Ссылка для входа</b> приходит в чат и действует 15 минут. Она одноразовая и только ваша — не пересылайте её.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Можно войти и по e-mail с паролем.</b> Забыли пароль? Запросите новую ссылку через бота — а пароль смените в настройках профиля.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>В <b class="text-slate-800">«Личной карточке»</b> — «Мои данные» (ФИО, дата рождения и пол для врача) и согласие на обработку данных: там же его можно отозвать.</span></li>
               </ul>
               <p class="pt-1">
                 <a class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-5 py-2.5 rounded-full shadow-lg shadow-blue-600/25 transition hover:-translate-y-0.5"
@@ -618,6 +621,7 @@
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <p>Когда врач просит дневник — не нужно ничего собирать вручную.</p>
               <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Перед приглашением врача бот попросит согласие на то, чтобы врач видел ваши записи, и ваши ФИО, дату рождения и пол — по ним врач узнает вас в своём кабинете. Эти данные видит только приглашённый врач.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Нажмите <b class="text-slate-800">«Отправить отчет»</b> в меню бота. Бот соберёт ссылку на ваши данные — перешлите её доктору.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач увидит график, историю измерений и статистику — <b class="text-slate-800">только для чтения</b>. Изменить ваши записи он не может.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач может выгрузить данные в CSV или PDF — например, чтобы приложить к медкарте.</span></li>
@@ -639,9 +643,11 @@
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <ul class="space-y-2">
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Записи хранятся на сервере проекта и не передаются третьим лицам.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Видите данные только вы — и ваш врач, но только если вы сами дали ему доступ.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Удалить аккаунт вместе со всеми записями, лекарствами и напоминаниями можно в любой момент: «Настройки» → «Удалить аккаунт», с подтверждением. Без остатка.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Записи видите только вы и врач, которого вы пригласили сами. Администратор видит лишь счётчики — сколько пользователей и записей.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Данные хранятся на сервере в Германии, сообщения бота идут через Telegram. Мы не передаём данные другим людям и компаниям и не показываем рекламу.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Согласие можно отозвать в любой момент: «Настройки» → «Согласие на обработку данных» → «Отозвать согласие» — аккаунт и все записи удаляются.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Удалить аккаунт можно и так: «Настройки» → «Удалить аккаунт», с подтверждением. Из резервных копий данные исчезают не позже чем через 14 дней.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Подробно — на странице <a class="text-blue-600 hover:underline font-medium" href="privacy.html">«Персональные данные»</a>: политика, согласие и ваши права.</span></li>
               </ul>
             </div>
           </details>
@@ -661,9 +667,12 @@
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Целевые значения»</b> — ваш ориентир для дневника.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Напоминания»</b> — слоты и время, включение каждого слота и «Повтор после лекарства» (выкл, 30, 60 или 120 минут).</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мои лекарства»</b> — список, дозировки и слоты приёма.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мой врач»</b> — доступ к данным и отчёт.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мой врач»</b> — пригласить врача, отозвать доступ.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«👤 Мои данные»</b> — ФИО, дата рождения и пол для врача.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Часовой пояс»</b> — если переехали или ошиблись при настройке.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> — выгрузка записей и приёмов лекарств.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Архивные записи»</b> — перенести прошлые измерения, например из блокнота.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> и <b class="text-slate-800">«Экспорт PDF»</b> — выгрузка записей.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Согласие на обработку данных»</b> — дата согласия и отзыв.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Удалить аккаунт»</b> — со всеми данными, с подтверждением.</span></li>
               </ul>
               <p>Бот бесплатный, без рекламы и платных подписок. Если он помогает — можно <a class="text-blue-600 hover:underline font-medium" href="#support">поддержать проект</a>. Это не обязательно: все функции доступны без этого.</p>
