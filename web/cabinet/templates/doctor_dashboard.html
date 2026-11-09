@@ -9,7 +9,7 @@
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
   {% endif %}
 </head>
-<body{% if view in ("login", "confirm") %} class="auth-body"{% endif %}>
+<body{% if view in ("login", "confirm", "signin") %} class="auth-body"{% endif %}>
 
 {% if view == "confirm" %}
   <!-- ── Подтверждение ссылки доступа (§21): списание — по кнопке, не при открытии ── -->
@@ -20,6 +20,19 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="token" value="{{ token }}">
       <button type="submit" class="btn">Открыть дневник</button>
+    </form>
+    <p class="auth-foot">Дневник гипертоника — кабинет врача</p>
+  </main>
+
+{% elif view == "signin" %}
+  <!-- ── Ссылка входа из бота (§21): списание — по кнопке «Войти» ── -->
+  <main class="auth-card">
+    <h1>Кабинет врача</h1>
+    <p class="auth-sub">Вход в кабинет врача.</p>
+    <form method="post" action="/doctor/signin" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="token" value="{{ token }}">
+      <button type="submit" class="btn">Войти</button>
     </form>
     <p class="auth-foot">Дневник гипертоника — кабинет врача</p>
   </main>
@@ -67,7 +80,7 @@
   <header class="topbar">
     <div class="container topbar-row">
       <strong>Кабинет врача</strong>
-      <span class="topbar-email">{{ doctor.email }}</span>
+      <span class="topbar-email">{{ doctor.email or doctor.name }}</span>
       <form method="post" action="/doctor/logout" class="inline">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <button type="submit" class="btn btn-ghost">Выйти</button>

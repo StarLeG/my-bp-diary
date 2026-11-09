@@ -326,6 +326,7 @@ def create_app(
     csrf = auth.Csrf(settings.web_secret_key)
     limiter = auth.RateLimiter()
     doctor_magic = doctor_auth.DoctorMagicLink(settings.web_secret_key)
+    doctor_signin = doctor_auth.DoctorSignInLink(settings.web_secret_key)
     doctor_sessions = doctor_auth.DoctorSession(settings.web_secret_key)
 
     @asynccontextmanager
@@ -1328,6 +1329,48 @@ def create_app(
         set_csrf_cookie(request, response, csrf_token)
         return response
 
+    async def _doctor_signin_page(
+        request: Request, db: AsyncSession, token: str
+    ) -> Response:
+        """Ссылка входа врача из бота: страница подтверждения, без списания (§21)."""
+        signin = doctor_signin.load(token)
+        if signin is None or await doctor_auth.is_used(db, signin.jti):
+            return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
+        csrf_token = csrf.issue()
+        response = _templates.TemplateResponse(
+            request,
+            "doctor_dashboard.html",
+            {"view": "signin", "doctor": None, "token": token, "csrf_token": csrf_token},
+        )
+        set_csrf_cookie(request, response, csrf_token)
+        return response
+
+    @app.post("/doctor/signin")
+    async def doctor_signin_post(request: Request, db: AsyncSession = Depends(get_db)) -> Response:
+        """«Войти»: списать ссылку входа и открыть кабинет (§21).
+
+        Связей не меняет; с пациентом в ссылке — сразу его карточка (доступ
+        к ней всё равно проверяется по `status='active'`).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        signin = doctor_signin.load(str(form.get("token", "")))
+        if signin is None:
+            return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
+        doctor = (
+            await db.execute(select(Doctor).where(Doctor.id == signin.doctor_id))
+        ).scalar_one_or_none()
+        if doctor is None or not await doctor_auth.consume(db, signin):
+            return RedirectResponse(url="/doctor?error=link_expired", status_code=303)
+        target = (
+            f"/doctor/patient/{signin.patient_user_id}"
+            if signin.patient_user_id is not None
+            else "/doctor"
+        )
+        response = RedirectResponse(url=target, status_code=303)
+        set_doctor_cookie(request, response, doctor.id)
+        return response
+
     @app.post("/doctor/open")
     async def doctor_open(request: Request, db: AsyncSession = Depends(get_db)) -> Response:
         """«Открыть дневник»: списать ссылку, активировать связь, войти (§21).
@@ -1367,6 +1410,9 @@ def create_app(
         token = request.query_params.get("token", "")
         if token:
             return await _doctor_confirm_page(request, db, token)
+        signin = request.query_params.get("signin", "")
+        if signin:
+            return await _doctor_signin_page(request, db, signin)
         csrf_token = csrf.issue()
         if doctor is not None:
             patients = await doctor_service.active_links_for_doctor(db, doctor.id)

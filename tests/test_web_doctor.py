@@ -818,3 +818,114 @@ class TestPatientCardZones:
 def test_doctor_session_rejects_non_dict_payload() -> None:
     token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_SESSION_SALT).dumps([1])
     assert doctor_auth.DoctorSession(SECRET).verify(token) is None
+
+
+# ─────────────────── Ссылка входа врача из бота (§21, 0.4.14) ───────────────────
+
+
+def _signin(doctor_id: int, user_id: int | None = None) -> str:
+    return doctor_auth.DoctorSignInLink(SECRET).make(doctor_id, user_id)
+
+
+def _signin_open(client: TestClient, token: str):
+    page = client.get(f"/doctor?signin={token}")
+    if page.status_code != 200:
+        return page
+    return client.post("/doctor/signin", data={"csrf_token": _csrf(client), "token": token})
+
+
+class TestDoctorSignIn:
+    def test_confirm_page_does_not_consume(self, app_client, settings) -> None:
+        client, _, doctor_id = app_client
+        token = _signin(doctor_id)
+        for _ in range(2):
+            page = client.get(f"/doctor?signin={token}")
+            assert page.status_code == 200
+            assert "Вход в кабинет врача." in page.text
+            assert ">Войти</button>" in page.text
+            assert 'action="/doctor/signin"' in page.text
+        assert _sql_count(settings, "used_tokens") == 0
+
+    def test_signin_to_list(self, app_client, settings) -> None:
+        client, _, doctor_id = app_client
+        response = _signin_open(client, _signin(doctor_id))
+        assert response.status_code == 303
+        assert response.headers["location"] == "/doctor"
+        assert client.cookies.get(DOCTOR_COOKIE)
+        assert _sql_count(settings, "used_tokens") == 1
+
+    def test_signin_to_patient_card(self, app_client, settings) -> None:
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        response = _signin_open(client, _signin(doctor_id, user_id))
+        assert response.headers["location"] == f"/doctor/patient/{user_id}"
+        assert client.get(f"/doctor/patient/{user_id}").status_code == 200
+
+    def test_signin_does_not_open_foreign_patient(self, app_client, settings) -> None:
+        """Ссылка входа связей не меняет: без `active` карточка закрыта."""
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id, status="pending")
+        response = _signin_open(client, _signin(doctor_id, user_id))
+        assert response.headers["location"] == f"/doctor/patient/{user_id}"
+        card = client.get(f"/doctor/patient/{user_id}")
+        assert card.status_code == 303 and card.headers["location"] == "/doctor?error=denied"
+        assert _status(settings, doctor_id, user_id) == "pending"
+
+    def test_single_use(self, app_client) -> None:
+        client, _, doctor_id = app_client
+        token = _signin(doctor_id)
+        _signin_open(client, token)
+        again = client.get(f"/doctor?signin={token}")
+        assert again.headers["location"] == "/doctor?error=link_expired"
+        response = client.post("/doctor/signin", data={"csrf_token": _csrf(client), "token": token})
+        assert response.headers["location"] == "/doctor?error=link_expired"
+
+    def test_expired(self, app_client, mocker) -> None:
+        client, _, doctor_id = app_client
+        past = int(doctor_auth.utcnow().timestamp()) - (doctor_auth.DOCTOR_SIGNIN_MAX_AGE + 60)
+        mocker.patch("itsdangerous.timed.TimestampSigner.get_timestamp", return_value=past)
+        token = _signin(doctor_id)
+        mocker.stopall()
+        assert client.get(f"/doctor?signin={token}").headers["location"] == "/doctor?error=link_expired"
+
+    def test_access_token_is_not_signin(self, app_client, settings) -> None:
+        """Соли разные: ссылка доступа не годится как ссылка входа и наоборот."""
+        client, user_id, doctor_id = app_client
+        access = _magic_token(doctor_id, user_id)
+        assert client.get(f"/doctor?signin={access}").headers["location"] == "/doctor?error=link_expired"
+        signin = _signin(doctor_id, user_id)
+        assert client.get(f"/doctor?token={signin}").headers["location"] == "/doctor?error=link_expired"
+
+    def test_requires_csrf(self, app_client) -> None:
+        client, _, doctor_id = app_client
+        response = client.post("/doctor/signin", data={"csrf_token": "bad", "token": _signin(doctor_id)})
+        assert response.status_code == 403
+
+    def test_garbage_and_unknown_doctor(self, app_client) -> None:
+        client, _, doctor_id = app_client
+        client.get("/doctor")
+        bad = client.post("/doctor/signin", data={"csrf_token": _csrf(client), "token": "x"})
+        assert bad.headers["location"] == "/doctor?error=link_expired"
+        assert _signin_open(client, _signin(doctor_id + 99)).headers["location"] == "/doctor?error=link_expired"
+
+    @pytest.mark.parametrize(
+        "payload",
+        [{"did": 7}, {"did": "x", "jti": "j"}, {"did": 7, "jti": ""}, {"did": 7, "jti": "j", "pid": "x"}, [1]],
+    )
+    def test_invalid_payload(self, payload) -> None:
+        token = URLSafeTimedSerializer(SECRET, salt=doctor_auth.DOCTOR_SIGNIN_SALT).dumps(payload)
+        assert doctor_auth.DoctorSignInLink(SECRET).load(token) is None
+
+    def test_telegram_doctor_topbar_shows_name(self, app_client, settings) -> None:
+        """Врач без e-mail (из Telegram) — в шапке кабинета ФИО."""
+        client, _, _ = app_client
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO doctors (email, telegram_id, name, password_hash, created_at)"
+            " VALUES (NULL, 555, 'Анна Иванова', 'h', '2026-11-09 00:00:00')"
+        )
+        tg_doctor_id = con.execute("SELECT id FROM doctors WHERE telegram_id = 555").fetchone()[0]
+        con.commit()
+        con.close()
+        _login_doctor(client, tg_doctor_id)
+        assert "Анна Иванова" in client.get("/doctor").text

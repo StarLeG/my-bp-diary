@@ -37,6 +37,12 @@ DOCTOR_ACCESS_SALT = "doctor-access"
 #: Прежняя соль ссылок врача — только для теста, что старые ссылки отклоняются.
 LEGACY_DOCTOR_SALT = "doctor-login"
 
+#: Соль ссылки входа врача из бота (§21): своя, не совпадает со ссылкой доступа.
+DOCTOR_SIGNIN_SALT = "doctor-signin"
+
+#: Срок ссылки входа врача из меню врача в боте — 15 минут (§21).
+DOCTOR_SIGNIN_MAX_AGE = 15 * 60
+
 #: Соль подписи сессионной cookie врача.
 DOCTOR_SESSION_SALT = "doctor-session"
 
@@ -110,13 +116,66 @@ class DoctorMagicLink:
         return AccessToken(doctor_id, patient_user_id, jti, expires_at)
 
 
+@dataclass(frozen=True)
+class SignInToken:
+    """Распакованная ссылка входа: врач, `jti`, конец срока и пациент (или None)."""
+
+    doctor_id: int
+    jti: str
+    expires_at: datetime
+    patient_user_id: Optional[int] = None
+
+
+class DoctorSignInLink:
+    """Ссылка входа врача из меню врача в боте (SPEC.md, §21).
+
+    15 минут, одноразовая (`used_tokens`, общий с ссылкой доступа). Payload —
+    `did` (врач), `jti` и необязательный `pid`: «Открыть в кабинете» ведёт
+    в карточку пациента. Связей не меняет: доступ к пациенту — только при
+    `status='active'`. Формат совпадает с `bot/handlers/doctor_menu.py`.
+    """
+
+    def __init__(self, secret_key: str) -> None:
+        """Секрет подписи — `WEB_SECRET_KEY` из окружения."""
+        self._serializer = URLSafeTimedSerializer(secret_key, salt=DOCTOR_SIGNIN_SALT)
+
+    def make(self, doctor_id: int, patient_user_id: Optional[int] = None) -> str:
+        """Подписать ссылку входа врача (с пациентом — сразу в его карточку)."""
+        payload: dict = {"did": doctor_id, "jti": secrets.token_urlsafe(16)}
+        if patient_user_id is not None:
+            payload["pid"] = patient_user_id
+        return self._serializer.dumps(payload)
+
+    def load(self, token: str) -> Optional[SignInToken]:
+        """Проверить подпись и срок без списания; None — битый или просроченный."""
+        try:
+            payload, signed_at = self._serializer.loads(
+                token, max_age=DOCTOR_SIGNIN_MAX_AGE, return_timestamp=True
+            )
+        except BadSignature:
+            return None
+        if not isinstance(payload, dict):
+            return None
+        doctor_id = payload.get("did")
+        jti = payload.get("jti")
+        patient_user_id = payload.get("pid")
+        if not isinstance(doctor_id, int) or not isinstance(jti, str) or not jti:
+            return None
+        if patient_user_id is not None and not isinstance(patient_user_id, int):
+            return None
+        expires_at = signed_at.astimezone(timezone.utc) + timedelta(
+            seconds=DOCTOR_SIGNIN_MAX_AGE
+        )
+        return SignInToken(doctor_id, jti, expires_at, patient_user_id)
+
+
 async def is_used(session: AsyncSession, jti: str) -> bool:
     """Списана ли ссылка (`used_tokens`, §4.14)."""
     row = await session.execute(select(UsedToken.jti).where(UsedToken.jti == jti))
     return row.first() is not None
 
 
-async def consume(session: AsyncSession, token: AccessToken) -> bool:
+async def consume(session: AsyncSession, token: "AccessToken | SignInToken") -> bool:
     """Списать ссылку атомарно: True — списана сейчас, False — уже была списана.
 
     `INSERT OR IGNORE` по первичному ключу `jti`: из двух одновременных
