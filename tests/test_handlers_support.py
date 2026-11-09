@@ -20,6 +20,7 @@ from bot.models import User as DbUser, WebUser
 
 TG_ID = 111_111
 DONATE_URL = "https://example.org/donate"
+GROUP_URL = "https://t.me/my_bp_diary"
 
 
 def make_message(text: str | None = None, user_id: int = TG_ID) -> Message:
@@ -131,6 +132,27 @@ class TestAboutScreen:
         assert edit.call_args.kwargs["reply_markup"] == keyboards.about_kb(
             support_visible=True, author_visible=True
         )
+
+    async def test_group_button_opens_group(self, edit, cb_answer, with_settings) -> None:
+        with_settings(group_url=GROUP_URL)
+        await call(support.cb_about, callback=make_callback("menu:about", make_message()))
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert markup == keyboards.about_kb(group_url=GROUP_URL)
+        urls = [b for row in markup.inline_keyboard for b in row if b.url]
+        assert [(b.text, b.url) for b in urls] == [(texts.BTN_OPEN_GROUP, GROUP_URL)]
+
+    async def test_group_hidden_without_url(self, edit, cb_answer, with_settings) -> None:
+        with_settings()
+        await call(support.cb_about, callback=make_callback("menu:about", make_message()))
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert markup == keyboards.about_kb()
+        assert not [b for row in markup.inline_keyboard for b in row if b.url]
+
+    async def test_group_hidden_with_placeholder(self, edit, cb_answer, with_settings) -> None:
+        with_settings(group_url="https://example.com")
+        await call(support.cb_about, callback=make_callback("menu:about", make_message()))
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert not [b for row in markup.inline_keyboard for b in row if b.url]
 
     async def test_support_button_shows_page(self, edit, cb_answer, with_settings) -> None:
         with_settings(support_url=DONATE_URL)

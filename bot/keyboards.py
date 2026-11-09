@@ -900,9 +900,14 @@ def onboarding_time_kb(slot: str) -> InlineKeyboardMarkup:
 def about_kb(
     support_visible: bool = False,
     author_visible: bool = False,
+    group_url: str = "",
     back_callback: str = "menu:back",
 ) -> InlineKeyboardMarkup:
-    """Экран «О боте»: «Поддержать проект» и «Написать автору» — по видимости."""
+    """Экран «О боте»: «Поддержать проект», «Написать автору», «Наше сообщество».
+
+    Кнопка сообщества — URL-кнопка на `group_url` (группа в Telegram); пустая
+    строка — кнопки нет (§6.8: переменная `GROUP_URL` пустая или плейсхолдер).
+    """
     builder = InlineKeyboardBuilder()
     if support_visible:
         builder.row(
@@ -912,6 +917,8 @@ def about_kb(
         builder.row(
             InlineKeyboardButton(text=texts.BTN_WRITE_AUTHOR, callback_data="about:author")
         )
+    if group_url:
+        builder.row(InlineKeyboardButton(text=texts.BTN_OPEN_GROUP, url=group_url))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data=back_callback))
     return builder.as_markup()
 

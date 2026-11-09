@@ -1,8 +1,9 @@
 """Хендлеры «О боте / Поддержать» и команды /support, /cabinet (SPEC.md, §6.8–6.9).
 
-Ссылки и контакты берутся только из конфига (`SUPPORT_URL`, `AUTHOR_CONTACT`):
-реквизиты в коде бота не хранятся и не показываются. Кнопка скрывается, если
-переменная пустая или содержит плейсхолдер. Команды `/support` и `/cabinet`
+Ссылки и контакты берутся только из конфига (`SUPPORT_URL`, `AUTHOR_CONTACT`,
+`GROUP_URL`): реквизиты в коде бота не хранятся и не показываются. Кнопка
+скрывается, если переменная пустая или содержит плейсхолдер. Команды `/support`
+и `/cabinet`
 обрабатываются всегда и сбрасывают FSM, чтобы пользователь не застрял в режиме
 свободного ввода (§6.9).
 
@@ -43,10 +44,11 @@ router = Router(name="support")
 
 
 def _about_screen(settings: Settings) -> tuple[str, InlineKeyboardMarkup]:
-    """Экран «О боте» с кнопками по видимости SUPPORT_URL / AUTHOR_CONTACT."""
+    """Экран «О боте»: кнопки по видимости SUPPORT_URL / AUTHOR_CONTACT / GROUP_URL."""
     return texts.ABOUT_TEXT, keyboards.about_kb(
         support_visible=settings.support_button_visible,
         author_visible=settings.author_button_visible,
+        group_url=settings.group_url if settings.group_button_visible else "",
     )
 
 

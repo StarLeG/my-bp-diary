@@ -95,6 +95,25 @@ class TestSections:
         assert f'id="{section_id}"' in html
 
 
+class TestCommunity:
+    """Сообщество в Telegram: футер и карточка автора (doc/TG-CHANNEL-QUESTIONS.md, С2-А)."""
+
+    def test_footer_link(self, html: str) -> None:
+        footer = html[html.index("<footer") :]
+        assert 'href="https://t.me/my_bp_diary"' in footer
+        assert "Сообщество в Telegram" in footer
+
+    def test_support_card_link(self, html: str) -> None:
+        support = html[html.index('id="support"') :]
+        assert 'href="https://t.me/my_bp_diary"' in support
+        assert ">@my_bp_diary</a>" in support
+        assert "новости, подсказки, вопросы и идеи" in support
+
+    def test_no_other_group_placeholders(self, html: str) -> None:
+        """Ссылка на сообщество — только в футере и карточке автора (С2-А, не С2-В)."""
+        assert html.count('href="https://t.me/my_bp_diary"') == 2
+
+
 class TestManualSync:
     """Маркеры актуализации руководства (сверено с bot/texts.py)."""
 

@@ -95,6 +95,10 @@ class Settings(BaseModel):
     author_contact: str = ""
     """Контакт автора. Пусто → кнопка «Написать автору» скрыта."""
 
+    group_url: str = ""
+    """Ссылка на сообщество в Telegram — группа с темами (`GROUP_URL`).
+    Пусто или плейсхолдер → кнопка «Наше сообщество» скрыта."""
+
     db_path: str = "data/bot.sqlite3"
     """Путь к файлу SQLite."""
 
@@ -272,6 +276,12 @@ class Settings(BaseModel):
         return bool(self.author_contact.strip())
 
     @property
+    def group_button_visible(self) -> bool:
+        """Кнопка «Наше сообщество» видна, только если URL задан и не плейсхолдер."""
+        url = self.group_url.strip().lower().rstrip("/")
+        return bool(url) and url not in _PLACEHOLDER_URLS
+
+    @property
     def cabinet_button_visible(self) -> bool:
         """Кабинет развёрнут: заданы и секрет подписи, и base URL."""
         return bool(self.web_secret_key.strip() and self.cabinet_url.strip())
@@ -308,6 +318,7 @@ def get_settings() -> Settings:
         bot_proxy=os.getenv("BOT_PROXY", ""),
         support_url=os.getenv("SUPPORT_URL", ""),
         author_contact=os.getenv("AUTHOR_CONTACT", ""),
+        group_url=os.getenv("GROUP_URL", ""),
         db_path=os.getenv("DB_PATH", "data/bot.sqlite3"),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", DEFAULT_TIMEZONE),
         log_level=os.getenv("LOG_LEVEL", "INFO"),

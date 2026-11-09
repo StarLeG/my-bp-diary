@@ -140,6 +140,7 @@ class TestJsonLd:
         assert app["operatingSystem"] == "Telegram, Web"
         assert app["offers"]["price"] == "0"
         assert app["installUrl"] == "https://t.me/my_bp_diary_bot?start=landing"
+        assert app["sameAs"] == ["https://t.me/my_bp_diary"]
         assert app["author"] == {"@id": graph["Person"]["@id"]}
 
     def test_person_matches_support(self, graph: dict[str, dict], html: str) -> None:

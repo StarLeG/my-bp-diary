@@ -59,6 +59,7 @@ uv run python -m bot
 | `BOT_TOKEN` | токен бота от @BotFather (только env, никогда в коде) |
 | `SUPPORT_URL` | ссылка на страницу поддержки; пусто = кнопка скрыта |
 | `AUTHOR_CONTACT` | контакт автора; пусто = кнопка скрыта |
+| `GROUP_URL` | ссылка на сообщество в Telegram; пусто = кнопка «Наше сообщество» скрыта |
 | `DB_PATH` | путь к файлу SQLite (по умолчанию `data/bot.sqlite3`) |
 | `DEFAULT_TIMEZONE` | часовой пояс по умолчанию (IANA) |
 | `LOG_LEVEL` | уровень логирования |

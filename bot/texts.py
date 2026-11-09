@@ -76,6 +76,7 @@ BTN_REMEASURE_OFF = "Больше не напоминать"
 
 BTN_SUPPORT_PROJECT = "Поддержать проект"
 BTN_WRITE_AUTHOR = "Написать автору"
+BTN_OPEN_GROUP = "📣 Наше сообщество"
 BTN_OPEN_SUPPORT = "Перейти на страницу поддержки"
 BTN_START = "Начать"
 

@@ -28,6 +28,7 @@ class TestSettingsValidation:
         assert settings.bot_token == "123:ABC-test-token"
         assert settings.support_url == ""
         assert settings.author_contact == ""
+        assert settings.group_url == ""
         assert settings.db_path == "data/bot.sqlite3"
         assert settings.default_timezone == DEFAULT_TIMEZONE
         assert settings.log_level == "INFO"
@@ -118,6 +119,14 @@ class TestButtonsVisibility:
 
     def test_author_button_visible(self) -> None:
         assert make_settings(author_contact="@author").author_button_visible is True
+
+    @pytest.mark.parametrize("url", ["", "   ", "CHANGE_ME", "change_me", "https://example.com", "https://example.com/", "TODO"])
+    def test_group_button_hidden(self, url: str) -> None:
+        assert make_settings(group_url=url).group_button_visible is False
+
+    @pytest.mark.parametrize("url", ["https://t.me/my_bp_diary", "  https://t.me/my_bp_diary  ", "https://t.me/my_bp_diary/"])
+    def test_group_button_visible(self, url: str) -> None:
+        assert make_settings(group_url=url).group_button_visible is True
 
     def test_cabinet_hidden_when_any_missing(self) -> None:
         assert make_settings().cabinet_button_visible is False
