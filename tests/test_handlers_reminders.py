@@ -484,80 +484,79 @@ class TestSkip:
 
 
 class TestSnooze:
-    async def test_snooze_moves(self, edit, cb_answer, reminders_svc) -> None:
+    async def test_snooze_moves(self, edit, cb_answer, reminders_svc, session, user) -> None:
         reminders_svc.snooze.return_value = True
         await call(
             reminders.cb_snooze,
             callback=make_callback("rem:snooze:7", make_message()),
+            session=session,
             state=make_state(),
             reminders=reminders_svc,
         )
-        reminders_svc.snooze.assert_awaited_once_with(TG_ID, 7)
+        # Регресс: в сервис уходит внутренний users.id, а не Telegram id.
+        reminders_svc.snooze.assert_awaited_once_with(user.id, 7)
+        assert user.id != TG_ID
         assert edit.call_args.args[0] == texts.SLOT_REMAINING
         assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
 
-    async def test_missing_row_ignored(self, edit, cb_answer, reminders_svc) -> None:
+    async def test_missing_row_ignored(self, edit, cb_answer, reminders_svc, session, user) -> None:
         reminders_svc.snooze.return_value = False
         await call(
             reminders.cb_snooze,
             callback=make_callback("rem:snooze:7", make_message()),
+            session=session,
             state=make_state(),
             reminders=reminders_svc,
         )
         edit.assert_not_called()
         cb_answer.assert_awaited()
 
-    async def test_garbage_id_ignored(self, edit, cb_answer, reminders_svc) -> None:
+    async def test_garbage_id_ignored(self, edit, cb_answer, reminders_svc, session) -> None:
         await call(
             reminders.cb_snooze,
             callback=make_callback("rem:snooze:abc", make_message()),
+            session=session,
             state=make_state(),
             reminders=reminders_svc,
         )
         reminders_svc.snooze.assert_not_awaited()
         edit.assert_not_called()
 
-    async def test_foreign_user_matches_nothing(self, edit, cb_answer, reminders_svc) -> None:
-        reminders_svc.snooze.return_value = False
-        await call(
-            reminders.cb_snooze,
-            callback=make_callback("rem:snooze:7", make_message(), user_id=222_222),
-            state=make_state(222_222),
-            reminders=reminders_svc,
-        )
-        reminders_svc.snooze.assert_awaited_once_with(222_222, 7)
-
 
 class TestRemeasureOff:
-    async def test_off_removes(self, edit, cb_answer, reminders_svc) -> None:
+    async def test_off_removes(self, edit, cb_answer, reminders_svc, session, user) -> None:
         reminders_svc.cancel_remeasure.return_value = True
         await call(
             reminders.cb_remeasure_off,
             callback=make_callback("rem:off:7", make_message()),
+            session=session,
             state=make_state(),
             reminders=reminders_svc,
         )
-        reminders_svc.cancel_remeasure.assert_awaited_once_with(TG_ID, 7)
+        reminders_svc.cancel_remeasure.assert_awaited_once_with(user.id, 7)
         assert edit.call_args.args[0] == texts.REMEASURE_OFF_DONE
         assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
 
-    async def test_missing_row_ignored(self, edit, cb_answer, reminders_svc) -> None:
+    async def test_missing_row_ignored(self, edit, cb_answer, reminders_svc, session, user) -> None:
         reminders_svc.cancel_remeasure.return_value = False
         await call(
             reminders.cb_remeasure_off,
             callback=make_callback("rem:off:7", make_message()),
+            session=session,
             state=make_state(),
             reminders=reminders_svc,
         )
         edit.assert_not_called()
         cb_answer.assert_awaited()
 
-    async def test_garbage_id_ignored(self, edit, cb_answer, reminders_svc) -> None:
+    async def test_garbage_id_ignored(self, edit, cb_answer, reminders_svc, session) -> None:
         await call(
             reminders.cb_remeasure_off,
             callback=make_callback("rem:off:abc", make_message()),
+            session=session,
             state=make_state(),
             reminders=reminders_svc,
         )
         reminders_svc.cancel_remeasure.assert_not_awaited()
         edit.assert_not_called()
+

@@ -10,8 +10,13 @@
 - «Через 30 мин» (snooze) — не новая строка: `next_trigger_time` существующей
   строки перезаписывается транзакционно (optimistic locking), job пересоздаётся
   с признаком «snooze» (правило «3 часов» на него не распространяется);
-- доставка атомарна: захват строки `UPDATE|DELETE … WHERE next_trigger_time=?`
+- доставка атомарна: захват строки `UPDATE … WHERE next_trigger_time=?`
   до отправки — двойной тик не отправит напоминание дважды;
+- повтор замера (`med_remeasure`) после отправки не удаляется, а помечается
+  доставленным (`enabled=False`): кнопки сообщения «Через 30 мин» и «Больше не
+  напоминать» действуют по id этой строки. Snooze снова включает её, «Больше
+  не напоминать» удаляет; при следующей доставке или постановке повтора
+  прежние доставленные строки пользователя убираются (не копятся);
 - catch-up при старте: просроченное отправляется один раз, не чаще 1 раза
   в день на тип (`last_sent_date`); ограничение действует только на catch-up,
   snooze в тот же день доставляется.
@@ -234,9 +239,14 @@ class RemindersService:
                     )
                 else:
                     query = query.where(Reminder.measurement_id == measurement_id)
-                existing = (await session.execute(query)).scalar_one_or_none()
-                if existing is not None:
+                existing = list((await session.execute(query)).scalars())
+                if any(row.enabled for row in existing):
                     return False
+                # Доставленные повторы (enabled=False) не мешают новому: убираем
+                # их, иначе уникальность по measurement_id не даст вставить строку.
+                for row in existing:
+                    await session.delete(row)
+                await session.flush()
                 reminder = Reminder(
                     user_id=user_id,
                     type=TYPE_REMEASURE,
@@ -313,7 +323,11 @@ class RemindersService:
                     )
                 )
             ).scalar_one_or_none()
-            if reminder is None or not reminder.enabled:
+            if reminder is None:
+                return False
+            # Слот — только включённый; повтор замера после доставки выключен
+            # (enabled=False) и по «Через 30 мин» включается снова (§6.7).
+            if not reminder.enabled and reminder.type != TYPE_REMEASURE:
                 return False
             result = await session.execute(
                 update(Reminder)
@@ -322,7 +336,7 @@ class RemindersService:
                     Reminder.user_id == user_id,
                     Reminder.next_trigger_time == reminder.next_trigger_time,
                 )
-                .values(next_trigger_time=new_time)
+                .values(next_trigger_time=new_time, enabled=True)
             )
             await session.commit()
             if result.rowcount == 0:
@@ -451,11 +465,25 @@ class RemindersService:
             old_time = reminder.next_trigger_time
             if reminder.type == TYPE_REMEASURE:
                 result = await session.execute(
-                    delete(Reminder).where(
+                    update(Reminder)
+                    .where(
                         Reminder.id == reminder_id,
                         Reminder.next_trigger_time == old_time,
+                        Reminder.enabled.is_(True),
                     )
+                    .values(enabled=False, last_sent_date=local_today)
                 )
+                if result.rowcount:
+                    # Прежние доставленные повторы пользователя больше не нужны:
+                    # кнопки действуют по последнему сообщению.
+                    await session.execute(
+                        delete(Reminder).where(
+                            Reminder.user_id == reminder.user_id,
+                            Reminder.type == TYPE_REMEASURE,
+                            Reminder.enabled.is_(False),
+                            Reminder.id != reminder_id,
+                        )
+                    )
                 next_time = now
             else:
                 next_time = next_slot_occurrence(reminder.local_time, user.timezone, now)

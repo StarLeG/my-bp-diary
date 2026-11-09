@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 import pytest
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
@@ -541,9 +541,10 @@ class TestDeliverSlot:
 
 
 class TestDeliverRemeasure:
-    async def test_sends_and_removes_row(
+    async def test_sends_and_keeps_row_disabled(
         self, session: AsyncSession, user: User, svc, scheduler, sent
     ) -> None:
+        """Строка не удаляется: кнопки сообщения действуют по её id (§6.7)."""
         measurement = await add_measurement(session, user, now_utc())
         reminder = await make_remeasure(
             session, user, measurement.id, next_time=now_utc() - timedelta(minutes=1)
@@ -555,8 +556,13 @@ class TestDeliverRemeasure:
         _, text, markup = sent[0]
         assert text == texts.REMEASURE_MESSAGE
         assert texts.BTN_REMEASURE_NOW in kb_texts(markup)
-        assert (await session.execute(select(Reminder))).scalars().all() == []
+        [row] = (await session.execute(select(Reminder))).scalars().all()
+        await session.refresh(row)
+        assert row.id == reminder.id and row.enabled is False
         assert scheduler.get_job(f"reminder:{reminder.id}") is None
+        # повторный тик по доставленной строке ничего не шлёт
+        assert await svc._deliver(reminder.id, rem.MODE_REMEASURE) is False
+        assert len(sent) == 1
 
     async def test_not_blocked_by_quiet_rule(
         self, session: AsyncSession, user: User, svc, sent
@@ -716,7 +722,7 @@ class TestStartup:
         assert sent == []
         assert scheduler.get_job(f"reminder:{reminder.id}") is not None
 
-    async def test_overdue_remeasure_delivered_and_removed(
+    async def test_overdue_remeasure_delivered_and_disabled(
         self, session: AsyncSession, user: User, svc, sent
     ) -> None:
         measurement = await add_measurement(session, user, now_utc())
@@ -726,7 +732,10 @@ class TestStartup:
         await session.commit()
         assert await svc.startup() == 1
         assert len(sent) == 1
-        assert (await session.execute(select(Reminder))).scalars().all() == []
+        [row] = (await session.execute(select(Reminder))).scalars().all()
+        await session.refresh(row)
+        assert row.enabled is False
+        assert await svc.startup() == 0  # доставленная строка не шлётся повторно
 
     async def test_future_jobs_are_scheduled(
         self, session: AsyncSession, user: User, svc, scheduler, sent
@@ -770,3 +779,98 @@ class TestJobConfig:
         assert isinstance(job["trigger"], DateTrigger)
         assert job["trigger"].run_date.tzinfo is not None
         assert job["id"] == f"reminder:{reminder.id}"
+
+
+class TestRemeasureButtonsAfterDelivery:
+    """Регресс: «Через 30 мин» и «Больше не напоминать» под пришедшим повтором замера.
+
+    Раньше строка удалялась при доставке, и кнопки (по её id) ничего не находили.
+    """
+
+    async def _delivered(self, session, user, svc, measurement_id=None):
+        reminder = await make_remeasure(
+            session, user, measurement_id, next_time=now_utc() - timedelta(minutes=1)
+        )
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_REMEASURE) is True
+        return reminder.id
+
+    async def test_snooze_after_delivery(
+        self, session: AsyncSession, user: User, svc, scheduler, sent
+    ) -> None:
+        reminder_id = await self._delivered(session, user, svc)
+        assert await svc.snooze(user.id, reminder_id) is True
+        row = await session.get(Reminder, reminder_id)
+        await session.refresh(row)
+        assert row.enabled is True
+        assert row.next_trigger_time > now_utc() + timedelta(minutes=29)
+        assert scheduler.get_job(f"reminder:{reminder_id}")["args"] == [
+            reminder_id, rem.MODE_SNOOZE,
+        ]
+        # отложенный повтор приходит ещё раз
+        await session.execute(
+            update(Reminder).where(Reminder.id == reminder_id)
+            .values(next_trigger_time=now_utc() - timedelta(seconds=1))
+        )
+        await session.commit()
+        assert await svc._deliver(reminder_id, rem.MODE_SNOOZE) is True
+        assert len(sent) == 2
+
+    async def test_off_after_delivery(
+        self, session: AsyncSession, user: User, svc, scheduler, sent
+    ) -> None:
+        reminder_id = await self._delivered(session, user, svc)
+        assert await svc.cancel_remeasure(user.id, reminder_id) is True
+        assert (await session.execute(select(Reminder))).scalars().all() == []
+        assert await svc.cancel_remeasure(user.id, reminder_id) is False
+
+    async def test_off_after_snooze_cancels_pending(
+        self, session: AsyncSession, user: User, svc, scheduler, sent
+    ) -> None:
+        reminder_id = await self._delivered(session, user, svc)
+        assert await svc.snooze(user.id, reminder_id) is True
+        assert await svc.cancel_remeasure(user.id, reminder_id) is True
+        assert scheduler.get_job(f"reminder:{reminder_id}") is None
+
+    async def test_buttons_need_internal_user_id(
+        self, session: AsyncSession, user: User, svc, sent
+    ) -> None:
+        """Telegram id ≠ users.id: по Telegram id строка не находится."""
+        reminder_id = await self._delivered(session, user, svc)
+        assert user.telegram_id != user.id
+        assert await svc.snooze(user.telegram_id, reminder_id) is False
+        assert await svc.snooze(user.id, reminder_id) is True
+
+    async def test_delivered_row_does_not_block_new_remeasure(
+        self, session: AsyncSession, user: User, svc, sent
+    ) -> None:
+        """После доставки следующий приём лекарства ставит новый повтор."""
+        await self._delivered(session, user, svc)
+        assert await svc.ensure_remeasure(user.id, None, 60) is True
+        rows = (await session.execute(select(Reminder))).scalars().all()
+        assert len(rows) == 1 and rows[0].enabled is True
+
+    async def test_delivered_row_for_measurement_replaced(
+        self, session: AsyncSession, user: User, svc, sent
+    ) -> None:
+        measurement = await add_measurement(session, user, now_utc())
+        await self._delivered(session, user, svc, measurement.id)
+        assert await svc.ensure_remeasure(user.id, measurement.id, 60) is True
+        assert await svc.ensure_remeasure(user.id, measurement.id, 60) is False
+
+    async def test_old_delivered_rows_cleaned_on_next_delivery(
+        self, session: AsyncSession, user: User, svc, sent
+    ) -> None:
+        first = await self._delivered(session, user, svc)
+        measurement = await add_measurement(session, user, now_utc())
+        second = await self._delivered(session, user, svc, measurement.id)
+        ids = [r.id for r in (await session.execute(select(Reminder))).scalars().all()]
+        assert ids == [second] and first != second
+
+    async def test_disabled_slot_still_not_snoozed(
+        self, session: AsyncSession, user: User, svc
+    ) -> None:
+        slot = await make_slot(session, user, next_time=now_utc() + timedelta(hours=1))
+        slot.enabled = False
+        await session.commit()
+        assert await svc.snooze(user.id, slot.id) is False

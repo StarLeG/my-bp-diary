@@ -239,17 +239,23 @@ async def cb_skip_slot(
 @router.callback_query(F.data.startswith("rem:snooze:"))
 async def cb_snooze(
     callback: CallbackQuery,
+    session: AsyncSession,
     state: FSMContext,
     reminders: RemindersService,
 ) -> None:
-    """«Через 30 мин»: перенести напоминание, расписание не ломается (§6.7)."""
+    """«Через 30 мин»: перенести напоминание, расписание не ломается (§6.7).
+
+    Владелец строки — внутренний `users.id`, а не Telegram id: сервис ищет
+    строку по `reminders.user_id`.
+    """
     reminder_id = _id_of(callback)
     if reminder_id <= 0:
         await callback.answer()
         return
-    user_id = callback.from_user.id  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)  # type: ignore[arg-type]
+    await session.commit()  # транзакция закрыта до работы сервиса (своя сессия)
     await state.clear()
-    moved = await reminders.snooze(user_id, reminder_id)
+    moved = await reminders.snooze(user.id, reminder_id)
     if not moved:
         await callback.answer()
         return
@@ -259,17 +265,23 @@ async def cb_snooze(
 @router.callback_query(F.data.startswith("rem:off:"))
 async def cb_remeasure_off(
     callback: CallbackQuery,
+    session: AsyncSession,
     state: FSMContext,
     reminders: RemindersService,
 ) -> None:
-    """«Больше не напоминать»: снять активный повтор замера (§6.7)."""
+    """«Больше не напоминать»: закрыть этот повтор замера (§6.7).
+
+    Строка повтора (доставленная или отложенная через «Через 30 мин»)
+    удаляется, job снимается; настройка «Повтор после лекарства» не меняется.
+    """
     reminder_id = _id_of(callback)
     if reminder_id <= 0:
         await callback.answer()
         return
-    user_id = callback.from_user.id  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)  # type: ignore[arg-type]
+    await session.commit()
     await state.clear()
-    removed = await reminders.cancel_remeasure(user_id, reminder_id)
+    removed = await reminders.cancel_remeasure(user.id, reminder_id)
     if not removed:
         await callback.answer()
         return
