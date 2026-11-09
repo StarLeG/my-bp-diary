@@ -570,3 +570,27 @@ td.actions {
     max-width: 1200px;
   }
 }
+
+/* ── Согласие на обработку данных (§6.11, К2, К3) ── */
+.consent-list {
+  margin: 0.5rem 0 1rem;
+  padding-left: 1.2rem;
+}
+
+.consent-list li {
+  margin-bottom: 0.35rem;
+}
+
+.consent-check {
+  display: block;
+  line-height: 1.5;
+}
+
+.consent-check input[type="checkbox"] {
+  margin-right: 0.4rem;
+}
+
+.btn[disabled] {
+  opacity: 0.55;
+  cursor: not-allowed;
+}

@@ -26,6 +26,7 @@ from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
 from bot.handlers import router
 from bot.middlewares import (
+    ConsentMiddleware,
     DbSessionMiddleware,
     DebounceMiddleware,
     DoctorUsernameMiddleware,
@@ -33,6 +34,7 @@ from bot.middlewares import (
 )
 from bot.services.admin import AdminService, ErrorCounter
 from bot.services.backup import BackupService, S3Uploader, bind_backup
+from bot.services.deletion_log import DeletionLog, bind_purge, schedule_purge
 from bot.services.reminders import RemindersService, bind_service
 
 logger = logging.getLogger(__name__)
@@ -71,6 +73,9 @@ class App:
 
     error_counter: ErrorCounter
     """Счётчик ошибок логов за 24 часа для экрана здоровья (§18.4)."""
+
+    deletion_log: DeletionLog
+    """Журнал удалений (§19): повторное удаление после восстановления копии."""
 
 
 def jobs_db_path(db_path: str) -> str:
@@ -155,6 +160,10 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     # Точка входа job'а бэкапа — module-level `fire_backup` (как у напоминаний).
     bind_backup(backup)
     backup.schedule_daily(scheduler)
+    deletion_log = DeletionLog(settings.deletion_log_path, settings.deletion_log_key)
+    # Отзыв согласия в кабинете (§6.11, К5): аккаунт удаляет бот раз в час.
+    bind_purge(session_factory, reminders, deletion_log)
+    schedule_purge(scheduler)
     error_counter = ErrorCounter()
     admin = AdminService(
         session_factory, settings.db_path, scheduler, error_counter=error_counter
@@ -166,7 +175,11 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     dp.callback_query.outer_middleware.register(DebounceMiddleware())
     dp.callback_query.outer_middleware.register(ThrottleMiddleware())
     dp.message.outer_middleware.register(DoctorUsernameMiddleware())
+    # Согласие (§6.11) — после debounce/throttle: двойной тап не шлёт экран дважды.
+    dp.message.outer_middleware.register(ConsentMiddleware())
+    dp.callback_query.outer_middleware.register(ConsentMiddleware())
     dp.workflow_data["reminders"] = reminders
+    dp.workflow_data["deletion_log"] = deletion_log
     dp.workflow_data["backup"] = backup
     dp.workflow_data["admin"] = admin
     return App(
@@ -179,6 +192,7 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
         backup=backup,
         admin=admin,
         error_counter=error_counter,
+        deletion_log=deletion_log,
     )
 
 

@@ -15,6 +15,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import User, WebUser
+from qa.seed.consents import ensure_patient_consent
 from qa.seed import Scale, patient_email, patient_tg_id, patient_timezone
 
 
@@ -42,6 +43,7 @@ async def seed_users(session: AsyncSession, scale: Scale, password_hash: str) ->
             )
             session.add(user)
             await session.flush()
+        await ensure_patient_consent(session, user.id)
         account = (
             await session.execute(select(WebUser).where(WebUser.user_id == user.id))
         ).scalar_one_or_none()

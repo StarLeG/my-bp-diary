@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 3
+                assert version == SCHEMA_VERSION == 4
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -350,5 +350,39 @@ class TestMigrateDoctors:
         engine = create_engine(str(tmp_path / "empty.sqlite3"))
         try:
             await _migrate_doctors(engine)  # таблицы нет — тихо выходим
+        finally:
+            await engine.dispose()
+
+
+class TestMigrateConsents:
+    """Поколение 4 (§4.15): `consents`, `doctors.consent_*`, `users.deletion_requested_at`."""
+
+    async def test_columns_added_to_old_db(self, tmp_path) -> None:
+        engine = create_engine(str(tmp_path / "gen3.sqlite3"))
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL UNIQUE,"
+                    " timezone VARCHAR(64) NOT NULL, target_systolic INTEGER NOT NULL,"
+                    " target_diastolic INTEGER NOT NULL, med_remeasure_delay INTEGER,"
+                    " onboarded BOOLEAN NOT NULL, last_support_shown_at DATETIME,"
+                    " created_at DATETIME NOT NULL)"
+                )
+                await conn.exec_driver_sql(
+                    "INSERT INTO users VALUES (1, 111, 'Europe/Minsk', 130, 80, 60, 1, NULL,"
+                    " '2026-01-01 00:00:00')"
+                )
+            await init_db(engine)
+            await init_db(engine)  # повторно — без изменений
+            async with engine.connect() as conn:
+                users = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).all()}
+                doctors = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(doctors)")).all()}
+                assert "deletion_requested_at" in users
+                assert {"consent_version", "consent_at", "consent_channel"} <= doctors
+                assert (await conn.exec_driver_sql("SELECT telegram_id FROM users")).scalar() == 111
+                tables = {r[0] for r in (await conn.exec_driver_sql(
+                    "SELECT name FROM sqlite_master WHERE type='table'")).all()}
+                assert "consents" in tables
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 4
         finally:
             await engine.dispose()

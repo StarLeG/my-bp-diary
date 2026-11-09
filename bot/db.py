@@ -35,7 +35,22 @@ RETRY_BASE_DELAY = 0.05
 #: 2 — дозировка лекарства опциональна, слот приёма `crisis` (§4.4).
 #: 3 — врач через Telegram: `doctors.telegram_id` / `telegram_username`, e-mail
 #:     необязателен (§4.8), `doctor_invites` (§4.13).
-SCHEMA_VERSION = 3
+#: 4 — согласия (§4.15): таблица `consents`, `doctors.consent_*`,
+#:     `users.deletion_requested_at`.
+SCHEMA_VERSION = 4
+
+#: Колонки, добавленные в поколении 4 (`ALTER TABLE … ADD COLUMN`, §4.15).
+_ADDED_COLUMNS = (
+    ("users", "deletion_requested_at", "DATETIME"),
+    ("doctors", "consent_version", "VARCHAR(32)"),
+    ("doctors", "consent_at", "DATETIME"),
+    (
+        "doctors",
+        "consent_channel",
+        "VARCHAR(16) CONSTRAINT ck_doctors_consent_channel "
+        "CHECK (consent_channel IS NULL OR consent_channel IN ('bot', 'cabinet'))",
+    ),
+)
 
 T = TypeVar("T")
 
@@ -89,6 +104,7 @@ async def init_db(engine: AsyncEngine) -> None:
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_medications(engine)
     await _migrate_doctors(engine)
+    await _add_missing_columns(engine)
     async with engine.connect() as conn:
         current = int((await conn.exec_driver_sql("PRAGMA user_version")).scalar() or 0)
         if current < SCHEMA_VERSION:
@@ -187,6 +203,26 @@ async def _migrate_doctors(engine: AsyncEngine) -> None:
             logger.info("Схема doctors обновлена (приглашение врача через Telegram)")
         finally:
             await conn.exec_driver_sql("PRAGMA foreign_keys=ON")  # вернуть в пул
+
+
+async def _add_missing_columns(engine: AsyncEngine) -> None:
+    """Добавить колонки поколения 4 в существующие таблицы (§4.15).
+
+    Новые колонки NULL-able, поэтому хватает `ALTER TABLE … ADD COLUMN` без
+    пересборки. Повторный запуск ничего не меняет: колонка, которая уже есть,
+    пропускается. Новые БД получают их сразу из моделей (`create_all`).
+    """
+    async with engine.connect() as conn:
+        for table, column, ddl in _ADDED_COLUMNS:
+            existing = {
+                row[1]
+                for row in (await conn.exec_driver_sql(f"PRAGMA table_info({table})")).all()
+            }
+            if column in existing:
+                continue
+            await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl}")
+            logger.info("Схема %s: добавлена колонка %s", table, column)
+        await conn.commit()
 
 
 @asynccontextmanager

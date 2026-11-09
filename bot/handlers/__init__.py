@@ -13,6 +13,7 @@ from bot import keyboards, texts
 from bot.config import admin_ids_from_env
 from bot.handlers import (
     admin,
+    consent,
     diary,
     doctor,
     doctor_menu,
@@ -28,6 +29,7 @@ router = Router(name="root")
 # Сторона врача — до start: `/start doc_<code>` (приглашение) не должен уйти
 # в онбординг пациента (§21).
 router.include_router(doctor_menu.router)
+router.include_router(consent.router)
 router.include_router(start.router)
 router.include_router(measure.router)
 router.include_router(diary.router)

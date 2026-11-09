@@ -304,3 +304,51 @@ class TestS3Configured:
 
     def test_blank_field_counts_as_unset(self) -> None:
         assert self._full(s3_bucket="   ").s3_configured is False
+
+
+class TestPrivacyAndDeletionLog:
+    """`PRIVACY_URL` обязателен, `DELETION_LOG_KEY` — при бэкапах (§3)."""
+
+    def test_privacy_default(self) -> None:
+        settings = Settings(bot_token="t")
+        assert settings.privacy_url == "https://bp-diary.electroman.by/privacy.html"
+        assert settings.deletion_log_path == "data/deletions.log"
+
+    @pytest.mark.parametrize(
+        "url", ["", "  ", "change_me", "https://example.com", "ftp://x.org/p", "privacy.html"]
+    )
+    def test_privacy_invalid(self, url: str) -> None:
+        with pytest.raises(ValidationError, match="PRIVACY_URL"):
+            Settings(bot_token="t", privacy_url=url)
+
+    def test_privacy_stripped(self) -> None:
+        assert Settings(bot_token="t", privacy_url=" https://a.by/p.html ").privacy_url == "https://a.by/p.html"
+
+    def test_backup_requires_deletion_key(self) -> None:
+        with pytest.raises(ValidationError, match="DELETION_LOG_KEY"):
+            Settings(bot_token="t", backup_encryption_key="k")
+        assert Settings(bot_token="t", backup_encryption_key="k", deletion_log_key="d").deletion_log_key == "d"
+
+    def test_env_empty_privacy_is_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BOT_TOKEN", "env-token")
+        monkeypatch.setenv("PRIVACY_URL", "")
+        get_settings.cache_clear()
+        try:
+            with pytest.raises(ValidationError):
+                get_settings()
+        finally:
+            get_settings.cache_clear()
+
+    def test_env_values(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("BOT_TOKEN", "env-token")
+        monkeypatch.setenv("PRIVACY_URL", "https://site.by/privacy.html")
+        monkeypatch.setenv("DELETION_LOG_KEY", "dk")
+        monkeypatch.setenv("DELETION_LOG_PATH", "x/del.log")
+        get_settings.cache_clear()
+        try:
+            settings = get_settings()
+            assert settings.privacy_url == "https://site.by/privacy.html"
+            assert settings.deletion_log_key == "dk"
+            assert settings.deletion_log_path == "x/del.log"
+        finally:
+            get_settings.cache_clear()

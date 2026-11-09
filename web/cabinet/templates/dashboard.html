@@ -65,6 +65,10 @@
         <div><dt>Профиль</dt><dd>Пользователь Telegram, id {{ user.telegram_id }}</dd></div>
         <div><dt>Цель давления</dt><dd>{{ user.target_systolic }} / {{ user.target_diastolic }} мм рт. ст.</dd></div>
         <div><dt>Часовой пояс</dt><dd>{{ user.timezone }}</dd></div>
+        <div>
+          <dt>Согласие на обработку данных</dt>
+          <dd>{{ consent_line }} · <a href="/consent/withdraw">Отозвать согласие</a></dd>
+        </div>
         <div class="facts-wide">
           <dt>Лекарства</dt>
           <dd>

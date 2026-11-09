@@ -11,13 +11,19 @@ from functools import lru_cache
 from urllib.parse import urlparse
 
 from dotenv import load_dotenv
-from pydantic import BaseModel, field_validator
+from pydantic import BaseModel, field_validator, model_validator
 
 #: Часовой пояс по умолчанию, если пользователь пропустил выбор (IANA).
 DEFAULT_TIMEZONE = "Europe/Minsk"
 
 #: Уровни логирования, которые принимаются в LOG_LEVEL.
 _LOG_LEVELS = frozenset(logging.getLevelNamesMapping())
+
+#: Страница «Персональные данные» по умолчанию (`PRIVACY_URL`, SPEC.md, §3, §16.1).
+DEFAULT_PRIVACY_URL = "https://bp-diary.electroman.by/privacy.html"
+
+#: Журнал удалений по умолчанию (`DELETION_LOG_PATH`, §19): вне файла БД.
+DEFAULT_DELETION_LOG_PATH = "data/deletions.log"
 
 #: Плейсхолдеры URL: при них кнопка «Поддержать» скрывается.
 _PLACEHOLDER_URLS = frozenset(
@@ -142,6 +148,47 @@ class Settings(BaseModel):
 
     smtp_from: str = ""
     """Отправитель: `Дневник гипертоника <noreply@electroman.by>`."""
+
+    privacy_url: str = DEFAULT_PRIVACY_URL
+    """Страница «Персональные данные» (`PRIVACY_URL`, §16.1): якоря `#policy`,
+    `#consent`, `#rights`. Обязательна — ссылку требует ст. 5 п. 5 Закона № 99-З."""
+
+    deletion_log_key: str = ""
+    """Ключ HMAC журнала удалений (`DELETION_LOG_KEY`, §19); не логируется.
+    Обязателен при включённых бэкапах (`BACKUP_ENCRYPTION_KEY`)."""
+
+    deletion_log_path: str = DEFAULT_DELETION_LOG_PATH
+    """Файл журнала удалений (`DELETION_LOG_PATH`) — вне файла БД и `BACKUP_DIR`."""
+
+    @field_validator("privacy_url")
+    @classmethod
+    def _validate_privacy_url(cls, value: str) -> str:
+        """Ссылка на политику не может быть пустой или плейсхолдером (§3).
+
+        Её нельзя скрыть, как «Поддержать»: сведения ст. 5 п. 5 должны быть
+        доступны до согласия, поэтому неверное значение — ошибка при старте.
+        """
+        value = value.strip()
+        lowered = value.lower().rstrip("/")
+        parsed = urlparse(value)
+        if (
+            not value
+            or lowered in _PLACEHOLDER_URLS
+            or parsed.scheme not in ("http", "https")
+            or not parsed.netloc
+            or parsed.netloc.lower() == "example.com"
+        ):
+            raise ValueError("PRIVACY_URL: нужен адрес страницы «Персональные данные»")
+        return value
+
+    @model_validator(mode="after")
+    def _require_deletion_log_key(self) -> "Settings":
+        """С включёнными бэкапами журнал удалений обязателен (§19, §20)."""
+        if self.backup_encryption_key.strip() and not self.deletion_log_key.strip():
+            raise ValueError(
+                "DELETION_LOG_KEY не задан: при BACKUP_ENCRYPTION_KEY он обязателен"
+            )
+        return self
 
     @field_validator("smtp_security")
     @classmethod
@@ -279,4 +326,7 @@ def get_settings() -> Settings:
         smtp_user=os.getenv("SMTP_USER", ""),
         smtp_password=os.getenv("SMTP_PASSWORD", ""),
         smtp_from=os.getenv("SMTP_FROM", ""),
+        privacy_url=os.getenv("PRIVACY_URL", DEFAULT_PRIVACY_URL),
+        deletion_log_key=os.getenv("DELETION_LOG_KEY", ""),
+        deletion_log_path=os.getenv("DELETION_LOG_PATH", "") or DEFAULT_DELETION_LOG_PATH,
     )

@@ -81,6 +81,10 @@ class User(Base):
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, default=_utcnow
     )
+    deletion_requested_at: Mapped[Optional[datetime]] = mapped_column(
+        UTCDateTime(), nullable=True
+    )
+    """Согласие отозвано в личном кабинете (§6.11, К5): аккаунт удалит бот (§19)."""
 
     __table_args__ = (
         CheckConstraint(
@@ -323,9 +327,19 @@ class Doctor(Base):
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, default=_utcnow
     )
+    consent_version: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
+    """Версия согласия врача (`DOCTOR_CONSENT_VERSION`, §4.8, §6.11); NULL — нет."""
+    consent_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    """Когда врач дал согласие (UTC)."""
+    consent_channel: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    """Где дано согласие врача: `bot` (Б8) или `cabinet` (К2)."""
 
     __table_args__ = (
         CheckConstraint("length(name) BETWEEN 1 AND 100", name="ck_doctors_name_length"),
+        CheckConstraint(
+            "consent_channel IS NULL OR consent_channel IN ('bot', 'cabinet')",
+            name="ck_doctors_consent_channel",
+        ),
         CheckConstraint(
             "clinic IS NULL OR length(clinic) <= 100", name="ck_doctors_clinic_length"
         ),
@@ -464,4 +478,47 @@ class DoctorInvite(Base):
             "length(patient_name) BETWEEN 1 AND 64", name="ck_doctor_invites_patient_name"
         ),
         Index("ix_doctor_invites_user", "user_id"),
+    )
+
+
+class Consent(Base):
+    """Согласие пациента на обработку персональных данных (SPEC.md, §4.15, §6.11).
+
+    `processing` — основное согласие (ведение дневника), `doctor` — на
+    предоставление данных врачу. Запись — доказательство согласия (ст. 5 п. 7
+    Закона № 99-З). Действующая — `withdrawn_at IS NULL`; частичный уникальный
+    индекс не даёт двойному «Согласен» создать вторую действующую запись.
+    Удаляется вместе с пациентом (§19).
+    """
+
+    __tablename__ = "consents"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    doctor_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("doctors.id", ondelete="CASCADE"), nullable=True
+    )
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    channel: Mapped[str] = mapped_column(String(16), nullable=False)
+    given_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+    withdrawn_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('processing', 'doctor')", name="ck_consents_kind"),
+        CheckConstraint("channel IN ('bot', 'cabinet')", name="ck_consents_channel"),
+        CheckConstraint(
+            "kind = 'doctor' OR doctor_id IS NULL", name="ck_consents_processing_no_doctor"
+        ),
+        Index(
+            "uq_consents_open",
+            "user_id",
+            "kind",
+            text("COALESCE(doctor_id, 0)"),
+            unique=True,
+            sqlite_where=text("withdrawn_at IS NULL"),
+        ),
+        Index("ix_consents_doctor", "doctor_id"),
     )

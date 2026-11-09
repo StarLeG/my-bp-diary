@@ -46,6 +46,7 @@ from bot.models import (
     WebUser,
 )
 from bot.services.reminders import next_slot_occurrence
+from qa.seed.consents import ensure_doctor_consent, ensure_patient_consent
 from qa.seed import ensure_stand_db
 from web.cabinet import auth
 
@@ -117,6 +118,7 @@ async def _patient(
     )
     session.add(user)
     await session.flush()
+    await ensure_patient_consent(session, user.id)
     meds: dict[str, Medication] = {}
     if with_meds:
         for name, dosage, slot in MEDICATIONS:
@@ -238,9 +240,11 @@ async def build(
         doctor = Doctor(
             email=DOCTOR[0], name=DOCTOR[1], clinic=DOCTOR[2], password_hash=unused_secret
         )
+        ensure_doctor_consent(doctor)
         session.add(doctor)
         await session.flush()
         for days_ago, patient in zip((40, 26, 12, 5), patients):
+            await ensure_patient_consent(session, patient.id, doctor.id)
             session.add(
                 DoctorPatient(
                     doctor_id=doctor.id,

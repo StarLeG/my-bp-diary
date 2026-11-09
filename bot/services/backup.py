@@ -23,7 +23,7 @@ import json
 import logging
 import os
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -47,9 +47,13 @@ BACKUP_NAME_PREFIX = "backup-"
 BACKUP_NAME_SUFFIX = ".sqlite3.aes"
 BACKUP_STAMP_FORMAT = "%Y%m%d-%H%M%S"
 
-#: Retention GFS (§20): 7 ежедневных + 4 еженедельных копий.
+#: Retention GFS (§20): 7 ежедневных + 1 еженедельная копия (до 0.5.0 — 7 + 4).
 DAILY_KEEP = 7
-WEEKLY_KEEP = 4
+WEEKLY_KEEP = 1
+
+#: Копии старше этого срока удаляются всегда: удалённый аккаунт не должен
+#: жить в копиях дольше 15 дней (Закон № 99-З, ст. 10, 13; §20).
+MAX_BACKUP_AGE = timedelta(days=14)
 
 #: Лимит отправки файла в чат (§18.3: больше — ссылка на S3).
 MAX_SEND_BYTES = 50 * 1024 * 1024
@@ -343,12 +347,14 @@ class BackupService:
             json.dumps(payload, ensure_ascii=False), encoding="utf-8"
         )
 
-    def prune(self) -> list[str]:
-        """Retention GFS (§20): 7 ежедневных + 4 еженедельных копий.
+    def prune(self, now: Optional[datetime] = None) -> list[str]:
+        """Retention GFS (§20): 7 ежедневных + 1 еженедельная, не старше 14 дней.
 
-        Еженедельная копия — самая свежая за ISO-неделю. Файлы с
+        Еженедельная копия — самая свежая за ISO-неделю. Любая копия старше
+        `MAX_BACKUP_AGE` удаляется, даже если подходит под GFS. Файлы с
         нераспознанными именами не трогаются (не наши).
         """
+        now = now or datetime.now(timezone.utc)
         dated = [info for info in self.list_backups() if info.created_at is not None]
         keep: set[str] = {info.name for info in dated[:DAILY_KEEP]}
         weeks: set[tuple[int, int]] = set()
@@ -361,6 +367,11 @@ class BackupService:
                 break
             weeks.add(week_key)
             keep.add(info.name)
+        keep = {
+            info.name
+            for info in dated
+            if info.name in keep and now - info.created_at <= MAX_BACKUP_AGE  # type: ignore[operator]
+        }
         removed: list[str] = []
         for info in dated:
             if info.name not in keep:

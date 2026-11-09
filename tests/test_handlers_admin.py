@@ -612,3 +612,23 @@ class TestTestMessage:
         await call(admin_handlers.cb_admin_test_message, callback=callback, bot=bot)
         bot.send_message.assert_not_awaited()
         cb_answer.assert_awaited_once_with()
+
+
+class TestConsentLines:
+    """Согласия в админке (§18.2, §18.6): только счётчик и дата, без данных."""
+
+    def test_stats_line(self) -> None:
+        from bot.handlers.admin import _fmt_stats
+
+        stats = make_stats()
+        stats.consented = 7
+        assert "Дали согласие: 7" in _fmt_stats(stats)
+
+    def test_card_consent(self) -> None:
+        from dataclasses import replace
+
+        from bot.handlers.admin import _fmt_user_card as _fmt_card
+
+        given = replace(make_card(), consent_at=datetime(2026, 11, 10, tzinfo=timezone.utc))
+        assert "Согласие: дано 10.11.2026" in _fmt_card(given)
+        assert "Согласие: согласия нет" in _fmt_card(make_card())

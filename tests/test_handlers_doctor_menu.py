@@ -169,7 +169,17 @@ class TestAcceptDecline:
     async def test_accept(self, edit, cb_answer, session, user) -> None:
         invite = await invite_for(session, user)
         bot = make_bot()
+        # Новый врач: сначала согласие врача (Б8, §6.11), затем приём.
         await call(doctor_menu.cb_accept, callback=make_callback(f"doc:accept:{invite.code}"), session=session, bot=bot)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.doctor_self_consent_kb(invite.code)
+        assert await doctor_service.doctor_by_telegram(session, DOC_TG) is None
+        await call(
+            doctor_menu.cb_self_consent_yes,
+            callback=make_callback(f"doc:consent:yes:{invite.code}"),
+            state=make_state(),
+            session=session,
+            bot=bot,
+        )
         doctor = await doctor_service.doctor_by_telegram(session, DOC_TG)
         assert doctor is not None and doctor.name == "Анна Иванова" and doctor.telegram_username == "ivanova_doc"
         link = await doctor_service.link_for_pair(session, doctor.id, user.id)
@@ -198,7 +208,13 @@ class TestAcceptDecline:
         bot.send_message.side_effect = TelegramForbiddenError(
             method=SendMessage(chat_id=1, text="x"), message="blocked"
         )
-        await call(doctor_menu.cb_accept, callback=make_callback(f"doc:accept:{invite.code}"), session=session, bot=bot)
+        await call(
+            doctor_menu.cb_self_consent_yes,
+            callback=make_callback(f"doc:consent:yes:{invite.code}"),
+            state=make_state(),
+            session=session,
+            bot=bot,
+        )
         assert edit.call_args.args[0] == texts.DOCTOR_INVITE_ACCEPTED
 
     async def test_decline(self, edit, cb_answer, session, user) -> None:
@@ -217,10 +233,19 @@ class TestAcceptDecline:
 
 
 class TestIamDoctor:
-    async def test_new_doctor_asks_name(self, answer, session) -> None:
+    async def test_new_doctor_asks_name(self, answer, edit, cb_answer, session) -> None:
         state = make_state()
         await call(doctor_menu.cmd_iamdoctor, message=make_message("/iamdoctor"), state=state, session=session)
-        assert answer.call_args.args[0] == texts.DOCTOR_REGISTER_ASK
+        # Сначала согласие врача (Б8, §6.11), затем ввод ФИО.
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.doctor_self_consent_kb()
+        await call(
+            doctor_menu.cb_self_consent_yes,
+            callback=make_callback("doc:consent:yes"),
+            state=state,
+            session=session,
+            bot=make_bot(),
+        )
+        assert edit.call_args.args[0] == texts.DOCTOR_REGISTER_ASK
         assert await state.get_state() == doctor_menu.DoctorRegistration.name.state
 
     async def test_registered_doctor(self, answer, session) -> None:

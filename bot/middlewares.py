@@ -182,3 +182,79 @@ class DoctorUsernameMiddleware(BaseMiddleware):
             except Exception:  # noqa: BLE001 — сообщение важнее username
                 await session.rollback()
         return await handler(event, data)
+
+
+#: Команды, которые проверка согласия пропускает (§6.11): `/start` сам
+#: показывает Б1, сторона врача и админка — со своими правилами.
+_CONSENT_EXEMPT_COMMANDS = ("/start", "/iamdoctor", "/admin")
+
+#: Callback'и, доступные без согласия: экран согласия, удаление аккаунта,
+#: сторона врача (`doc:*`), админка (`adm:*`).
+_CONSENT_EXEMPT_CALLBACKS = ("cons:", "doc:", "adm:")
+_CONSENT_EXEMPT_EXACT = frozenset({"set:delete", "set:delete:ok"})
+
+
+def _consent_exempt(event: TelegramObject) -> bool:
+    """Апдейт, который проверка согласия пропускает без вопросов (§6.11)."""
+    if isinstance(event, Message):
+        command = (event.text or "").split(maxsplit=1)[0].split("@", 1)[0] if event.text else ""
+        return command in _CONSENT_EXEMPT_COMMANDS
+    if isinstance(event, CallbackQuery):
+        data = event.data or ""
+        return data in _CONSENT_EXEMPT_EXACT or data.startswith(_CONSENT_EXEMPT_CALLBACKS)
+    return True
+
+
+class ConsentMiddleware(BaseMiddleware):
+    """Без действующего согласия пациент видит только экран согласия (§6.11).
+
+    Блокирует апдейт, только если у отправителя есть строка `users` с
+    `onboarded=1` и нет действующего основного согласия: новые пользователи
+    и врачи без дневника обрабатываются `/start`. Согласие есть, но есть
+    связи с врачом без согласия на этого врача (до 0.5.0) — экран Д4.
+    На кнопку — всплывающая подсказка и экран новым сообщением, на
+    сообщение — сразу экран.
+    """
+
+    async def __call__(
+        self, handler: Handler, event: TelegramObject, data: dict[str, Any]
+    ) -> Any:
+        session = data.get(SESSION_KEY)
+        from_user = getattr(event, "from_user", None)
+        if session is None or from_user is None or _consent_exempt(event):
+            return await handler(event, data)
+        from bot.handlers import consent as consent_handlers
+        from bot.services import consent as consent_service
+        from bot.services import measurements as measurements_service
+
+        user = await measurements_service.get_user(session, from_user.id)
+        if user is None or not user.onboarded:
+            return await handler(event, data)
+        if not await consent_service.has_processing(session, user.id):
+            screen = consent_handlers.consent_screen(existing=True)
+            toast = texts.CONSENT_REQUIRED
+        else:
+            confirm = await consent_handlers.next_confirm(session, user.id)
+            if confirm is None:
+                return await handler(event, data)
+            screen, toast = confirm, None
+        state = data.get("state")
+        if state is not None:
+            await state.clear()
+        text, markup = screen
+        if isinstance(event, CallbackQuery):
+            await event.answer(toast)
+            if event.message is not None:
+                await event.message.answer(
+                    text, reply_markup=markup, link_preview_options=_no_preview()
+                )
+        else:
+            await event.answer(text, reply_markup=markup, link_preview_options=_no_preview())  # type: ignore[union-attr]
+        return None
+
+
+def _no_preview():
+    """Без превью ссылки на политику (экран согласия короткий)."""
+    from bot.keyboards import NO_LINK_PREVIEW
+
+    return NO_LINK_PREVIEW

@@ -23,6 +23,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, schemas, texts
 from bot.config import DEFAULT_TIMEZONE
+from bot.services import consent as consent_service
 from bot.services import doctor as doctor_service
 from bot.services import measurements as measurements_service
 from bot.services.reminders import DEFAULT_SLOT_TIMES, RemindersService
@@ -106,7 +107,22 @@ async def cmd_start(
             return
     user = await measurements_service.get_or_create_user(session, tg_user.id)
     await session.commit()
+    if not await consent_service.has_processing(session, user.id):
+        # Шаг 0 (§6.1, §6.11): без согласия онбординг не начинается.
+        from bot.handlers.consent import consent_screen
+
+        text, markup = consent_screen(existing=user.onboarded)
+        await message.answer(
+            text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+        )
+        return
     if user.onboarded:
+        from bot.handlers.consent import next_confirm
+
+        screen = await next_confirm(session, user.id)
+        if screen is not None:  # связь с врачом без согласия на него (Д4)
+            await message.answer(screen[0], reply_markup=screen[1])
+            return
         await message.answer(
             texts.MAIN_MENU, reply_markup=keyboards.main_menu(is_doctor=doctor is not None)
         )
@@ -137,8 +153,21 @@ async def cb_menu_back(
 
 
 @router.callback_query(F.data == "onb:start")
-async def cb_onb_start(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_onb_start(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Начать»: часовой пояс; без согласия — снова экран согласия (§6.11)."""
     await state.clear()
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if not await consent_service.has_processing(session, user.id):
+        from bot.handlers.consent import consent_screen
+
+        text, markup = consent_screen(existing=user.onboarded)
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+        )
+        await callback.answer(texts.CONSENT_REQUIRED)
+        return
     text, markup = _tz_screen()
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()

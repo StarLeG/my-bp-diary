@@ -342,3 +342,48 @@ def test_google_verification_file() -> None:
     """Файл подтверждения Google Search Console (способ «HTML-файл»)."""
     page = (LANDING / "googlecdb45f49ef70d555.html").read_text(encoding="utf-8")
     assert page.strip() == "google-site-verification: googlecdb45f49ef70d555.html"
+
+
+class TestPersonalDataPage:
+    """«Персональные данные» (§16.1, §6.11): три раздела, даты редакций, оператор."""
+
+    PAGE = LANDING / "privacy.html"
+
+    def test_three_sections_with_toc(self) -> None:
+        html = self.PAGE.read_text(encoding="utf-8")
+        for anchor, title in (
+            ("policy", "Политика обработки персональных данных"),
+            ("consent", "Согласие на обработку персональных данных"),
+            ("rights", "Ваши права"),
+        ):
+            assert f'<section id="{anchor}"' in html
+            assert f'href="#{anchor}">{title}</a>' in html
+            assert re.search(rf"<h2>\d\. {title}</h2>", html)
+
+    def test_edition_dates_match_constants(self) -> None:
+        from bot.services.consent import CONSENT_VERSION, POLICY_DATE, display_date
+
+        html = self.PAGE.read_text(encoding="utf-8")
+        dates = dict(re.findall(r'data-edition="(\w+)">Редакция от (\d\d\.\d\d\.\d{4})\.', html))
+        assert dates == {
+            "policy": display_date(POLICY_DATE),
+            "consent": display_date(CONSENT_VERSION),
+            "rights": display_date(POLICY_DATE),
+        }
+
+    def test_operator_and_required_facts(self) -> None:
+        text = _text(self.PAGE.read_text(encoding="utf-8"))
+        assert "Старинский Олег Григорьевич, физическое лицо" in text
+        assert "211396, Витебская обл., г. Орша" in text
+        assert "info@electroman.by" in text
+        assert "HOSTKEY B.V." in text and "Германии" in text
+        assert "Telegram" in text and "Давая согласие, вы подтверждаете, что знаете об этих рисках" in text
+        assert "16 лет" in text
+        assert "не позже чем через 14 дней" in text
+        assert "хранятся локально" not in text
+
+    def test_landing_trust_signal_and_footer(self) -> None:
+        html = (LANDING / "index.html").read_text(encoding="utf-8")
+        assert "Записи видите только вы и врач, которого вы пригласили" in html
+        assert "хранятся локально" not in html
+        assert 'href="privacy.html">Персональные данные</a>' in html

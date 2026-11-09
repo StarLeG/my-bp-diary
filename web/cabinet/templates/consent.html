@@ -1,0 +1,53 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Согласие на обработку данных — Дневник гипертоника</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    {% if view == "ask" %}
+      <h1>{{ title }}</h1>
+      {% for paragraph in paragraphs %}
+        {% if paragraph[0].startswith("• ") %}
+          <ul class="consent-list">
+            {% for line in paragraph %}<li>{{ line[2:] }}</li>{% endfor %}
+          </ul>
+        {% else %}
+          <p>{% for line in paragraph %}{{ line }}{% if not loop.last %}<br>{% endif %}{% endfor %}</p>
+        {% endif %}
+      {% endfor %}
+      <p><a href="{{ privacy_url }}#consent" target="_blank" rel="noopener">{{ full_link }}</a></p>
+      <form method="post" action="/consent" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn">Согласен</button>
+      </form>
+      <p><a class="btn btn-ghost" href="/consent?declined=1">Не согласен</a></p>
+
+    {% elif view == "declined" %}
+      <h1>{{ title }}</h1>
+      <p>{{ declined_text }}</p>
+      <p><a class="btn" href="/consent">Назад к согласию</a></p>
+      <form method="post" action="/logout">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-ghost">Выйти</button>
+      </form>
+
+    {% elif view == "withdraw" %}
+      <h1>Отозвать согласие</h1>
+      <p>{{ withdraw_text }}</p>
+      <form method="post" action="/consent/withdraw" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn">Да, отозвать и удалить</button>
+      </form>
+      <p><a class="btn btn-ghost" href="/#profile">Отмена</a></p>
+
+    {% elif view == "withdrawn" %}
+      <h1>Согласие отозвано</h1>
+      <p>{{ withdrawn_text }}</p>
+    {% endif %}
+  </main>
+</body>
+</html>

@@ -396,3 +396,19 @@ class TestSeedCli:
         with pytest.raises(SystemExit) as exc_info:
             seed_all_module.main(["--db", str(stand)])
         assert exc_info.value.code == 2
+
+
+@pytest.mark.real_consent
+class TestSeedConsents:
+    """Стенд с 0.5.0 (§6.11): пациенты и врачи — с согласиями, врач видит пациентов."""
+
+    async def test_consents_seeded_once(self, stand: Path) -> None:
+        await run_seed(stand)
+        await run_seed(stand)  # повторный прогон — без дублей
+        patients = count(stand, "SELECT COUNT(*) FROM users WHERE telegram_id BETWEEN 990001 AND 990999")
+        processing = count(stand, f"SELECT COUNT(*) FROM consents WHERE kind = 'processing' AND {LOAD}")
+        assert processing == patients
+        links = count(stand, "SELECT COUNT(*) FROM doctor_patients WHERE status = 'active'")
+        doctor = count(stand, "SELECT COUNT(*) FROM consents WHERE kind = 'doctor' AND withdrawn_at IS NULL")
+        assert doctor == links
+        assert count(stand, "SELECT COUNT(*) FROM doctors WHERE consent_at IS NULL") == 0

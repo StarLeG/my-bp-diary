@@ -303,7 +303,7 @@ SQLite, файл по `DB_PATH`. Все моменты времени — **UTC*
 | id | INTEGER | PK | |
 | user_id | INTEGER | NOT NULL, FK users.id, CASCADE | пациент |
 | kind | TEXT | NOT NULL, CHECK IN (`processing`, `doctor`) | `processing` — основное согласие (ведение дневника); `doctor` — на предоставление данных врачу |
-| doctor_id | INTEGER | NULL, FK doctors.id, SET NULL | врач для `kind='doctor'`: по e-mail и @username — сразу, по ссылке-приглашению — при «Принять» (до этого NULL); у `processing` всегда NULL |
+| doctor_id | INTEGER | NULL, FK doctors.id, CASCADE | врач для `kind='doctor'`: по e-mail и @username — сразу, по ссылке-приглашению — при «Принять» (до этого NULL); у `processing` всегда NULL |
 | version | TEXT | NOT NULL | `CONSENT_VERSION` на момент согласия (дата редакции `ГГГГ-ММ-ДД`) |
 | channel | TEXT | NOT NULL, CHECK IN (`bot`, `cabinet`) | где дано |
 | given_at | DATETIME | NOT NULL | UTC |

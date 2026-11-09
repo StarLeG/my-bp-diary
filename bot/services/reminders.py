@@ -439,6 +439,18 @@ class RemindersService:
             if reminder.type != TYPE_REMEASURE and reminder.next_trigger_time > now:
                 return False  # строка уже обработана: повторный или ложный тик
 
+            from bot.services import consent as consent_service
+
+            if not await consent_service.has_processing(session, user.id):
+                # Без действующего согласия напоминания не отправляются (§6.11):
+                # слот молча переносится на следующий день, расписание не меняется.
+                if reminder.type == TYPE_REMEASURE:
+                    return False
+                next_time = await self._silently_reschedule(session, reminder, user, now)
+                await session.commit()
+                self._add_job(reminder.id, next_time, MODE_SLOT)
+                return False
+
             if reminder.type == TYPE_REMEASURE:
                 # «Не чаще 1/день» — только для catch-up; после обычной доставки
                 # строка удаляется, поэтому ветка достижима лишь при ручном сбое.

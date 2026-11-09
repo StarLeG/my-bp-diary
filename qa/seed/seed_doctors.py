@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import Doctor, DoctorPatient
+from qa.seed.consents import ensure_doctor_consent, ensure_patient_consent
 from qa.seed import Scale, doctor_email, load_patients
 
 
@@ -41,6 +42,7 @@ async def seed_doctors(session: AsyncSession, scale: Scale, password_hash: str) 
             stats["doctors_created"] += 1
         else:
             stats["doctors_existing"] += 1
+        ensure_doctor_consent(doctor)
         patient = patients.get(n)
         if patient is None:
             continue
@@ -57,5 +59,6 @@ async def seed_doctors(session: AsyncSession, scale: Scale, password_hash: str) 
         elif link.status != "active":
             link.status = "active"
             stats["links_activated"] += 1
+        await ensure_patient_consent(session, patient.id, doctor.id)
     await session.flush()
     return stats

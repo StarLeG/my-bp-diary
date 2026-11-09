@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from bot import keyboards, texts
 from bot.config import Settings, get_settings
 from bot.models import Doctor, User
+from bot.services import consent as consent_service
 from bot.services import doctor as doctor_service
 from bot.services import measurements as measurements_service
 from web.cabinet.doctor_auth import DoctorSignInLink
@@ -75,16 +76,35 @@ async def _panel(session: AsyncSession, telegram_id: int) -> tuple[str, InlineKe
     return texts.DOCTOR_PANEL, keyboards.doctor_panel_kb(show_diary)
 
 
+def _self_consent_screen(code: Optional[str] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """Б8: согласие врача на обработку его данных (§6.11)."""
+    return (
+        texts.DOCTOR_SELF_CONSENT_ASK.format(privacy_url=get_settings().privacy_url),
+        keyboards.doctor_self_consent_kb(code),
+    )
+
+
 async def _require_doctor(
     callback: CallbackQuery, session: AsyncSession
 ) -> Optional[Doctor]:
-    """Врач по Telegram-аккаунту; не врач — главное меню вместо меню врача."""
+    """Врач по Telegram-аккаунту с действующим согласием (§6.11).
+
+    Не врач — главное меню вместо меню врача; врач без согласия — Б8.
+    """
     doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id)
     if doctor is None:
         await callback.message.edit_text(  # type: ignore[union-attr]
             texts.MAIN_MENU, reply_markup=keyboards.main_menu()
         )
         await callback.answer()
+        return None
+    if not consent_service.doctor_ok(doctor):
+        text, markup = _self_consent_screen()
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+        )
+        await callback.answer()
+        return None
     return doctor
 
 
@@ -119,11 +139,35 @@ async def cmd_start_invite(
 async def cb_accept(
     callback: CallbackQuery, session: AsyncSession, bot: Bot
 ) -> None:
-    """«✅ Принять»: врач и связь `active`, код списан, пациенту — уведомление (§21, п.5).
+    """«✅ Принять»: без согласия врача — сначала Б8, затем приём (§6.11, §21 п.5)."""
+    code = (callback.data or "").split(":", 2)[2]
+    doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id)
+    if doctor is None or not consent_service.doctor_ok(doctor):
+        invite = await doctor_service.active_invite(session, code)
+        patient = await session.get(User, invite.user_id) if invite is not None else None
+        if invite is None or patient is None or patient.telegram_id == callback.from_user.id:
+            await callback.message.edit_text(texts.DOCTOR_INVITE_INVALID)  # type: ignore[union-attr]
+            await callback.answer()
+            return
+        text, markup = _self_consent_screen(code)
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+        )
+        await callback.answer()
+        return
+    await _accept(callback, session, bot, code)
+
+
+async def _accept(
+    callback: CallbackQuery, session: AsyncSession, bot: Bot, code: str
+) -> None:
+    """Приём приглашения: врач и связь `active`, код списан, пациенту — уведомление.
 
     Списание атомарно: из двух нажатий проходит одно, второе — «устарело».
+    Согласие пациента на приглашение (Б7) привязывается к этому врачу; если
+    его нет (приглашение до 0.5.0), доступ откроется после подтверждения
+    пациентом (Д4).
     """
-    code = (callback.data or "").split(":", 2)[2]
     tg_user = callback.from_user
     invite = await doctor_service.active_invite(session, code)
     patient = await session.get(User, invite.user_id) if invite is not None else None
@@ -144,6 +188,9 @@ async def cb_accept(
         doctor_service.full_name(tg_user.first_name, tg_user.last_name),
     )
     await doctor_service.grant_access(session, doctor.id, patient_user_id)
+    await consent_service.attach_doctor(session, patient_user_id, doctor.id)
+    if not consent_service.doctor_ok(doctor):
+        await consent_service.give_doctor_self(session, doctor, consent_service.CHANNEL_BOT)
     label = doctor_service.doctor_label(doctor)
     _, markup = await _panel(session, tg_user.id)
     await session.commit()
@@ -164,10 +211,70 @@ async def cb_decline(
         await callback.answer()
         return
     patient = await session.get(User, invite.user_id)
+    if patient is not None:
+        # Согласие пациента на приглашение без врача закрывается (§6.11, Б7).
+        await consent_service.withdraw_doctor(session, patient.id, None)
     await callback.message.edit_text(texts.DOCTOR_INVITE_DECLINED)  # type: ignore[union-attr]
     await callback.answer()
     if patient is not None and patient.telegram_id != callback.from_user.id:
         await _notify(bot, patient.telegram_id, texts.DOCTOR_TG_DECLINED)
+
+
+# ─────────────────────────── Согласие врача (Б8) ───────────────────────────
+
+
+@router.callback_query(F.data.startswith("doc:consent:yes"))
+async def cb_self_consent_yes(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession, bot: Bot
+) -> None:
+    """«✅ Согласен» (Б8): при приглашении — сразу «Принять», иначе меню врача.
+
+    Новый врач без записи `doctors` (`/iamdoctor`): согласие запоминается в
+    FSM и сохраняется вместе с ФИО.
+    """
+    parts = (callback.data or "").split(":", 3)
+    code = parts[3] if len(parts) == 4 else None
+    if code is not None:
+        if await doctor_service.active_invite(session, code) is None:
+            await callback.message.edit_text(texts.DOCTOR_INVITE_INVALID)  # type: ignore[union-attr]
+            await callback.answer()
+            return
+        doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id)
+        if doctor is not None:
+            await consent_service.give_doctor_self(session, doctor, consent_service.CHANNEL_BOT)
+        await _accept(callback, session, bot, code)
+        return
+    doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id)
+    if doctor is None:
+        await state.set_state(DoctorRegistration.name)
+        await state.update_data(doctor_consent=True)
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.DOCTOR_REGISTER_ASK, reply_markup=keyboards.input_cancel_kb("menu:back")
+        )
+        await callback.answer()
+        return
+    await consent_service.give_doctor_self(session, doctor, consent_service.CHANNEL_BOT)
+    text, markup = await _panel(session, callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("doc:consent:no"))
+async def cb_self_consent_no(callback: CallbackQuery, session: AsyncSession) -> None:
+    """«Отмена» (Б8): при приглашении — снова «Принять» / «Отклонить», иначе меню."""
+    parts = (callback.data or "").split(":", 3)
+    code = parts[3] if len(parts) == 4 else None
+    invite = await doctor_service.active_invite(session, code) if code else None
+    if invite is not None:
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.DOCTOR_INVITE_FOR_DOCTOR.format(name=invite.patient_name),
+            reply_markup=keyboards.doctor_invite_kb(invite.code),
+        )
+    else:
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+        )
+    await callback.answer()
 
 
 # ─────────────────────────── /iamdoctor ───────────────────────────
@@ -180,14 +287,17 @@ async def cmd_iamdoctor(message: Message, state: FSMContext, session: AsyncSessi
     tg_user = message.from_user
     await doctor_service.touch_username(session, tg_user.id, tg_user.username)  # type: ignore[union-attr]
     doctor = await doctor_service.doctor_by_telegram(session, tg_user.id)  # type: ignore[union-attr]
-    if doctor is not None:
+    if doctor is None or not consent_service.doctor_ok(doctor):
+        # Б8: согласие врача — до регистрации и до любых действий врача (§6.11).
+        text, markup = _self_consent_screen()
         await message.answer(
-            texts.DOCTOR_REGISTERED.format(name=doctor.name),
-            reply_markup=keyboards.doctor_registered_kb(),
+            text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
         )
         return
-    await state.set_state(DoctorRegistration.name)
-    await message.answer(texts.DOCTOR_REGISTER_ASK, reply_markup=keyboards.input_cancel_kb("menu:back"))
+    await message.answer(
+        texts.DOCTOR_REGISTERED.format(name=doctor.name),
+        reply_markup=keyboards.doctor_registered_kb(),
+    )
 
 
 @router.callback_query(F.data == "doc:name")
@@ -207,9 +317,12 @@ async def msg_doctor_name(message: Message, state: FSMContext, session: AsyncSes
     if not doctor_service.DOCTOR_NAME_MIN <= len(name) <= doctor_service.DOCTOR_NAME_MAX:
         await message.answer(texts.DOCTOR_NAME_BAD, reply_markup=keyboards.input_cancel_kb("menu:back"))
         return
+    consent_given = bool((await state.get_data()).get("doctor_consent"))
     await state.clear()
     tg_user = message.from_user
-    await doctor_service.register_doctor(session, tg_user.id, tg_user.username, name)  # type: ignore[union-attr]
+    doctor = await doctor_service.register_doctor(session, tg_user.id, tg_user.username, name)  # type: ignore[union-attr]
+    if consent_given and not consent_service.doctor_ok(doctor):
+        await consent_service.give_doctor_self(session, doctor, consent_service.CHANNEL_BOT)
     username = (tg_user.username or "").lower()  # type: ignore[union-attr]
     text = (
         texts.DOCTOR_NAME_SAVED.format(username=username)
@@ -257,7 +370,7 @@ async def cb_patients(callback: CallbackQuery, session: AsyncSession) -> None:
     doctor = await _require_doctor(callback, session)
     if doctor is None:
         return
-    rows = await doctor_service.active_links_for_doctor(session, doctor.id)
+    rows = await consent_service.visible_patients(session, doctor)
     patients = [(user.id, user.telegram_id) for _, user in rows]
     text = texts.DOCTOR_PATIENTS if patients else texts.DOCTOR_PATIENTS_EMPTY
     await callback.message.edit_text(  # type: ignore[union-attr]
@@ -276,12 +389,24 @@ async def cb_open_patient(callback: CallbackQuery, session: AsyncSession) -> Non
     """
     raw = (callback.data or "").split(":", 2)[2]
     doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id)
+    if doctor is not None and not consent_service.doctor_ok(doctor):
+        text, markup = _self_consent_screen()
+        await callback.message.answer(  # type: ignore[union-attr]
+            text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+        )
+        await callback.answer()
+        return
+    visible = (
+        doctor is not None
+        and raw.isdigit()
+        and await consent_service.doctor_can_see(session, doctor, int(raw))
+    )
     link = (
-        await doctor_service.link_for_pair(session, doctor.id, int(raw))
-        if doctor is not None and raw.isdigit()
+        await doctor_service.link_for_pair(session, doctor.id, int(raw))  # type: ignore[union-attr]
+        if visible
         else None
     )
-    if doctor is None or link is None or link.status != "active":
+    if doctor is None or link is None:
         await callback.answer(texts.NOT_YOUR_RECORD)
         return
     settings = get_settings()
@@ -302,10 +427,14 @@ async def cb_diary(callback: CallbackQuery, state: FSMContext, session: AsyncSes
     """«Вести свой дневник давления»: онбординг пациента (§21, N5)."""
     from bot.handlers.start import _welcome_screen
 
+    from bot.handlers.consent import consent_screen
+
     await state.clear()
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await session.commit()
-    if user.onboarded:
+    if not await consent_service.has_processing(session, user.id):
+        text, markup = consent_screen(existing=user.onboarded)  # Б1 (§6.11)
+    elif user.onboarded:
         text, markup = texts.MAIN_MENU, keyboards.main_menu(is_doctor=True)
     else:
         text, markup = _welcome_screen()

@@ -143,8 +143,8 @@ class TestCbMenuBack:
 
 
 class TestOnboardingScreens:
-    async def test_onb_start_shows_tz_screen(self, edit, cb_answer) -> None:
-        await start.cb_onb_start(make_callback("onb:start", make_message()), make_state())
+    async def test_onb_start_shows_tz_screen(self, edit, cb_answer, session) -> None:
+        await start.cb_onb_start(make_callback("onb:start", make_message()), make_state(), session)
         assert edit.call_args.args[0] == texts.ONB_TZ_ASK
         assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_timezone_kb()
         cb_answer.assert_awaited_once()
@@ -458,7 +458,7 @@ class TestFullOnboardingFlow:
         state = make_state()
         msg = make_message("/start")
         await start.cmd_start(msg, state, session)
-        await start.cb_onb_start(make_callback("onb:start", msg), state)
+        await start.cb_onb_start(make_callback("onb:start", msg), state, session)
         await start.cb_onb_tz(make_callback("onb:tz:Europe/Moscow", msg), state)
         await start.cb_onb_target(make_callback("onb:target:120-80", msg), state)
         await start.cb_onb_slot(make_callback("onb:slot:morning", msg), state)

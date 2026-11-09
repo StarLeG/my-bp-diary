@@ -1,0 +1,40 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Кабинет врача — Дневник гипертоника</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body class="auth-body">
+  <main class="auth-card">
+    <h1>Кабинет врача</h1>
+    <p>{{ text }}</p>
+    {% if error %}
+      <p class="alert alert-error">Отметьте согласие, чтобы продолжить.</p>
+    {% endif %}
+    <form method="post" action="/doctor/consent" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input type="hidden" name="next" value="{{ next_url }}">
+      <label class="consent-check">
+        <input type="checkbox" name="agree" value="1" required id="consent-agree">
+        {{ checkbox_text }}
+        <a href="{{ privacy_url }}#policy" target="_blank" rel="noopener">{{ policy_text }}</a>
+      </label>
+      <button type="submit" class="btn" id="consent-continue" disabled>Продолжить</button>
+    </form>
+    <form method="post" action="/doctor/logout">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button type="submit" class="btn btn-ghost">Выйти</button>
+    </form>
+  </main>
+  <script>
+    // Кнопка неактивна без отметки; сервер отметку всё равно проверяет (К2).
+    (function () {
+      var box = document.getElementById("consent-agree");
+      var button = document.getElementById("consent-continue");
+      box.addEventListener("change", function () { button.disabled = !box.checked; });
+    })();
+  </script>
+</body>
+</html>

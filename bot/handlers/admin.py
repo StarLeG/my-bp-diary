@@ -78,6 +78,7 @@ def _fmt_stats(stats: DbStats) -> str:
             noon=stats.slots_enabled.get("noon", 0),
             evening=stats.slots_enabled.get("evening", 0),
         ),
+        texts.ADMIN_STATS_CONSENTED.format(count=stats.consented),
         texts.ADMIN_STATS_CACHE_NOTE,
     ]
     return "\n".join(lines)
@@ -153,6 +154,11 @@ def _fmt_user_card(card: UserCard) -> str:
             texts.ADMIN_SEARCH_ONBOARDED if card.onboarded else texts.ADMIN_SEARCH_NOT_ONBOARDED
         ),
         reminders=reminders,
+        consent=(
+            texts.ADMIN_SEARCH_CONSENT_GIVEN.format(date=card.consent_at.strftime("%d.%m.%Y"))
+            if card.consent_at is not None
+            else texts.ADMIN_SEARCH_CONSENT_NONE
+        ),
     )
 
 

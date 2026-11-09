@@ -159,6 +159,7 @@ class TestStats:
         assert stats.users == 2
         assert stats.measurements == 3
         assert stats.medications == 1
+        assert stats.consented == 2  # согласие по умолчанию (tests/conftest.py)
 
     async def test_dau_wau_distinct_users(
         self, session, user, session_factory
@@ -279,6 +280,7 @@ class TestFindUser:
         assert card.measurements_count == 2
         assert card.onboarded is False
         assert sorted(card.reminder_slots) == ["med_remeasure", "morning"]
+        assert card.consent_at is not None
 
     async def test_missing_user_is_none(self, session_factory) -> None:
         service = AdminService(session_factory, ":memory:", now=FakeClock())

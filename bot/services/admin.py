@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.models import Measurement, Medication, Reminder, User
+from bot.services import consent as consent_service
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,9 @@ class DbStats:
     slots_enabled: dict[str, int] = field(default_factory=dict)
     """Сколько пользователей включили напоминания по слотам (§18.2)."""
 
+    consented: int = 0
+    """Сколько пользователей дали действующее основное согласие (§18.2, §6.11)."""
+
 
 @dataclass(frozen=True)
 class SystemHealth:
@@ -136,6 +140,8 @@ class UserCard:
     measurements_count: int
     onboarded: bool
     reminder_slots: tuple[str, ...]
+    consent_at: Optional[datetime] = None
+    """Когда дано действующее основное согласие (None — согласия нет, §18.6)."""
 
 
 @dataclass(frozen=True)
@@ -257,6 +263,7 @@ class AdminService:
                     )
                 )
             ).scalar_one()
+            consented = await consent_service.count_with_processing(session)
             slot_rows = (
                 await session.execute(
                     select(Reminder.type, func.count())
@@ -276,6 +283,7 @@ class AdminService:
             db_size=self._file_size(self._db_path),
             wal_size=self._file_size(self._db_path + "-wal"),
             slots_enabled=slots_enabled,
+            consented=consented,
         )
 
     @staticmethod
@@ -326,6 +334,7 @@ class AdminService:
                     )
                 )
             ).scalars().all()
+            consent = await consent_service.current_processing(session, user.id)
         return UserCard(
             telegram_id=user.telegram_id,
             created_at=user.created_at,
@@ -333,6 +342,7 @@ class AdminService:
             measurements_count=count,
             onboarded=bool(user.onboarded),
             reminder_slots=tuple(slots),
+            consent_at=consent.given_at if consent is not None else None,
         )
 
     # ─────────────────────────── Рассылка (§18.5) ───────────────────────────

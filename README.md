@@ -65,6 +65,9 @@ uv run python -m bot
 | `WEB_SECRET_KEY` | секрет личного кабинета (сессии и magic link) |
 | `CABINET_URL` | base URL личного кабинета; пусто = кабинет не развёрнут |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_SECURITY`, `SMTP_USER`, `SMTP_PASSWORD`, `SMTP_FROM` | почта для писем врачу со ссылкой доступа (SPEC §21); пустой `SMTP_HOST` = письма не отправляются, ссылка — пациенту для пересылки |
+| `PRIVACY_URL` | страница «Персональные данные» (SPEC §16.1): ссылки из экранов согласия; пустое значение — ошибка при старте |
+| `BACKUP_ENCRYPTION_KEY`, `BACKUP_DIR` | шифрование и каталог резервных копий (SPEC §20); копии хранятся не дольше 14 дней |
+| `DELETION_LOG_KEY`, `DELETION_LOG_PATH` | журнал удалений (SPEC §19); ключ обязателен при `BACKUP_ENCRYPTION_KEY`. После ручного восстановления копии: `python -m bot.services.deletion_log --apply` |
 
 ## Запуск в Docker
 

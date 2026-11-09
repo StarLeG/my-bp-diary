@@ -57,6 +57,9 @@ testpaths = ["tests"]
 pythonpath = ["."]
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
+markers = [
+    "real_consent: тест согласий — без триггеров согласия по умолчанию (tests/conftest.py)",
+]
 
 [tool.coverage.run]
 source = ["bot"]

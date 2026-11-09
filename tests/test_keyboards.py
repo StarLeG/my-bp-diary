@@ -400,6 +400,7 @@ class TestSettingsKeyboards:
             "set:tz",
             "set:csv",
             "set:pdf",
+            "set:consent",
             "set:delete",
             "menu:back",
         }

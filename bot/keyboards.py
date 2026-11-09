@@ -455,6 +455,9 @@ def settings_kb() -> InlineKeyboardMarkup:
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_CSV, callback_data="set:csv"))
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_PDF, callback_data="set:pdf"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_CONSENT_SETTINGS, callback_data="set:consent")
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
@@ -987,4 +990,83 @@ def admin_search_card_kb(telegram_id: int) -> InlineKeyboardMarkup:
         )
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="adm:back"))
+    return builder.as_markup()
+
+
+# ─────────────── Согласие на обработку данных (SPEC.md, §6.11) ───────────────
+
+
+def consent_kb(privacy_url: str, existing: bool) -> InlineKeyboardMarkup:
+    """Б1: «Согласен» / «Не согласен» / «Прочитать полностью»; существующему —
+    ещё «Удалить аккаунт»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_CONSENT_YES, callback_data="cons:yes"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CONSENT_NO, callback_data="cons:no"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_CONSENT_READ, url=f"{privacy_url}#consent")
+    )
+    if existing:
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete")
+        )
+    return builder.as_markup()
+
+
+def consent_declined_kb() -> InlineKeyboardMarkup:
+    """Б3 существующему: «Удалить аккаунт» / «Назад к согласию»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CONSENT_BACK, callback_data="cons:back"))
+    return builder.as_markup()
+
+
+def consent_settings_kb() -> InlineKeyboardMarkup:
+    """Б6: «Отозвать согласие» / «Назад»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_CONSENT_WITHDRAW, callback_data="set:consent:withdraw")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def consent_withdraw_kb() -> InlineKeyboardMarkup:
+    """Подтверждение отзыва: «Да, отозвать и удалить» / «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_CONSENT_WITHDRAW_OK, callback_data="set:consent:withdraw:ok"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="set:consent"))
+    return builder.as_markup()
+
+
+def doctor_consent_kb() -> InlineKeyboardMarkup:
+    """Б7: «Согласен, пригласить» / «Назад»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_DOCTOR_CONSENT_YES, callback_data="set:doctor:agree")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def doctor_self_consent_kb(code: Optional[str] = None) -> InlineKeyboardMarkup:
+    """Б8: «Согласен» / «Отмена»; при приглашении код едет в callback'е."""
+    yes = f"doc:consent:yes:{code}" if code else "doc:consent:yes"
+    no = f"doc:consent:no:{code}" if code else "doc:consent:no"
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_CONSENT_YES, callback_data=yes))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=no))
+    return builder.as_markup()
+
+
+def confirm_doctor_kb(doctor_id: int, pending: bool) -> InlineKeyboardMarkup:
+    """Д4: оставить доступ (приглашение) врачу или закрыть (отменить)."""
+    keep = texts.BTN_KEEP_INVITE if pending else texts.BTN_KEEP_ACCESS
+    close = texts.BTN_CANCEL_INVITE if pending else texts.BTN_CLOSE_ACCESS
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=keep, callback_data=f"cons:doc:keep:{doctor_id}"))
+    builder.row(InlineKeyboardButton(text=close, callback_data=f"cons:doc:close:{doctor_id}"))
     return builder.as_markup()

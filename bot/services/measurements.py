@@ -27,6 +27,7 @@ from bot.schemas import FeelingLiteral
 
 if TYPE_CHECKING:
     from bot.services.reminders import RemindersService
+    from bot.services.deletion_log import DeletionLog
 
 #: Окно дедупликации: записи в одну минуту считаются одним измерением.
 DEDUP_WINDOW = timedelta(minutes=1)
@@ -161,7 +162,10 @@ async def get_user(session: AsyncSession, telegram_id: int) -> Optional[User]:
 
 
 async def delete_user_data(
-    session: AsyncSession, reminders: "RemindersService", user: User
+    session: AsyncSession,
+    reminders: "RemindersService",
+    user: User,
+    deletion_log: Optional["DeletionLog"] = None,
 ) -> bool:
     """Удалить аккаунт (SPEC.md, §19): СНАЧАЛА job'ы, ПОТОМ `session.delete`.
 
@@ -175,7 +179,11 @@ async def delete_user_data(
     (в SQLAlchemy 2.x 0-row DELETE лишь предупреждает, а не бросает
     `StaleDataError`, поэтому одной проверки `get_user` перед вызовом мало).
     `StaleDataError` отменяется в `False` на случай внешнего вмешательства.
+
+    После удаления метка аккаунта пишется в журнал удалений (`deletion_log`,
+    §19): восстановленная из копии БД удалит его снова.
     """
+    telegram_id = user.telegram_id
     async with _current_delete_lock():
         found = (
             await session.execute(select(User.id).where(User.id == user.id))
@@ -189,6 +197,9 @@ async def delete_user_data(
         except StaleDataError:
             await session.rollback()
             return False
+    from bot.services.deletion_log import record_deletion
+
+    await record_deletion(deletion_log, telegram_id)
     return True
 
 

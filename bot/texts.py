@@ -559,6 +559,7 @@ ADMIN_STATS_MEASUREMENTS = "Всего записей давления: {count}"
 ADMIN_STATS_MEDICATIONS = "Всего активных лекарств: {count}"
 ADMIN_STATS_DB_SIZE = "Размер БД: {size} (WAL: {wal})"
 ADMIN_STATS_SLOTS = "Напоминания: утро — {morning}, обед — {noon}, вечер — {evening}"
+ADMIN_STATS_CONSENTED = "Дали согласие: {count}"
 ADMIN_STATS_CACHE_NOTE = "Данные кэшируются на 5 минут."
 
 # Здоровье системы (§18.4).
@@ -592,8 +593,11 @@ ADMIN_SEARCH_CARD = (
     "Часовой пояс: {tz}\n"
     "Записей давления: {count}\n"
     "Онбординг: {onboarded}\n"
-    "Напоминания: {reminders}"
+    "Напоминания: {reminders}\n"
+    "Согласие: {consent}"
 )
+ADMIN_SEARCH_CONSENT_GIVEN = "дано {date}"
+ADMIN_SEARCH_CONSENT_NONE = "согласия нет"
 ADMIN_SEARCH_ONBOARDED = "пройден"
 ADMIN_SEARCH_NOT_ONBOARDED = "не пройден"
 ADMIN_SEARCH_REMINDERS = "включены: {slots}"
@@ -663,3 +667,105 @@ def fmt_uptime(seconds: int) -> str:
 def fmt_backup_status(integrity_ok: bool) -> str:
     """Статус верификации копии (§18.3)."""
     return ADMIN_BACKUP_INTEGRITY_OK if integrity_ok else ADMIN_BACKUP_INTEGRITY_FAIL
+
+# ─────────────── Согласие на обработку данных (SPEC.md, §6.11) ───────────────
+# Тексты утверждены дословно (doc/PERSONAL-DATA-TEXTS.md, Б1–Б8, Д4).
+
+CONSENT_FIRST_LINE_NEW = "Перед началом — о ваших данных."
+CONSENT_FIRST_LINE_EXISTING = "Теперь для работы бота нужно ваше согласие на обработку данных."
+CONSENT_BODY = (
+    "Бот хранит ваши измерения давления и пульса, лекарства и заметки. "
+    "По закону это данные о здоровье, и нужно ваше согласие.\n\n"
+    "• Записи видите только вы и врач, которого вы пригласите сами.\n"
+    "• Данные хранятся на сервере в Германии, сообщения идут через Telegram.\n"
+    "• Отозвать согласие и удалить всё можно в любой момент.\n\n"
+    "Бот — для тех, кому исполнилось 16 лет.\n"
+    "Полный текст: {privacy_url}#consent"
+)
+BTN_CONSENT_YES = "✅ Согласен"
+BTN_CONSENT_NO = "Не согласен"
+BTN_CONSENT_READ = "📄 Прочитать полностью"
+BTN_CONSENT_BACK = "Назад к согласию"
+CONSENT_DECLINED_NEW = (
+    "Без согласия бот не может хранить ваши записи. Мы ничего о вас не сохранили.\n"
+    "Если передумаете — нажмите /start."
+)
+CONSENT_DECLINED_EXISTING = (
+    "Без согласия бот не может хранить ваши записи. Удалить аккаунт и все данные?"
+)
+CONSENT_REQUIRED = "Сначала нужно согласие на обработку данных"
+CONSENT_SAVED = "Спасибо! Согласие сохранено."
+
+BTN_CONSENT_SETTINGS = "Согласие на обработку данных"
+CONSENT_SETTINGS = (
+    "Согласие дано {date}.\n"
+    "Полный текст: {privacy_url}#consent\n\n"
+    "Если отозвать согласие, аккаунт и все записи будут удалены."
+)
+BTN_CONSENT_WITHDRAW = "Отозвать согласие"
+CONSENT_WITHDRAW_CONFIRM = (
+    "Отозвать согласие? Аккаунт и все записи будут удалены без возможности восстановления."
+)
+BTN_CONSENT_WITHDRAW_OK = "Да, отозвать и удалить"
+CONSENT_WITHDRAWN = "Согласие отозвано, ваш аккаунт и все данные удалены."
+
+DOCTOR_CONSENT_ASK = (
+    "Врач увидит ваши измерения, лекарства, заметки, графики и отчёты и сможет "
+    "оставлять комментарии. Менять записи он не сможет.\n\n"
+    "Закрыть доступ можно в любой момент: «Мой врач» → «Отозвать доступ»."
+)
+BTN_DOCTOR_CONSENT_YES = "✅ Согласен, пригласить"
+
+DOCTOR_SELF_CONSENT_ASK = (
+    "Для работы кабинета врача мы храним ваши ФИО, e-mail или имя пользователя "
+    "в Telegram и ваши заметки к записям пациентов.\n"
+    "Подробнее: {privacy_url}#policy"
+)
+
+CONFIRM_DOCTOR_ACTIVE = (
+    "Ваш врач {doctor} видит ваши измерения, лекарства, заметки, графики и отчёты.\n"
+    "Оставить ему доступ?"
+)
+BTN_KEEP_ACCESS = "✅ Оставить доступ"
+BTN_CLOSE_ACCESS = "Закрыть доступ"
+CONFIRM_DOCTOR_PENDING = (
+    "Вы пригласили врача {doctor}. После принятия приглашения он увидит ваши "
+    "измерения, лекарства, заметки, графики и отчёты.\n"
+    "Оставить приглашение?"
+)
+BTN_KEEP_INVITE = "✅ Оставить"
+BTN_CANCEL_INVITE = "Отменить приглашение"
+
+
+def consent_text(privacy_url: str, existing: bool) -> str:
+    """Экран согласия Б1 (новый пользователь) / Б2 (существующий), §6.11."""
+    first = CONSENT_FIRST_LINE_EXISTING if existing else CONSENT_FIRST_LINE_NEW
+    return f"{first}\n\n{CONSENT_BODY.format(privacy_url=privacy_url)}"
+
+# Кабинет (К2, К3, К5; doc/PERSONAL-DATA-TEXTS.md).
+CABINET_CONSENT_TITLE = "Нужно ваше согласие"
+CABINET_CONSENT_FULL_LINK = "Полный текст согласия"
+CABINET_CONSENT_DECLINED = (
+    "Без согласия дневник работать не может. Удалить аккаунт и все данные можно в боте: "
+    "«Настройки» → «Удалить аккаунт»."
+)
+CABINET_CONSENT_LINE = "дано {date}"
+CABINET_WITHDRAW_CONFIRM = (
+    "Отозвать согласие? Аккаунт и все записи будут удалены в течение часа без "
+    "возможности восстановления."
+)
+CABINET_WITHDRAWN = "Согласие отозвано. Аккаунт и все данные будут удалены в течение часа."
+DOCTOR_CABINET_CONSENT_TEXT = (
+    "Для работы кабинета мы храним ваши ФИО, e-mail или имя пользователя в Telegram "
+    "и ваши заметки к записям пациентов."
+)
+DOCTOR_CABINET_CONSENT_CHECKBOX = (
+    "Согласен на обработку моих данных (ФИО, e-mail и/или Telegram) —"
+)
+DOCTOR_CABINET_CONSENT_POLICY = "политика"
+
+
+def consent_paragraphs() -> list[list[str]]:
+    """Текст Б1 без строки «Полный текст» — абзацы для страницы согласия кабинета (К3)."""
+    body = CONSENT_BODY.split("\nПолный текст:", 1)[0]
+    return [paragraph.split("\n") for paragraph in body.split("\n\n")]

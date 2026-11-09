@@ -26,6 +26,7 @@ from bot.models import Medication, Reminder
 from bot.services import medications as medications_service
 from bot.services import measurements as measurements_service
 from bot.services.reminders import RemindersService
+from bot.services.deletion_log import DeletionLog
 
 router = Router(name="settings")
 
@@ -490,6 +491,7 @@ async def cb_delete_account_confirm(
     state: FSMContext,
     session: AsyncSession,
     reminders: RemindersService,
+    deletion_log: Optional[DeletionLog] = None,
 ) -> None:
     """Подтверждение: job'ы → удаление данных (§19). Двойное нажатие безопасно.
 
@@ -499,7 +501,7 @@ async def cb_delete_account_confirm(
     await state.clear()
     user = await measurements_service.get_user(session, callback.from_user.id)
     if user is not None:
-        await measurements_service.delete_user_data(session, reminders, user)
+        await measurements_service.delete_user_data(session, reminders, user, deletion_log)
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.DELETE_ACCOUNT_DONE, reply_markup=keyboards.back_to_menu()
     )

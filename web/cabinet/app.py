@@ -28,14 +28,15 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData, UploadFile  # request.form() возвращает starlette-экземпляр
 from pydantic import ValidationError
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot import schemas, texts
 from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
-from bot.models import Doctor, Measurement, Medication, Reminder, User, WebUser
+from bot.models import Doctor, Measurement, Medication, Reminder, User, WebSession, WebUser
+from bot.services import consent as consent_service
 from bot.services import csv_export
 from bot.services import doctor as doctor_service
 from bot.services import medications as medications_service
@@ -283,6 +284,16 @@ def _parse_measurement_form(form: FormData, tz_name: str) -> dict:
     }
 
 
+def _safe_doctor_next(url: str) -> str:
+    """Куда вернуть врача после согласия: только страницы кабинета врача.
+
+    Внешние адреса и чужие пути отбрасываются (защита от open redirect).
+    """
+    if url == "/doctor" or (url.startswith("/doctor/") and "//" not in url and "\\" not in url):
+        return url
+    return "/doctor"
+
+
 # ─────────────────────────── Приложение ───────────────────────────
 
 
@@ -372,12 +383,25 @@ def create_app(
         token = request.cookies.get(SESSION_COOKIE, "")
         return await auth.get_web_user_by_token(db, token)
 
-    async def require_user(
+    async def require_session(
         web_user: Optional[WebUser] = Depends(get_web_user),
     ) -> WebUser:
         """Требовать вход: без сессии — редирект на страницу входа."""
         if web_user is None:
             raise HTTPException(status_code=303, headers={"Location": "/login"})
+        return web_user
+
+    async def require_user(
+        web_user: WebUser = Depends(require_session),
+        db: AsyncSession = Depends(get_db),
+    ) -> WebUser:
+        """Вход + действующее согласие (§6.11, К3): без него — страница `/consent`.
+
+        Все страницы ЛК, экспорт и импорт идут через эту зависимость; сама
+        страница согласия — через `require_session`.
+        """
+        if not await consent_service.has_processing(db, web_user.user_id):
+            raise HTTPException(status_code=303, headers={"Location": "/consent"})
         return web_user
 
     async def load_user(db: AsyncSession, web_user: WebUser) -> User:
@@ -451,10 +475,21 @@ def create_app(
             await db.execute(select(Doctor).where(Doctor.id == doctor_id))
         ).scalar_one_or_none()
 
-    async def require_doctor(doctor: Optional[Doctor] = Depends(get_doctor)) -> Doctor:
-        """Требовать вход врача: без сессии — страница входа кабинета врача."""
+    async def require_doctor(
+        request: Request, doctor: Optional[Doctor] = Depends(get_doctor)
+    ) -> Doctor:
+        """Вход врача и его действующее согласие (§6.11, К2).
+
+        Без сессии — страница входа; без согласия — `/doctor/consent` с
+        возвратом на запрошенную страницу.
+        """
         if doctor is None:
             raise HTTPException(status_code=303, headers={"Location": "/doctor"})
+        if not consent_service.doctor_ok(doctor):
+            query = urlencode({"next": request.url.path})
+            raise HTTPException(
+                status_code=303, headers={"Location": f"/doctor/consent?{query}"}
+            )
         return doctor
 
     def set_doctor_cookie(request: Request, response: Response, doctor_id: int) -> None:
@@ -472,14 +507,14 @@ def create_app(
     async def require_patient_link(
         db: AsyncSession, doctor: Doctor, user_id: int
     ) -> User:
-        """Пациент, к которому у врача есть доступ: только `status='active'` (§21).
+        """Пациент, к которому у врача есть доступ (§21, §6.11).
 
         Проверяется на каждый запрос данных пациента (CLAUDE.md, «Роли и
-        доступ»): `revoked` (пациент отозвал) и `pending` (врач ещё не
-        открывал ссылку) — редирект с ошибкой.
+        доступ»): связь `active`, согласие пациента на этого врача, основное
+        согласие пациента и согласие самого врача. Иначе — как отсутствующий:
+        редирект с ошибкой.
         """
-        link = await doctor_service.link_for_pair(db, doctor.id, user_id)
-        if link is None or link.status != "active":
+        if not await consent_service.doctor_can_see(db, doctor, user_id):
             raise HTTPException(
                 status_code=303, headers={"Location": "/doctor?error=denied"}
             )
@@ -684,6 +719,93 @@ def create_app(
         """Вход по magic link из бота (`/cabinet`): одноразовая ссылка, 15 минут."""
         return await _magic_response(request, db, request.query_params.get("token", ""))
 
+    # ───────────────────── Согласие пациента (§6.11, К3, К5) ─────────────────────
+
+    def _consent_page(request: Request, view: str, **context: object) -> Response:
+        """Страница согласия с CSRF-кукой (общая для К3 и К5)."""
+        csrf_token = csrf.issue()
+        response = _templates.TemplateResponse(
+            request,
+            "consent.html",
+            {
+                "view": view,
+                "csrf_token": csrf_token,
+                "title": texts.CABINET_CONSENT_TITLE,
+                "paragraphs": texts.consent_paragraphs(),
+                "privacy_url": settings.privacy_url,
+                "full_link": texts.CABINET_CONSENT_FULL_LINK,
+                "declined_text": texts.CABINET_CONSENT_DECLINED,
+                "withdraw_text": texts.CABINET_WITHDRAW_CONFIRM,
+                "withdrawn_text": texts.CABINET_WITHDRAWN,
+                **context,
+            },
+        )
+        response.set_cookie(
+            CSRF_COOKIE,
+            csrf_token,
+            max_age=SESSION_MAX_AGE,
+            httponly=True,
+            secure=cookie_secure(request),
+            samesite="lax",
+            path="/",
+        )
+        return response
+
+    @app.get("/consent", response_class=HTMLResponse)
+    async def consent_page(
+        request: Request,
+        declined: str = Query(""),
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_session),
+    ) -> Response:
+        """К3: согласие пациента; `?declined=1` — «Не согласен»."""
+        if await consent_service.has_processing(db, web_user.user_id):
+            return RedirectResponse(url="/", status_code=303)
+        return _consent_page(request, "declined" if declined else "ask")
+
+    @app.post("/consent")
+    async def consent_submit(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_session),
+    ) -> Response:
+        """«Согласен» в кабинете: запись `consents`, `channel='cabinet'` (§6.11)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        if user.deletion_requested_at is not None:
+            user.deletion_requested_at = None  # передумал до удаления ботом
+            await db.flush()
+        await consent_service.give_processing(db, user.id, consent_service.CHANNEL_CABINET)
+        return RedirectResponse(url="/", status_code=303)
+
+    @app.get("/consent/withdraw", response_class=HTMLResponse)
+    async def consent_withdraw_page(
+        request: Request, web_user: WebUser = Depends(require_user)
+    ) -> Response:
+        """К5: подтверждение отзыва согласия в кабинете."""
+        return _consent_page(request, "withdraw")
+
+    @app.post("/consent/withdraw")
+    async def consent_withdraw(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """К5: согласие закрыто, аккаунт ждёт удаления ботом, сессии удалены.
+
+        Кабинет не управляет планировщиком напоминаний бота, а job'ы
+        удаляются строго до `users` (§19), поэтому удаление делает бот при
+        ближайшей ежечасной проверке (`deletion_requested_at`).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        await consent_service.request_deletion(db, web_user.user_id)
+        await db.execute(delete(WebSession).where(WebSession.web_user_id == web_user.id))
+        response = _consent_page(request, "withdrawn")
+        clear_auth_cookies(response)
+        return response
+
     @app.post("/logout")
     async def logout(
         request: Request,
@@ -728,6 +850,7 @@ def create_app(
         medication_cells = await medications_service.medication_cells(db, user, measurements)
         medications = await medications_service.list_medications(db, user)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
+        consent = await consent_service.current_processing(db, user.id)
         reminders = list(
             (
                 await db.execute(
@@ -741,6 +864,13 @@ def create_app(
         context = {
             "web_user": web_user,
             "user": user,
+            "consent_line": (
+                texts.CABINET_CONSENT_LINE.format(
+                    date=consent.given_at.astimezone(tz).strftime("%d.%m.%Y")
+                )
+                if consent is not None
+                else ""
+            ),
             "user_zone": tz,
             "slot_order": SLOT_ORDER,
             "med_slot_order": medications_service.SLOTS,
@@ -1414,8 +1544,10 @@ def create_app(
         if signin:
             return await _doctor_signin_page(request, db, signin)
         csrf_token = csrf.issue()
+        if doctor is not None and not consent_service.doctor_ok(doctor):
+            return RedirectResponse(url="/doctor/consent", status_code=303)
         if doctor is not None:
-            patients = await doctor_service.active_links_for_doctor(db, doctor.id)
+            patients = await consent_service.visible_patients(db, doctor)
             response = _templates.TemplateResponse(
                 request,
                 "doctor_dashboard.html",
@@ -1440,6 +1572,53 @@ def create_app(
             )
         set_csrf_cookie(request, response, csrf_token)
         return response
+
+    @app.get("/doctor/consent", response_class=HTMLResponse)
+    async def doctor_consent_page(
+        request: Request,
+        next_url: str = Query("/doctor", alias="next"),
+        error: str = Query(""),
+        doctor: Optional[Doctor] = Depends(get_doctor),
+    ) -> Response:
+        """К2: согласие врача — одна страница для всех путей входа (§6.11)."""
+        if doctor is None:
+            return RedirectResponse(url="/doctor", status_code=303)
+        if consent_service.doctor_ok(doctor):
+            return RedirectResponse(url=_safe_doctor_next(next_url), status_code=303)
+        csrf_token = csrf.issue()
+        response = _templates.TemplateResponse(
+            request,
+            "doctor_consent.html",
+            {
+                "csrf_token": csrf_token,
+                "next_url": _safe_doctor_next(next_url),
+                "error": error,
+                "text": texts.DOCTOR_CABINET_CONSENT_TEXT,
+                "checkbox_text": texts.DOCTOR_CABINET_CONSENT_CHECKBOX,
+                "policy_text": texts.DOCTOR_CABINET_CONSENT_POLICY,
+                "privacy_url": settings.privacy_url,
+            },
+        )
+        set_csrf_cookie(request, response, csrf_token)
+        return response
+
+    @app.post("/doctor/consent")
+    async def doctor_consent_submit(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        doctor: Optional[Doctor] = Depends(get_doctor),
+    ) -> Response:
+        """«Продолжить» (К2): без отметки — снова страница с ошибкой."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        if doctor is None:
+            return RedirectResponse(url="/doctor", status_code=303)
+        next_url = _safe_doctor_next(str(form.get("next", "/doctor")))
+        if str(form.get("agree", "")) != "1":
+            query = urlencode({"next": next_url, "error": "agree"})
+            return RedirectResponse(url=f"/doctor/consent?{query}", status_code=303)
+        await consent_service.give_doctor_self(db, doctor, consent_service.CHANNEL_CABINET)
+        return RedirectResponse(url=next_url, status_code=303)
 
     @app.post("/doctor/login")
     async def doctor_login(

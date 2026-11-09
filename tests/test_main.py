@@ -22,7 +22,12 @@ from pydantic import ValidationError
 from bot.config import Settings
 from bot.handlers import router
 from bot.main import App, build_app, build_scheduler, jobs_db_path, main, run
-from bot.middlewares import DbSessionMiddleware, DebounceMiddleware, ThrottleMiddleware
+from bot.middlewares import (
+    ConsentMiddleware,
+    DbSessionMiddleware,
+    DebounceMiddleware,
+    ThrottleMiddleware,
+)
 from bot.services.admin import AdminService, ErrorCounter
 from bot.services.backup import BACKUP_JOB_ID, BackupService, fire_backup
 from bot.services.reminders import RemindersService, fire_reminder
@@ -199,7 +204,10 @@ class TestBuildApp:
         update_types = [type(m) for m in app.dp.update.outer_middleware]
         assert DbSessionMiddleware in update_types
         callback_types = [type(m) for m in app.dp.callback_query.outer_middleware]
-        assert callback_types == [DebounceMiddleware, ThrottleMiddleware]
+        assert callback_types == [DebounceMiddleware, ThrottleMiddleware, ConsentMiddleware]
+        message_types = [type(m) for m in app.dp.message.outer_middleware]
+        assert ConsentMiddleware in message_types
+        assert app.dp.workflow_data["deletion_log"] is app.deletion_log
 
     def test_external_scheduler_used(self, settings: Settings) -> None:
         scheduler = build_scheduler(":memory:")

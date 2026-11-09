@@ -44,6 +44,7 @@ from bot.services.doctor import (
     revoke_access,
     valid_email,
 )
+from bot.services import consent as consent_service
 from bot.services import mailer
 from bot.services.measurements import get_or_create_user
 
@@ -114,8 +115,34 @@ async def _doctor_entry(
     user = await get_or_create_user(session, telegram_id)
     links = await links_for_patient(session, user.id)
     if not any(link.status != "revoked" for link, _ in links):
+        if not await consent_service.has_invite_consent(session, user.id):
+            # Б7: согласие на врача — перед выбором способа (§6.11, §21 п.2).
+            return texts.DOCTOR_CONSENT_ASK, keyboards.doctor_consent_kb()
         return texts.DOCTOR_NO_LINK, keyboards.doctor_choice_kb()
     return _doctor_screen(links)
+
+
+async def _needs_consent(
+    callback_or_message, session: AsyncSession, state: FSMContext, user_id: int
+) -> bool:
+    """Нет согласия на нового врача (Б7) — показать Б7 вместо шага приглашения.
+
+    Кнопки шагов приглашения могли остаться в старом сообщении: согласие
+    проверяется на каждом шаге, а не только на входе в «Мой врач».
+    """
+    if await consent_service.has_invite_consent(session, user_id):
+        return False
+    await state.clear()
+    if isinstance(callback_or_message, CallbackQuery):
+        await callback_or_message.message.edit_text(  # type: ignore[union-attr]
+            texts.DOCTOR_CONSENT_ASK, reply_markup=keyboards.doctor_consent_kb()
+        )
+        await callback_or_message.answer()
+    else:
+        await callback_or_message.answer(
+            texts.DOCTOR_CONSENT_ASK, reply_markup=keyboards.doctor_consent_kb()
+        )
+    return True
 
 
 async def _has_doctor(session: AsyncSession, user_id: int) -> bool:
@@ -173,12 +200,33 @@ async def cb_doctor(callback: CallbackQuery, state: FSMContext, session: AsyncSe
 # ─────────────────────────── Добавление врача ───────────────────────────
 
 
+@router.callback_query(F.data == "set:doctor:agree")
+async def cb_doctor_agree(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«✅ Согласен, пригласить» (Б7): согласие на врача — в момент нажатия.
+
+    Врач ещё неизвестен (`doctor_id` NULL): по e-mail он появится сразу, по
+    ссылке — при «Принять». Повторное нажатие использует ту же запись.
+    """
+    user = await get_or_create_user(session, callback.from_user.id)
+    if not await _has_doctor(session, user.id):
+        await consent_service.give_doctor(session, user.id, None)
+    text, markup = await _doctor_entry(session, state, callback.from_user.id)
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
 @router.callback_query(F.data == "set:doctor:email")
 async def cb_doctor_by_email(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
     """«📧 По e-mail»: ввод e-mail врача (§21, п.3); без почты — про ссылку."""
     user = await get_or_create_user(session, callback.from_user.id)
+    if not await _has_doctor(session, user.id) and await _needs_consent(
+        callback, session, state, user.id
+    ):
+        return
     if await _has_doctor(session, user.id):
         text, markup = await _doctor_entry(session, state, callback.from_user.id)
     else:
@@ -201,6 +249,8 @@ async def cb_doctor_by_telegram(
         text, markup = await _doctor_entry(session, state, callback.from_user.id)
         await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
         await callback.answer()
+        return
+    if await _needs_consent(callback, session, state, user.id):
         return
     invite = await current_invite(session, user.id, callback.from_user.first_name)
     url = await _invite_url(bot, invite.code)
@@ -241,6 +291,8 @@ async def msg_doctor_username(
     await state.clear()
     tg_user = message.from_user
     user = await get_or_create_user(session, tg_user.id)  # type: ignore[union-attr]
+    if await _needs_consent(message, session, state, user.id):
+        return
     invite = await current_invite(session, user.id, tg_user.first_name)  # type: ignore[union-attr]
     url = await _invite_url(bot, invite.code)
     doctor = await doctor_by_username(session, username)
@@ -282,8 +334,12 @@ async def msg_doctor_email(
         return
     settings = get_settings()
     user = await get_or_create_user(session, message.from_user.id)  # type: ignore[union-attr]
+    if await _needs_consent(message, session, state, user.id):
+        return
     doctor, _ = await find_or_create_doctor(session, email)
     await link_patient(session, doctor.id, user.id)
+    # Врач стал известен — согласие на приглашение привязывается к нему (Б7).
+    await consent_service.attach_doctor(session, user.id, doctor.id)
     await session.commit()
     await state.clear()
     link = make_doctor_link(settings, doctor.id, user.id)
@@ -335,6 +391,7 @@ async def cb_doctor_revoke(
     if not await revoke_access(session, user_id=user.id, doctor_id=doctor_id):
         await callback.answer(texts.NOT_YOUR_RECORD)
         return
+    await consent_service.withdraw_doctor(session, user.id, doctor_id)
     doctor = await session.get(Doctor, doctor_id)
     doctor_tg = doctor.telegram_id if doctor is not None else None
     await session.commit()
@@ -368,6 +425,9 @@ async def _report_text(
     прежнее сообщение для пересылки.
     """
     if doctor.telegram_id is not None and bot is not None:
+        if not consent_service.doctor_ok(doctor):
+            # Врач без своего согласия пациента не видит (§6.11): без уведомления.
+            return texts.DOCTOR_REPORT_LINK.format(url=link)
         doctor_tg = doctor.telegram_id
         await session.commit()  # транзакция закрыта до отправки
         delivered = await _notify(

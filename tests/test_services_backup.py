@@ -228,7 +228,7 @@ class TestListAndPrune:
             write_backup_file(backup_dir, name)
             names.append(name)
         service = make_service(tmp_path / "db", backup_dir)
-        removed = service.prune()
+        removed = service.prune(now=datetime(2026, 1, 15, 13, 0, tzinfo=timezone.utc))
         kept = {info.name for info in service.list_backups()}
         assert sorted(removed) == [
             "backup-20260105-120000.sqlite3.aes",
@@ -239,9 +239,10 @@ class TestListAndPrune:
         assert kept == {f"backup-202601{day:02d}-120000.sqlite3.aes" for day in range(9, 16)}
         assert len(kept) == 7
 
-    def test_prune_weekly_cap_removes_oldest_weeks(self, tmp_path: Path) -> None:
-        # 12 еженедельных копий (каждый понедельник): держим 7 свежайших
-        # (дневное окно) — 5 старейших удаляются.
+    def test_prune_removes_copies_older_than_14_days(self, tmp_path: Path) -> None:
+        # 12 еженедельных копий (каждый понедельник): по GFS в дневное окно
+        # попали бы 7 свежайших, но копии старше 14 дней удаляются всегда
+        # (§20, Закон № 99-З ст. 10, 13) — остаются 2.
         backup_dir = tmp_path / "backups"
         monday = datetime(2026, 1, 5, tzinfo=timezone.utc)  # понедельник ISO-недели 2
         dates = [monday + timedelta(weeks=i) for i in range(12)]
@@ -250,10 +251,29 @@ class TestListAndPrune:
                 backup_dir, moment.strftime("backup-%Y%m%d-%H%M%S.sqlite3.aes")
             )
         service = make_service(tmp_path / "db", backup_dir)
-        removed = service.prune()
+        removed = service.prune(now=dates[-1] + timedelta(hours=1))
+        kept = [info.name for info in service.list_backups()]
+        assert kept == [
+            dates[-1].strftime("backup-%Y%m%d-%H%M%S.sqlite3.aes"),
+            dates[-2].strftime("backup-%Y%m%d-%H%M%S.sqlite3.aes"),
+        ]
+        assert len(removed) == 10
+
+    def test_prune_keeps_seven_daily_plus_one_weekly(self, tmp_path: Path) -> None:
+        # Копии через день за 20 дней: 7 свежайших в окне 14 дней + еженедельная
+        # уже среди них — восьмой копии нет (7 + 1, §20).
+        backup_dir = tmp_path / "backups"
+        start = datetime(2026, 3, 1, 3, 0, tzinfo=timezone.utc)
+        dates = [start + timedelta(days=2 * i) for i in range(10)]
+        for moment in dates:
+            write_backup_file(
+                backup_dir, moment.strftime("backup-%Y%m%d-%H%M%S.sqlite3.aes")
+            )
+        service = make_service(tmp_path / "db", backup_dir)
+        service.prune(now=dates[-1])
         kept = [info.name for info in service.list_backups()]
         assert len(kept) == 7
-        assert len(removed) == 5
+        assert all(dates[-1] - moment <= timedelta(days=14) for moment in dates[-7:])
 
     def test_prune_keeps_undated_files(self, tmp_path: Path) -> None:
         backup_dir = tmp_path / "backups"
