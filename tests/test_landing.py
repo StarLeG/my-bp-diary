@@ -166,7 +166,9 @@ class TestScreensSection:
     @pytest.mark.parametrize(("name", "title"), SCREENS.items())
     def test_frame_with_caption(self, html: str, name: str, title: str) -> None:
         assert (SCREENS_DIR / f"{name}.webp").is_file()
-        tag = re.search(rf'<img src="img/screens/{name}\.webp"[^>]*>', html)
+        # `?v=…` — версия кадра: картинки кешируются на 30 дней (landing-nginx.conf),
+        # при пересъёмке кадра версия меняется, чтобы браузеры взяли новый файл.
+        tag = re.search(rf'<img src="img/screens/{name}\.webp(\?v=[\w.]+)?"[^>]*>', html)
         assert tag, name
         for attr in ('loading="lazy"', "width=", "height=", f'alt="{title}"'):
             assert attr in tag.group(0)
