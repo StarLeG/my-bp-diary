@@ -38,18 +38,30 @@ SYS_MIN_TOP, DIA_MIN_BOTTOM = 180, 110
 #: Шаг округления границ шкалы.
 SCALE_STEP = 10
 
-#: Поля области графика, px.
-LEFT, RIGHT, TOP = 78, 24, 36
+#: Кегль подписей, px. В чате Telegram картинка ужимается примерно до 300 px
+#: по ширине (в 3,5 раза), поэтому шрифт крупный: иначе шкала, легенда,
+#: пульс и даты не читаются без открытия картинки.
+FONT_VALUE = 34
+FONT_PULSE = 30
+FONT_PULSE_LONG = 20
+FONT_DATE = 28
+FONT_SCALE = 28
+FONT_UNIT = 24
+FONT_LEGEND = 26
+
+#: Поля области графика, px (слева — под шкалу; с запасом: Telegram Web
+#: подрезает края фото в пузыре).
+LEFT, RIGHT, TOP = 112, 40, 48
 #: Высота области под графиком: даты + легенда.
-BOTTOM_AREA = 112
+BOTTOM_AREA = 132
 #: Полоса средней линии под числа пульса, px.
-PULSE_BAND = 28
+PULSE_BAND = 40
 #: Доля ширины слота дня под столбик.
 BAR_RATIO = 0.62
 #: Подписи значений на концах столбиков — только для коротких периодов.
 VALUE_LABELS_MAX_DAYS = 7
 #: Запас над и под столбиками под подписи значений (короткий период), px.
-VALUE_LABEL_ROOM = 28
+VALUE_LABEL_ROOM = 44
 #: Шаг подписи дат на длинных периодах (каждая 5-я и первая).
 DATE_STEP_LONG = 5
 
@@ -175,6 +187,11 @@ def _text_center(draw: ImageDraw.ImageDraw, x: float, y: float, text: str, font,
     draw.text((x - width / 2, y), text, font=font, fill=fill)
 
 
+def _text_right(draw: ImageDraw.ImageDraw, right: float, y: float, text: str, font, fill) -> None:
+    """Текст, выровненный по правому краю `right` (подписи шкалы)."""
+    draw.text((right - draw.textlength(text, font=font), y), text, font=font, fill=fill)
+
+
 def _dashed(draw: ImageDraw.ImageDraw, y: float, left: int, right: int) -> None:
     """Пунктирная горизонтальная линия порога."""
     x = left
@@ -185,20 +202,20 @@ def _dashed(draw: ImageDraw.ImageDraw, y: float, left: int, right: int) -> None:
 
 def _scale(draw: ImageDraw.ImageDraw, layout: _Layout, top_value: int, bottom_value: int) -> None:
     """Шкала слева (подписи каждые 20 мм рт. ст.) и пунктир порогов зон."""
-    font = _font(16)
+    font = _font(FONT_SCALE)
     for value in thresholds("systolic"):
         _dashed(draw, layout.sys_y(value), layout.plot_left, layout.plot_right)
     for value in thresholds("diastolic"):
         _dashed(draw, layout.dia_y(value), layout.plot_left, layout.plot_right)
     for value in range(SYS_BASE + 10, top_value + 1, 20):
         y = layout.sys_y(value)
-        draw.text((8, y - 9), str(value), font=font, fill=MUTED)
+        _text_right(draw, layout.plot_left - 12, y - FONT_SCALE * 0.6, str(value), font, MUTED)
         draw.line([(layout.plot_left - 6, y), (layout.plot_left, y)], fill=AXIS)
     for value in range(DIA_BASE + 10, bottom_value + 1, 20):
         y = layout.dia_y(value)
-        draw.text((8, y - 9), str(value), font=font, fill=MUTED)
+        _text_right(draw, layout.plot_left - 12, y - FONT_SCALE * 0.6, str(value), font, MUTED)
         draw.line([(layout.plot_left - 6, y), (layout.plot_left, y)], fill=AXIS)
-    draw.text((8, layout.plot_top - 30), "мм рт. ст.", font=_font(14), fill=MUTED)
+    draw.text((layout.plot_left + 10, 8), "мм рт. ст.", font=_font(FONT_UNIT), fill=MUTED)
     draw.line(
         [(layout.plot_left, layout.plot_top), (layout.plot_left, layout.plot_bottom)], fill=AXIS
     )
@@ -217,16 +234,16 @@ def _date_label(index: int, day: date, total: int) -> Optional[str]:
 
 def _legend(draw: ImageDraw.ImageDraw) -> None:
     """Легенда снизу: цвета зон «САД / ДАД» и обозначение пульса (§6.5)."""
-    font = _font(18)
-    y = HEIGHT - 44
+    font = _font(FONT_LEGEND)
+    y = HEIGHT - 50
     x = LEFT
     sys_bands, dia_bands = CHART_ZONES["systolic"], CHART_ZONES["diastolic"]
     samples = (sys_bands[0]["to"] - 1, sys_bands[1]["to"] - 1, sys_bands[1]["to"])
     for index, sample in enumerate(samples):
         label = f"{sys_bands[index]['label']} / {dia_bands[index]['label']}"
-        draw.rectangle([x, y + 2, x + 18, y + 20], fill=zone_color("systolic", sample))
-        draw.text((x + 26, y), label, font=font, fill=TEXT)
-        x += 26 + int(draw.textlength(label, font=font)) + 36
+        draw.rectangle([x, y + 4, x + 24, y + 28], fill=zone_color("systolic", sample))
+        draw.text((x + 32, y), label, font=font, fill=TEXT)
+        x += 32 + int(draw.textlength(label, font=font)) + 28
     draw.text((x, y), "72 — пульс", font=font, fill=PULSE)
 
 
@@ -242,7 +259,9 @@ def render(days: Sequence[DayValues]) -> bytes:
     total = len(days)
     slot = (layout.plot_right - layout.plot_left) / max(total, 1)
     bar = max(4.0, slot * BAR_RATIO)
-    value_font, pulse_font, date_font = _font(18), _font(16 if show_values else 13), _font(16)
+    value_font = _font(FONT_VALUE)
+    pulse_font = _font(FONT_PULSE if show_values else FONT_PULSE_LONG)
+    date_font = _font(FONT_DATE)
     line_top, line_bottom = layout.mid - PULSE_BAND / 2, layout.mid + PULSE_BAND / 2
 
     for index, day in enumerate(days):
@@ -255,7 +274,7 @@ def render(days: Sequence[DayValues]) -> bytes:
                 fill=zone_color("systolic", day.systolic),
             )
             if show_values:
-                _text_center(draw, center, min(y, line_top - 2) - 24, str(day.systolic), value_font, TEXT)
+                _text_center(draw, center, min(y, line_top - 2) - FONT_VALUE - 6, str(day.systolic), value_font, TEXT)
         if day.diastolic is not None:
             y = layout.dia_y(day.diastolic)
             draw.rectangle(
@@ -265,10 +284,11 @@ def render(days: Sequence[DayValues]) -> bytes:
             if show_values:
                 _text_center(draw, center, max(y, line_bottom + 2) + 4, str(day.diastolic), value_font, TEXT)
         if day.pulse is not None:
-            _text_center(draw, center, layout.mid - 10, str(day.pulse), pulse_font, PULSE)
+            size = FONT_PULSE if show_values else FONT_PULSE_LONG
+            _text_center(draw, center, layout.mid - size * 0.62, str(day.pulse), pulse_font, PULSE)
         label = _date_label(index, day.day, total)
         if label is not None:
-            _text_center(draw, center, layout.plot_bottom + 10, label, date_font, MUTED)
+            _text_center(draw, center, layout.plot_bottom + 12, label, date_font, MUTED)
 
     _legend(draw)
     buffer = io.BytesIO()
