@@ -30,6 +30,7 @@ from bot.middlewares import (
     DbSessionMiddleware,
     DebounceMiddleware,
     DoctorUsernameMiddleware,
+    TelegramNameMiddleware,
     ThrottleMiddleware,
 )
 from bot.services.admin import AdminService, ErrorCounter
@@ -175,6 +176,9 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     dp.callback_query.outer_middleware.register(DebounceMiddleware())
     dp.callback_query.outer_middleware.register(ThrottleMiddleware())
     dp.message.outer_middleware.register(DoctorUsernameMiddleware())
+    # Имя из Telegram — врачу, пока данные пациента не заполнены (§6.12).
+    dp.message.outer_middleware.register(TelegramNameMiddleware())
+    dp.callback_query.outer_middleware.register(TelegramNameMiddleware())
     # Согласие (§6.11) — после debounce/throttle: двойной тап не шлёт экран дважды.
     dp.message.outer_middleware.register(ConsentMiddleware())
     dp.callback_query.outer_middleware.register(ConsentMiddleware())

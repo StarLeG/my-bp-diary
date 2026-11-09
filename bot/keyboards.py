@@ -449,6 +449,7 @@ def settings_kb() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text=texts.BTN_REMINDERS, callback_data="set:reminders"))
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_MEDS, callback_data="set:meds"))
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_DOCTOR, callback_data="set:doctor"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE, callback_data="set:profile"))
     builder.row(InlineKeyboardButton(text=texts.BTN_TIMEZONE, callback_data="set:tz"))
     builder.row(
         InlineKeyboardButton(text=texts.BTN_ARCHIVE, callback_data="set:archive")
@@ -521,19 +522,17 @@ def doctor_panel_kb(show_diary: bool) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def doctor_patients_kb(patients: Sequence[tuple[int, int]]) -> InlineKeyboardMarkup:
-    """«Мои пациенты»: «Пациент {telegram_id}» → «Открыть в кабинете» и «Назад».
+def doctor_patients_kb(patients: Sequence[tuple[int, str]]) -> InlineKeyboardMarkup:
+    """«Мои пациенты»: кнопка пациента → «Открыть в кабинете», и «Назад».
 
-    `patients` — пары (users.id, telegram_id); в callback — users.id,
-    владение проверяется по связи `active` при нажатии.
+    `patients` — пары (users.id, подпись: «Иванов И. И., 67 лет», имя из
+    Telegram или «Пациент {telegram_id}», §6.12); в callback — users.id,
+    доступ проверяется при нажатии.
     """
     builder = InlineKeyboardBuilder()
-    for user_id, telegram_id in patients:
+    for user_id, label in patients:
         builder.row(
-            InlineKeyboardButton(
-                text=texts.DOCTOR_PATIENT_ITEM.format(telegram_id=telegram_id),
-                callback_data=f"doc:open:{user_id}",
-            )
+            InlineKeyboardButton(text=label, callback_data=f"doc:open:{user_id}")
         )
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="doc:menu"))
     return builder.as_markup()
@@ -1069,4 +1068,59 @@ def confirm_doctor_kb(doctor_id: int, pending: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=keep, callback_data=f"cons:doc:keep:{doctor_id}"))
     builder.row(InlineKeyboardButton(text=close, callback_data=f"cons:doc:close:{doctor_id}"))
+    return builder.as_markup()
+
+
+
+# ─────────────── Данные пациента (SPEC.md, §6.12) ───────────────
+
+
+def profile_kb(filled: bool) -> InlineKeyboardMarkup:
+    """П1 «Заполнить» / П2 «Изменить» + «Удалить данные»; «Назад» — в настройки."""
+    builder = InlineKeyboardBuilder()
+    if filled:
+        builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_EDIT, callback_data="prof:edit"))
+        builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_DELETE, callback_data="prof:del"))
+    else:
+        builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_FILL, callback_data="prof:edit"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def profile_middle_kb() -> InlineKeyboardMarkup:
+    """Шаг отчества: «Нет отчества» и «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_PROFILE_NO_MIDDLE, callback_data="prof:nomiddle")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
+    return builder.as_markup()
+
+
+def profile_sex_kb() -> InlineKeyboardMarkup:
+    """Шаг пола: «Мужской» / «Женский» и «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_SEX_MALE, callback_data="prof:sex:m"),
+        InlineKeyboardButton(text=texts.BTN_SEX_FEMALE, callback_data="prof:sex:f"),
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
+    return builder.as_markup()
+
+
+def profile_delete_kb() -> InlineKeyboardMarkup:
+    """Подтверждение удаления данных: «Да, удалить» / «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_PROFILE_DELETE_OK, callback_data="prof:del:ok")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
+    return builder.as_markup()
+
+
+def profile_prompt_kb() -> InlineKeyboardMarkup:
+    """П7: «Заполнить» / «Позже»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_FILL, callback_data="prof:edit"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_LATER, callback_data="prof:later"))
     return builder.as_markup()

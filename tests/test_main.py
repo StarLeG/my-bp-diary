@@ -26,6 +26,7 @@ from bot.middlewares import (
     ConsentMiddleware,
     DbSessionMiddleware,
     DebounceMiddleware,
+    TelegramNameMiddleware,
     ThrottleMiddleware,
 )
 from bot.services.admin import AdminService, ErrorCounter
@@ -204,7 +205,12 @@ class TestBuildApp:
         update_types = [type(m) for m in app.dp.update.outer_middleware]
         assert DbSessionMiddleware in update_types
         callback_types = [type(m) for m in app.dp.callback_query.outer_middleware]
-        assert callback_types == [DebounceMiddleware, ThrottleMiddleware, ConsentMiddleware]
+        assert callback_types == [
+            DebounceMiddleware,
+            ThrottleMiddleware,
+            TelegramNameMiddleware,
+            ConsentMiddleware,
+        ]
         message_types = [type(m) for m in app.dp.message.outer_middleware]
         assert ConsentMiddleware in message_types
         assert app.dp.workflow_data["deletion_log"] is app.deletion_log

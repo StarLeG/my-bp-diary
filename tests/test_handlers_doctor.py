@@ -91,6 +91,27 @@ def parse_token(url: str) -> dict:
     return URLSafeTimedSerializer(SECRET, salt=doctor.DOCTOR_SALT).loads(token)
 
 
+def _with_profile(_mapper, _connection, target) -> None:
+    """Пациент этих тестов — с данными для врача (§6.12): без них «Мой врач»
+    сначала просит ФИО (P2-Б), а здесь проверяется само приглашение."""
+    from datetime import date
+
+    if target.last_name is None:
+        target.last_name, target.first_name = "Тестов", "Тест"
+        target.birth_date, target.sex = date(1960, 1, 1), "m"
+
+
+@pytest.fixture(autouse=True)
+def patient_profile():
+    from sqlalchemy import event
+
+    event.listen(User_, "before_insert", _with_profile)
+    try:
+        yield
+    finally:
+        event.remove(User_, "before_insert", _with_profile)
+
+
 @pytest.fixture
 def edit(mocker):
     return mocker.patch.object(Message, "edit_text", new_callable=mocker.AsyncMock)
@@ -888,7 +909,7 @@ class TestTelegramDoctorReportAndRevoke:
         text = edit.call_args.args[0]
         assert text == texts.DOCTOR_REPORT_TELEGRAM.format(url=extract_url(text))
         args, kwargs = bot.send_message.call_args
-        assert args == (DOC_TG, texts.DOCTOR_REPORT_FOR_DOCTOR.format(name="Тест"))
+        assert args == (DOC_TG, texts.DOCTOR_REPORT_FOR_DOCTOR.format(name="Тестов Т."))  # §6.12, P6-Г
         assert kwargs["reply_markup"] == keyboards.doctor_open_kb(1)
 
     async def test_report_doctor_unreachable(self, edit, cb_answer, with_settings, session, user) -> None:
@@ -918,7 +939,7 @@ class TestTelegramDoctorReportAndRevoke:
             state=make_state(), session=session, bot=bot,
         )
         bot.send_message.assert_awaited_once_with(
-            DOC_TG, texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name="Тест"), reply_markup=None
+            DOC_TG, texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name="Тестов Т."), reply_markup=None
         )
 
     async def test_revoke_email_doctor_no_notification(self, edit, cb_answer, with_settings, session, user) -> None:

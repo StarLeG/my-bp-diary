@@ -236,7 +236,7 @@ class ConsentMiddleware(BaseMiddleware):
         else:
             confirm = await consent_handlers.next_confirm(session, user.id)
             if confirm is None:
-                return await handler(event, data)
+                return await self._with_prompt(handler, event, data, session, user.id)
             screen, toast = confirm, None
         state = data.get("state")
         if state is not None:
@@ -251,6 +251,58 @@ class ConsentMiddleware(BaseMiddleware):
         else:
             await event.answer(text, reply_markup=markup, link_preview_options=_no_preview())  # type: ignore[union-attr]
         return None
+
+    @staticmethod
+    async def _with_prompt(
+        handler: Handler, event: TelegramObject, data: dict[str, Any], session, user_id: int
+    ) -> Any:
+        """Действие выполняется как обычно; П7 (§6.12) — один раз, следом.
+
+        Кнопки «Мои данные» (`prof:*`, `set:profile`) П7 не вызывают: человек
+        уже занят своими данными.
+        """
+        from bot.handlers import consent as consent_handlers
+
+        callback_data = event.data if isinstance(event, CallbackQuery) else ""
+        if callback_data and (callback_data.startswith("prof:") or callback_data == "set:profile"):
+            return await handler(event, data)
+        prompt = await consent_handlers.take_prompt(session, user_id)
+        result = await handler(event, data)
+        if prompt is not None:
+            await _send_prompt(event, prompt)
+        return result
+
+
+class TelegramNameMiddleware(BaseMiddleware):
+    """Имя пациента из Telegram — врачу, пока данные не заполнены (§6.12, P7).
+
+    Сначала чтение, запись — только у существующего пациента и только если
+    имя сменилось. Ошибка не мешает обработке апдейта.
+    """
+
+    async def __call__(
+        self, handler: Handler, event: TelegramObject, data: dict[str, Any]
+    ) -> Any:
+        session = data.get(SESSION_KEY)
+        from_user = getattr(event, "from_user", None)
+        if session is not None and from_user is not None:
+            from bot.services import profile as profile_service
+
+            try:
+                await profile_service.touch_telegram_name(
+                    session, from_user.id, from_user.first_name, from_user.last_name
+                )
+            except Exception:  # noqa: BLE001 — апдейт важнее имени
+                await session.rollback()
+        return await handler(event, data)
+
+
+async def _send_prompt(event: TelegramObject, screen) -> None:
+    """П7 не блокирует действие (§6.12): экран — отдельным сообщением после."""
+    text, markup = screen
+    target = event.message if isinstance(event, CallbackQuery) else event
+    if target is not None:
+        await target.answer(text, reply_markup=markup)  # type: ignore[union-attr]
 
 
 def _no_preview():

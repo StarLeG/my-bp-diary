@@ -622,7 +622,9 @@ class TestConsentLines:
 
         stats = make_stats()
         stats.consented = 7
+        stats.profiles = 3
         assert "Дали согласие: 7" in _fmt_stats(stats)
+        assert "Заполнили данные: 3" in _fmt_stats(stats)
 
     def test_card_consent(self) -> None:
         from dataclasses import replace

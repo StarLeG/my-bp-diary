@@ -37,9 +37,11 @@ RETRY_BASE_DELAY = 0.05
 #:     необязателен (§4.8), `doctor_invites` (§4.13).
 #: 4 — согласия (§4.15): таблица `consents`, `doctors.consent_*`,
 #:     `users.deletion_requested_at`.
-SCHEMA_VERSION = 4
+#: 5 — данные пациента (§4.1, §6.12): ФИО, дата рождения, пол, имя из
+#:     Telegram, отметка предложения заполнить.
+SCHEMA_VERSION = 5
 
-#: Колонки, добавленные в поколении 4 (`ALTER TABLE … ADD COLUMN`, §4.15).
+#: Колонки поколений 4 и 5 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1).
 _ADDED_COLUMNS = (
     ("users", "deletion_requested_at", "DATETIME"),
     ("doctors", "consent_version", "VARCHAR(32)"),
@@ -50,6 +52,17 @@ _ADDED_COLUMNS = (
         "VARCHAR(16) CONSTRAINT ck_doctors_consent_channel "
         "CHECK (consent_channel IS NULL OR consent_channel IN ('bot', 'cabinet'))",
     ),
+    ("users", "last_name", "VARCHAR(50)"),
+    ("users", "first_name", "VARCHAR(50)"),
+    ("users", "middle_name", "VARCHAR(50)"),
+    ("users", "birth_date", "DATE"),
+    (
+        "users",
+        "sex",
+        "VARCHAR(1) CONSTRAINT ck_users_sex CHECK (sex IS NULL OR sex IN ('m', 'f'))",
+    ),
+    ("users", "telegram_name", "VARCHAR(64)"),
+    ("users", "profile_prompted_at", "DATETIME"),
 )
 
 T = TypeVar("T")

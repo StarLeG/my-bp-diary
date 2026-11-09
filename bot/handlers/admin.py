@@ -79,6 +79,7 @@ def _fmt_stats(stats: DbStats) -> str:
             evening=stats.slots_enabled.get("evening", 0),
         ),
         texts.ADMIN_STATS_CONSENTED.format(count=stats.consented),
+        texts.ADMIN_STATS_PROFILES.format(count=stats.profiles),
         texts.ADMIN_STATS_CACHE_NOTE,
     ]
     return "\n".join(lines)

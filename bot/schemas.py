@@ -314,3 +314,64 @@ def parse_archive_quick(
     return ArchiveQuick(
         moment=moment, systolic=systolic, diastolic=diastolic, pulse=pulse
     )
+
+
+# ─────────────────────────── Данные пациента (§6.12) ───────────────────────────
+
+#: Длина поля ФИО (§4.1).
+PERSON_NAME_MAX = 50
+
+#: Буквы (любой алфавит), пробел, дефис, апостроф; начинается с буквы.
+_PERSON_NAME_RE = re.compile(r"^[^\W\d_]+(?:[ '’-][^\W\d_]+)*$")
+
+#: Минимальный возраст пациента (ст. 5 п. 9 Закона № 99-З, §6.12).
+MIN_AGE = 16
+
+#: Самая ранняя допустимая дата рождения.
+MIN_BIRTH_DATE = date(1900, 1, 1)
+
+
+class TooYoungError(ValueError):
+    """Пациенту меньше 16 лет — данные не сохраняются (§6.12, П5)."""
+
+
+def validate_person_name(raw: str) -> str:
+    """Фамилия / имя / отчество: 1–50 символов, буквы, пробел, дефис, апостроф.
+
+    Лишние пробелы убираются, регистр сохраняется. `ValueError` — не подходит.
+    """
+    value = " ".join((raw or "").split())
+    value = re.sub(r"\s*([-'’])\s*", r"\1", value)
+    if not 1 <= len(value) <= PERSON_NAME_MAX or not _PERSON_NAME_RE.match(value):
+        raise ValueError("ФИО: от 1 до 50 букв, пробел, дефис, апостроф")
+    return value
+
+
+def age_on(birth: date, today: date) -> int:
+    """Полных лет на дату `today`."""
+    return today.year - birth.year - ((today.month, today.day) < (birth.month, birth.day))
+
+
+def parse_birth_date(raw: str, today: date) -> date:
+    """`ДД.ММ.ГГГГ` → дата рождения (§6.12).
+
+    `ValueError` — не дата, раньше 1900 года или в будущем;
+    `TooYoungError` — младше 16 лет на `today` (сегодня пациента).
+    """
+    match = re.fullmatch(r"\s*(\d{1,2})\.(\d{1,2})\.(\d{4})\s*", raw or "")
+    if match is None:
+        raise ValueError("нужна дата ДД.ММ.ГГГГ")
+    try:
+        birth = date(int(match.group(3)), int(match.group(2)), int(match.group(1)))
+    except ValueError as exc:
+        raise ValueError("нет такой даты") from exc
+    return validate_birth_date(birth, today)
+
+
+def validate_birth_date(birth: date, today: date) -> date:
+    """Дата рождения из формы ЛК (`type=date`): те же правила, что в боте."""
+    if birth < MIN_BIRTH_DATE or birth > today:
+        raise ValueError("дата рождения вне диапазона")
+    if age_on(birth, today) < MIN_AGE:
+        raise TooYoungError("младше 16 лет")
+    return birth

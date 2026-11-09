@@ -41,6 +41,7 @@ from bot.services import csv_export
 from bot.services import doctor as doctor_service
 from bot.services import medications as medications_service
 from bot.services import pdf_report
+from bot.services import profile as profile_service
 from bot.services import stats
 from bot.services.measurements import (
     DuplicateMeasurementError,
@@ -80,6 +81,10 @@ _templates = Jinja2Templates(directory=str(_BASE_DIR / "templates"))
 # пациента и врача (§16.2, §21): один источник порогов и цветов с графиками.
 _templates.env.globals["row_zone"] = row_zone
 _templates.env.globals["history_zone_legend"] = table_legend()
+# Подписи пациента у врача (§6.12): список, заголовок карточки, строка данных.
+_templates.env.globals["patient_list_label"] = profile_service.list_label
+_templates.env.globals["patient_card_title"] = profile_service.card_title
+_templates.env.globals["patient_card_details"] = profile_service.card_details
 
 
 # ─────────────────────────── Вспомогательное ───────────────────────────
@@ -130,6 +135,7 @@ async def _pdf_report_response(
     subject: str,
     back_url: str,
     period: Mapping[str, str],
+    file_stem: Optional[str] = None,
 ) -> Response:
     """PDF-отчёт за период — общий для ЛК и кабинета врача (§10.1).
 
@@ -140,7 +146,7 @@ async def _pdf_report_response(
     """
     try:
         data = await pdf_report.collect_report(
-            db, user, start_day, end_day, subject=subject
+            db, user, start_day, end_day, subject=subject, file_stem=file_stem
         )
     except (pdf_report.ReportEmptyError, pdf_report.ReportTooLargeError) as exc:
         error = "empty" if isinstance(exc, pdf_report.ReportEmptyError) else "too_many"
@@ -851,6 +857,28 @@ def create_app(
         medications = await medications_service.list_medications(db, user)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         consent = await consent_service.current_processing(db, user.id)
+        personal_messages = {
+            "personal_name": (texts.PROFILE_NAME_BAD, False),
+            "personal_birth": (texts.PROFILE_BIRTH_BAD, False),
+            "personal_young": (texts.PROFILE_TOO_YOUNG, False),
+        }
+        personal_saved = {
+            "personal": (texts.PROFILE_SAVED, True),
+            "personal_deleted": (texts.PROFILE_DELETED, True),
+        }
+        message, ok = personal_messages.get(error) or personal_saved.get(saved) or ("", False)
+        filled = profile_service.has_profile(user)
+        personal = {
+            "filled": filled,
+            "name": profile_service.full_name(user) if filled else "",
+            "birth": f"{user.birth_date:%d.%m.%Y}" if filled else "",
+            "age": profile_service.age_text(user) if filled else "",
+            "sex": profile_service.SEX_LABELS[user.sex][0] if filled else "",  # type: ignore[index]
+            "not_filled": texts.CABINET_PROFILE_NOT_FILLED,
+            "hint": texts.PROFILE_EMPTY.split("\n\n", 1)[1],
+            "message": message,
+            "ok": ok,
+        }
         reminders = list(
             (
                 await db.execute(
@@ -872,6 +900,7 @@ def create_app(
                 else ""
             ),
             "user_zone": tz,
+            "personal": personal,
             "slot_order": SLOT_ORDER,
             "med_slot_order": medications_service.SLOTS,
             "slot_labels": texts.SLOT_LABELS,
@@ -1009,6 +1038,53 @@ def create_app(
         user.timezone = tz_name
         await db.flush()
         return RedirectResponse(url="/?saved=profile", status_code=303)
+
+    # ───────────────────── Данные пациента (§6.12) ─────────────────────
+
+    @app.post("/profile/personal")
+    async def personal_submit(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """«Мои данные»: ФИО, дата рождения (16+) и пол — правила бота (§6.12)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        today = profile_service.today_for(user)
+        try:
+            birth = schemas.validate_birth_date(
+                date.fromisoformat(str(form.get("birth_date", "")).strip()), today
+            )
+        except schemas.TooYoungError:
+            return RedirectResponse(url="/?error=personal_young#personal", status_code=303)
+        except ValueError:
+            return RedirectResponse(url="/?error=personal_birth#personal", status_code=303)
+        try:
+            personal = profile_service.validate(
+                str(form.get("last_name", "")),
+                str(form.get("first_name", "")),
+                str(form.get("middle_name", "")).strip() or None,
+                birth,
+                str(form.get("sex", "")),
+                today,
+            )
+        except ValueError:  # ФИО или пол
+            return RedirectResponse(url="/?error=personal_name#personal", status_code=303)
+        await profile_service.save(db, user, personal)
+        return RedirectResponse(url="/?saved=personal#personal", status_code=303)
+
+    @app.post("/profile/personal/delete")
+    async def personal_delete(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """«Удалить данные»: врач снова видит имя из Telegram (§6.12)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        await profile_service.clear(db, await load_user(db, web_user))
+        return RedirectResponse(url="/?saved=personal_deleted#personal", status_code=303)
 
     # ───────────────────── Лекарства (CRUD) ─────────────────────
 
@@ -1419,7 +1495,7 @@ def create_app(
             user,
             start_day,
             end_day,
-            subject=pdf_report.PATIENT_SUBJECT,
+            subject=pdf_report.patient_subject(user),
             back_url="/",
             period={"days": days, "date_from": date_from, "date_to": date_to},
         )
@@ -1547,7 +1623,9 @@ def create_app(
         if doctor is not None and not consent_service.doctor_ok(doctor):
             return RedirectResponse(url="/doctor/consent", status_code=303)
         if doctor is not None:
-            patients = await consent_service.visible_patients(db, doctor)
+            patients = profile_service.sorted_patients(
+                await consent_service.visible_patients(db, doctor)
+            )
             response = _templates.TemplateResponse(
                 request,
                 "doctor_dashboard.html",
@@ -1738,7 +1816,7 @@ def create_app(
             media_type="text/csv; charset=utf-8",
             headers={
                 "Content-Disposition": (
-                    f'attachment; filename="{csv_export.file_name("bp", start_day, end_day)}"'
+                    f'attachment; filename="{csv_export.file_name(profile_service.file_base(user) or "bp", start_day, end_day)}"'
                 )
             },
         )
@@ -1760,8 +1838,9 @@ def create_app(
             user,
             start_day,
             end_day,
-            subject=pdf_report.doctor_subject(user.telegram_id),
+            subject=pdf_report.doctor_subject_for(user),
             back_url=f"/doctor/patient/{user_id}",
+            file_stem=profile_service.file_base(user),
             period={"days": days, "date_from": date_from, "date_to": date_to},
         )
 

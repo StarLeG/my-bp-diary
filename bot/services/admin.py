@@ -30,6 +30,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.models import Measurement, Medication, Reminder, User
 from bot.services import consent as consent_service
+from bot.services import profile as profile_service
 
 logger = logging.getLogger(__name__)
 
@@ -116,6 +117,9 @@ class DbStats:
 
     consented: int = 0
     """Сколько пользователей дали действующее основное согласие (§18.2, §6.11)."""
+
+    profiles: int = 0
+    """Сколько пациентов заполнили данные для врача (§18.2, §6.12) — только счётчик."""
 
 
 @dataclass(frozen=True)
@@ -264,6 +268,7 @@ class AdminService:
                 )
             ).scalar_one()
             consented = await consent_service.count_with_processing(session)
+            profiles = await profile_service.count_filled(session)
             slot_rows = (
                 await session.execute(
                     select(Reminder.type, func.count())
@@ -284,6 +289,7 @@ class AdminService:
             wal_size=self._file_size(self._db_path + "-wal"),
             slots_enabled=slots_enabled,
             consented=consented,
+            profiles=profiles,
         )
 
     @staticmethod

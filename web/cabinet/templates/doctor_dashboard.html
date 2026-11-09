@@ -106,7 +106,7 @@
           <ul class="facts">
             {% for link, patient in patients %}
               <li>
-                <a href="/doctor/patient/{{ patient.id }}">Пациент {{ patient.telegram_id }}</a>
+                <a href="/doctor/patient/{{ patient.id }}">{{ patient_list_label(patient) }}</a>
                 <span class="muted">— доступ открыт {{ link.created_at.strftime("%d.%m.%Y") }}</span>
               </li>
             {% endfor %}
@@ -134,7 +134,8 @@
       {% endif %}
 
       <section class="card" id="summary">
-        <h2>Пациент {{ user.telegram_id }} — сводка за период</h2>
+        <h2>{{ patient_card_title(user) }} — сводка за период</h2>
+        <p class="muted">{{ patient_card_details(user) }}</p>
 
         <form method="get" action="/doctor/patient/{{ user.id }}" class="filter-row">
           <label>

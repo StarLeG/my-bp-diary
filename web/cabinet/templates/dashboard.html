@@ -65,6 +65,13 @@
         <div><dt>Профиль</dt><dd>Пользователь Telegram, id {{ user.telegram_id }}</dd></div>
         <div><dt>Цель давления</dt><dd>{{ user.target_systolic }} / {{ user.target_diastolic }} мм рт. ст.</dd></div>
         <div><dt>Часовой пояс</dt><dd>{{ user.timezone }}</dd></div>
+        {% if personal.filled %}
+          <div><dt>ФИО</dt><dd>{{ personal.name }}</dd></div>
+          <div><dt>Дата рождения</dt><dd>{{ personal.birth }} ({{ personal.age }})</dd></div>
+          <div><dt>Пол</dt><dd>{{ personal.sex }}</dd></div>
+        {% else %}
+          <div><dt>ФИО, дата рождения, пол</dt><dd>{{ personal.not_filled }}</dd></div>
+        {% endif %}
         <div>
           <dt>Согласие на обработку данных</dt>
           <dd>{{ consent_line }} · <a href="/consent/withdraw">Отозвать согласие</a></dd>
@@ -94,6 +101,50 @@
           </dd>
         </div>
       </dl>
+
+      <h3 id="personal">Мои данные</h3>
+      <p class="muted">{{ personal.hint }}</p>
+      {% if personal.message %}
+        <p class="alert {{ 'alert-ok' if personal.ok else 'alert-error' }}">{{ personal.message }}</p>
+      {% endif %}
+      <form method="post" action="/profile/personal" class="stack form-narrow">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="row">
+          <label>
+            Фамилия
+            <input type="text" name="last_name" maxlength="50" value="{{ user.last_name or '' }}" required>
+          </label>
+          <label>
+            Имя
+            <input type="text" name="first_name" maxlength="50" value="{{ user.first_name or '' }}" required>
+          </label>
+        </div>
+        <label>
+          Отчество
+          <input type="text" name="middle_name" maxlength="50" value="{{ user.middle_name or '' }}">
+        </label>
+        <div class="row">
+          <label>
+            Дата рождения
+            <input type="date" name="birth_date" min="1900-01-01" value="{{ user.birth_date.isoformat() if user.birth_date else '' }}" required>
+          </label>
+          <label>
+            Пол
+            <select name="sex" required>
+              <option value="" {{ "selected" if not user.sex else "" }} disabled>—</option>
+              <option value="m" {{ "selected" if user.sex == "m" else "" }}>мужской</option>
+              <option value="f" {{ "selected" if user.sex == "f" else "" }}>женский</option>
+            </select>
+          </label>
+        </div>
+        <button type="submit" class="btn">Сохранить</button>
+      </form>
+      {% if personal.filled %}
+        <form method="post" action="/profile/personal/delete" class="stack form-narrow">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+          <button type="submit" class="btn btn-ghost">Удалить данные</button>
+        </form>
+      {% endif %}
 
       <h3>Настройки профиля</h3>
       <form method="post" action="/profile" class="stack form-narrow">

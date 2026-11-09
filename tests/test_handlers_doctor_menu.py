@@ -345,7 +345,7 @@ class TestPanel:
         await doctor_service.link_patient(session, doctor.id, other.id)  # pending
         await call(doctor_menu.cb_patients, callback=make_callback("doc:patients"), session=session)
         assert edit.call_args.args[0] == texts.DOCTOR_PATIENTS
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.doctor_patients_kb([(user.id, PATIENT_TG)])
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.doctor_patients_kb([(user.id, f"Пациент {PATIENT_TG}")])
 
     async def test_patients_empty(self, edit, cb_answer, session) -> None:
         await make_doctor(session)

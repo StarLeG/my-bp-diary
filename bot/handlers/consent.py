@@ -31,6 +31,7 @@ from bot.models import Doctor, DoctorPatient, User
 from bot.services import consent as consent_service
 from bot.services import doctor as doctor_service
 from bot.services import measurements as measurements_service
+from bot.services import profile as profile_service
 from bot.services.deletion_log import DeletionLog
 from bot.services.reminders import RemindersService
 
@@ -64,6 +65,19 @@ async def next_confirm(
         return None
     link, doctor = links[0]
     return confirm_screen(link, doctor)
+
+
+async def take_prompt(
+    session: AsyncSession, user_id: int
+) -> Optional[tuple[str, InlineKeyboardMarkup]]:
+    """П7 (§6.12): один раз — пациенту с врачом и без данных; отметка ставится сразу."""
+    from bot.handlers.profile import prompt_screen
+
+    user = await session.get(User, user_id)
+    if user is None or not await profile_service.needs_prompt(session, user):
+        return None
+    await profile_service.mark_prompted(session, user)
+    return prompt_screen()
 
 
 async def _menu_screen(session: AsyncSession, telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -103,7 +117,7 @@ async def cb_consent_yes(
         welcome, markup = _welcome_screen()
         await _edit(callback, f"{texts.CONSENT_SAVED}\n\n{welcome}", markup)
     else:
-        screen = await next_confirm(session, user.id)
+        screen = await next_confirm(session, user.id) or await take_prompt(session, user.id)
         if screen is None:
             text, markup = await _menu_screen(session, callback.from_user.id)
             screen = (f"{texts.CONSENT_SAVED}\n\n{text}", markup)
@@ -157,8 +171,8 @@ async def _own_link(
 
 
 async def _after_confirm(callback: CallbackQuery, session: AsyncSession, user_id: int) -> None:
-    """Следующий экран Д4 или главное меню."""
-    screen = await next_confirm(session, user_id)
+    """Следующий экран Д4, затем П7 (§6.12) или главное меню."""
+    screen = await next_confirm(session, user_id) or await take_prompt(session, user_id)
     if screen is None:
         screen = await _menu_screen(session, callback.from_user.id)
     await _edit(callback, *screen)
@@ -192,6 +206,7 @@ async def cb_close_doctor(callback: CallbackQuery, session: AsyncSession, bot: B
     user, link, doctor = found
     was_active = link.status == "active"
     doctor_tg = doctor.telegram_id
+    name = profile_service.notify_name(user, callback.from_user.first_name)
     await doctor_service.revoke_access(session, user.id, doctor.id)
     await consent_service.withdraw_doctor(session, user.id, doctor.id)
     if not was_active:
@@ -201,7 +216,7 @@ async def cb_close_doctor(callback: CallbackQuery, session: AsyncSession, bot: B
         try:
             await bot.send_message(
                 doctor_tg,
-                texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name=callback.from_user.first_name),
+                texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name=name),
             )
         except TelegramAPIError as exc:
             logger.warning("Уведомление врачу не доставлено: %s", type(exc).__name__)

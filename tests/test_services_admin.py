@@ -160,6 +160,7 @@ class TestStats:
         assert stats.measurements == 3
         assert stats.medications == 1
         assert stats.consented == 2  # согласие по умолчанию (tests/conftest.py)
+        assert stats.profiles == 0  # данных пациента никто не заполнял (§6.12)
 
     async def test_dau_wau_distinct_users(
         self, session, user, session_factory

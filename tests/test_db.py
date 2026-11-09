@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 4
+                assert version == SCHEMA_VERSION == 5
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -378,11 +378,13 @@ class TestMigrateConsents:
                 users = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).all()}
                 doctors = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(doctors)")).all()}
                 assert "deletion_requested_at" in users
+                assert {"last_name", "first_name", "middle_name", "birth_date", "sex",
+                        "telegram_name", "profile_prompted_at"} <= users  # поколение 5
                 assert {"consent_version", "consent_at", "consent_channel"} <= doctors
                 assert (await conn.exec_driver_sql("SELECT telegram_id FROM users")).scalar() == 111
                 tables = {r[0] for r in (await conn.exec_driver_sql(
                     "SELECT name FROM sqlite_master WHERE type='table'")).all()}
                 assert "consents" in tables
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 4
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 5
         finally:
             await engine.dispose()

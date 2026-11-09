@@ -32,7 +32,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, texts
 from bot.config import Settings, get_settings
-from bot.models import Doctor, DoctorPatient
+from bot.models import Doctor, DoctorPatient, User
 from bot.services.doctor import (
     current_invite,
     doctor_by_username,
@@ -46,6 +46,7 @@ from bot.services.doctor import (
 )
 from bot.services import consent as consent_service
 from bot.services import mailer
+from bot.services import profile as profile_service
 from bot.services.measurements import get_or_create_user
 
 #: Соль подписи ссылки доступа врача (§21). «doctor-access», а не прежняя
@@ -118,6 +119,11 @@ async def _doctor_entry(
         if not await consent_service.has_invite_consent(session, user.id):
             # Б7: согласие на врача — перед выбором способа (§6.11, §21 п.2).
             return texts.DOCTOR_CONSENT_ASK, keyboards.doctor_consent_kb()
+        if not profile_service.has_profile(user):
+            # Данные пациента нужны врачу (§6.12, P2-Б): ввод, затем выбор способа.
+            from bot.handlers.profile import start_input
+
+            return await start_input(state, user, then_invite=True)
         return texts.DOCTOR_NO_LINK, keyboards.doctor_choice_kb()
     return _doctor_screen(links)
 
@@ -131,17 +137,21 @@ async def _needs_consent(
     проверяется на каждом шаге, а не только на входе в «Мой врач».
     """
     if await consent_service.has_invite_consent(session, user_id):
-        return False
-    await state.clear()
+        user = await session.get(User, user_id)
+        if user is None or profile_service.has_profile(user):
+            return False
+        # Без данных пациента приглашения нет (§6.12, P2-Б): сначала ввод.
+        from bot.handlers.profile import start_input
+
+        text, markup = await start_input(state, user, then_invite=True)
+    else:
+        await state.clear()
+        text, markup = texts.DOCTOR_CONSENT_ASK, keyboards.doctor_consent_kb()
     if isinstance(callback_or_message, CallbackQuery):
-        await callback_or_message.message.edit_text(  # type: ignore[union-attr]
-            texts.DOCTOR_CONSENT_ASK, reply_markup=keyboards.doctor_consent_kb()
-        )
+        await callback_or_message.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
         await callback_or_message.answer()
     else:
-        await callback_or_message.answer(
-            texts.DOCTOR_CONSENT_ASK, reply_markup=keyboards.doctor_consent_kb()
-        )
+        await callback_or_message.answer(text, reply_markup=markup)
     return True
 
 
@@ -394,13 +404,12 @@ async def cb_doctor_revoke(
     await consent_service.withdraw_doctor(session, user.id, doctor_id)
     doctor = await session.get(Doctor, doctor_id)
     doctor_tg = doctor.telegram_id if doctor is not None else None
+    name = profile_service.notify_name(user, callback.from_user.first_name)
     await session.commit()
     await callback.answer(texts.DOCTOR_REVOKED)
     if doctor_tg is not None:
         await _notify(
-            bot,
-            doctor_tg,
-            texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name=callback.from_user.first_name),
+            bot, doctor_tg, texts.DOCTOR_ACCESS_REVOKED_FOR_DOCTOR.format(name=name)
         )
     text, markup = await _doctor_entry(session, state, callback.from_user.id)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
@@ -429,11 +438,17 @@ async def _report_text(
             # Врач без своего согласия пациента не видит (§6.11): без уведомления.
             return texts.DOCTOR_REPORT_LINK.format(url=link)
         doctor_tg = doctor.telegram_id
+        patient = await session.get(User, user_id)
+        name = (
+            profile_service.notify_name(patient, callback.from_user.first_name)
+            if patient is not None
+            else callback.from_user.first_name
+        )
         await session.commit()  # транзакция закрыта до отправки
         delivered = await _notify(
             bot,
             doctor_tg,
-            texts.DOCTOR_REPORT_FOR_DOCTOR.format(name=callback.from_user.first_name),
+            texts.DOCTOR_REPORT_FOR_DOCTOR.format(name=name),
             keyboards.doctor_open_kb(user_id),
         )
         if delivered:

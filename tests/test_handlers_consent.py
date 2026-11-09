@@ -234,7 +234,8 @@ class TestConfirmDoctor:
         doctor = await self._setup(session, user, "active")
         await consent_handlers.cb_keep_doctor(make_callback(f"cons:doc:keep:{doctor.id}"), session)
         assert await consents(session, kind="doctor", doctor_id=doctor.id) == 1
-        assert edit.call_args.args[0] == texts.MAIN_MENU
+        # врач есть, данных нет — один раз П7 (§6.12), затем — главное меню
+        assert edit.call_args.args[0] == texts.PROFILE_PROMPT
         assert await consent_service.doctor_can_see(session, doctor, user.id)
 
     async def test_close_active_notifies_doctor(self, edit, cb_answer, session: AsyncSession, user: User) -> None:
@@ -421,7 +422,8 @@ class TestInviteConsent:
 
     async def test_agree_shows_choice(self, edit, cb_answer, session: AsyncSession, user: User) -> None:
         await call(doctor_handlers.cb_doctor_agree, callback=make_callback("set:doctor:agree"), state=make_state(), session=session)
-        assert edit.call_args.args[0] == texts.DOCTOR_NO_LINK
+        # данных пациента нет — сначала ввод (§6.12, P2-Б), затем выбор способа
+        assert edit.call_args.args[0].startswith(texts.PROFILE_BEFORE_INVITE)
         assert await consent_service.has_invite_consent(session, user.id)
 
     async def test_agree_with_doctor_skips(self, edit, cb_answer, session: AsyncSession, user: User) -> None:
@@ -448,6 +450,11 @@ class TestInviteConsent:
         assert answer.call_args.args[0] == texts.DOCTOR_CONSENT_ASK
 
     async def test_email_attaches_consent(self, answer, session: AsyncSession, user: User) -> None:
+        user.last_name, user.first_name, user.sex = "Тестов", "Тест", "m"
+        from datetime import date as _date
+
+        user.birth_date = _date(1960, 1, 1)
+        await session.commit()
         await consent_service.give_doctor(session, user.id, None)
         await call(doctor_handlers.msg_doctor_email, message=make_message("doc@example.org"), state=make_state(), session=session)
         doctor = (await session.execute(select(Doctor))).scalar_one()

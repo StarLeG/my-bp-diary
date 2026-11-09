@@ -18,6 +18,7 @@ from bot.handlers import (
     doctor,
     doctor_menu,
     measure,
+    profile,
     reminders,
     settings,
     start,
@@ -35,6 +36,7 @@ router.include_router(measure.router)
 router.include_router(diary.router)
 router.include_router(stats.router)
 router.include_router(settings.router)
+router.include_router(profile.router)
 router.include_router(doctor.router)
 router.include_router(support.router)
 router.include_router(reminders.router)

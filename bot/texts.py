@@ -769,3 +769,51 @@ def consent_paragraphs() -> list[list[str]]:
     """Текст Б1 без строки «Полный текст» — абзацы для страницы согласия кабинета (К3)."""
     body = CONSENT_BODY.split("\nПолный текст:", 1)[0]
     return [paragraph.split("\n") for paragraph in body.split("\n\n")]
+
+
+# ─────────────── Данные пациента для врача (SPEC.md, §6.12, П1–П7) ───────────────
+
+BTN_PROFILE = "👤 Мои данные"
+PROFILE_EMPTY = (
+    "Мои данные не заполнены.\n\n"
+    "ФИО, дату рождения и пол увидит только врач, которого вы пригласите, — так он "
+    "узнает вас и правильно поймёт показатели."
+)
+PROFILE_FILLED = (
+    "Мои данные\n\n"
+    "ФИО: {name}\n"
+    "Дата рождения: {birth} ({age})\n"
+    "Пол: {sex}\n\n"
+    "Эти данные видит только врач, которого вы пригласили."
+)
+BTN_PROFILE_FILL = "Заполнить"
+BTN_PROFILE_EDIT = "Изменить"
+BTN_PROFILE_DELETE = "Удалить данные"
+PROFILE_ASK_LAST = "Введите фамилию:"
+PROFILE_ASK_FIRST = "Введите имя:"
+PROFILE_ASK_MIDDLE = "Введите отчество:"
+BTN_PROFILE_NO_MIDDLE = "Нет отчества"
+PROFILE_ASK_BIRTH = "Дата рождения в формате ДД.ММ.ГГГГ, например 12.03.1958:"
+PROFILE_ASK_SEX = "Пол:"
+BTN_SEX_MALE = "Мужской"
+BTN_SEX_FEMALE = "Женский"
+PROFILE_CURRENT = "Сейчас: {value}"
+PROFILE_NAME_BAD = "От 1 до 50 букв; можно пробел, дефис и апостроф. Попробуйте ещё раз:"
+PROFILE_BIRTH_BAD = "Нужна дата в формате ДД.ММ.ГГГГ, например 12.03.1958:"
+PROFILE_TOO_YOUNG = (
+    "Сервис доступен с 16 лет. Если вы законный представитель — заполните данные и "
+    "согласие от своего имени."
+)
+PROFILE_SAVED = "Данные сохранены."
+PROFILE_DELETE_CONFIRM = (
+    "Удалить ФИО, дату рождения и пол? Врач снова будет видеть только ваше имя из Telegram."
+)
+BTN_PROFILE_DELETE_OK = "Да, удалить"
+PROFILE_DELETED = "Данные удалены."
+PROFILE_BEFORE_INVITE = "Чтобы врач узнал вас, укажите ФИО, дату рождения и пол."
+PROFILE_PROMPT = "Заполните ФИО и дату рождения — врач увидит их в кабинете."
+BTN_PROFILE_LATER = "Позже"
+
+# Кабинет (§16.2): «Мои данные» в «Личной карточке».
+CABINET_PROFILE_NOT_FILLED = "не заполнены"
+ADMIN_STATS_PROFILES = "Заполнили данные: {count}"

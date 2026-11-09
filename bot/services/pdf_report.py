@@ -140,16 +140,38 @@ class ReportData:
     generated_at: datetime
     summary_lines: tuple[str, ...]
     rows: tuple[ReportRow, ...]
+    file_stem: Optional[str] = None
+    """Начало имени файла врача: `Ivanov_I_I` (§10.1, 0.5.1); None — `bp_diary`."""
 
     @property
     def file_name(self) -> str:
-        """Имя файла `bp_diary_<дата1>-<дата2>.pdf` (та же функция, что у CSV)."""
-        return csv_export.file_name(FILE_KIND, self.start_day, self.end_day, ext="pdf")
+        """Имя файла `bp_diary_<дата1>-<дата2>.pdf` (та же функция, что у CSV).
+
+        У врача при заполненных данных пациента — `Ivanov_I_I_<дата1>-<дата2>.pdf`.
+        """
+        return csv_export.file_name(
+            self.file_stem or FILE_KIND, self.start_day, self.end_day, ext="pdf"
+        )
 
 
 def doctor_subject(telegram_id: int) -> str:
     """Подпись пациента в отчёте врача: у врача несколько пациентов (§10.1)."""
     return f"Пациент {telegram_id}"
+
+
+def doctor_subject_for(user: User) -> str:
+    """Подпись в отчёте врача (§10.1, 0.5.1): ФИО и дата рождения; без данных —
+    имя из Telegram или «Пациент {telegram_id}»."""
+    from bot.services import profile as profile_service
+
+    return profile_service.report_subject(user) or profile_service.fallback_name(user)
+
+
+def patient_subject(user: User) -> str:
+    """Подпись в отчёте самого пациента: ФИО и дата рождения или «Дневник давления»."""
+    from bot.services import profile as profile_service
+
+    return profile_service.report_subject(user) or PATIENT_SUBJECT
 
 
 # ─────────────────────────── Значения ───────────────────────────
@@ -233,6 +255,7 @@ async def collect_report(
     subject: str,
     limit: Optional[int] = None,
     now: Optional[datetime] = None,
+    file_stem: Optional[str] = None,
 ) -> ReportData:
     """Данные отчёта за период; `start_day=None` — «всё время» (§10.1).
 
@@ -265,6 +288,7 @@ async def collect_report(
         generated_at=generated_at,
         summary_lines=summary_lines(summary),
         rows=report_rows(measurements, cells, user.timezone),
+        file_stem=file_stem,
     )
 
 

@@ -85,12 +85,27 @@ class User(Base):
         UTCDateTime(), nullable=True
     )
     """Согласие отозвано в личном кабинете (§6.11, К5): аккаунт удалит бот (§19)."""
+    last_name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    """Фамилия (§6.12); данные пациента заполнены все или ни одного."""
+    first_name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    """Имя (§6.12)."""
+    middle_name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    """Отчество — необязательно (§6.12)."""
+    birth_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    """Дата рождения; возраст ≥ 16 лет (§6.12)."""
+    sex: Mapped[Optional[str]] = mapped_column(String(1), nullable=True)
+    """Пол: `m` / `f` (§6.12)."""
+    telegram_name: Mapped[Optional[str]] = mapped_column(String(64), nullable=True)
+    """«Имя фамилия» из Telegram — врач видит его, пока данные не заполнены (§6.12)."""
+    profile_prompted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    """Предложение заполнить данные (П7) уже показано (§6.12)."""
 
     __table_args__ = (
         CheckConstraint(
             "med_remeasure_delay IS NULL OR med_remeasure_delay IN (30, 60, 120)",
             name="ck_users_med_remeasure_delay",
         ),
+        CheckConstraint("sex IS NULL OR sex IN ('m', 'f')", name="ck_users_sex"),
     )
 
 

@@ -32,6 +32,7 @@ from bot.config import Settings, get_settings
 from bot.models import Doctor, User
 from bot.services import consent as consent_service
 from bot.services import doctor as doctor_service
+from bot.services import profile as profile_service
 from bot.services import measurements as measurements_service
 from web.cabinet.doctor_auth import DoctorSignInLink
 
@@ -370,8 +371,8 @@ async def cb_patients(callback: CallbackQuery, session: AsyncSession) -> None:
     doctor = await _require_doctor(callback, session)
     if doctor is None:
         return
-    rows = await consent_service.visible_patients(session, doctor)
-    patients = [(user.id, user.telegram_id) for _, user in rows]
+    rows = profile_service.sorted_patients(await consent_service.visible_patients(session, doctor))
+    patients = [(user.id, profile_service.bot_label(user)) for _, user in rows]
     text = texts.DOCTOR_PATIENTS if patients else texts.DOCTOR_PATIENTS_EMPTY
     await callback.message.edit_text(  # type: ignore[union-attr]
         text, reply_markup=keyboards.doctor_patients_kb(patients)
