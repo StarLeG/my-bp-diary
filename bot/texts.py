@@ -458,11 +458,67 @@ MEDS_ALREADY_LINE = "Уже отмечено сегодня: {meds}"
 HIGH_REMEASURE_HINT = "Повторите измерение — так видно, помогло ли лекарство."
 
 
-def fmt_slot_message(slot: str, medications: Sequence[str]) -> str:
-    """Сообщение слота: «Пора измерить давление ☀️» + строка лекарств (§6.7)."""
-    lines = [f"Пора измерить давление {SLOT_EMOJI.get(slot, '⏰')}"]
-    if medications:
-        lines.append(MEDS_LINE_PREFIX + ", ".join(medications))
+# Режим слота, повтор «если не ответил», пауза (§6.7, 0.5.6)
+MODE_LABELS = {
+    "both": "💊🩺 Давление и лекарства",
+    "meds": "💊 Только лекарства",
+    "pressure": "🩺 Только давление",
+}
+MODE_ASK = "О чём напоминать: {slot}?"
+MODE_NEED_MEDS = "Чтобы напоминать только о лекарствах, сначала добавьте лекарства в этот слот."
+MODE_NEED_MEDS_TOAST = "Сначала добавьте лекарства в этот слот"
+MODE_PRESSURE_WARNING = (
+    "Лекарства этого слота не будут напоминаться. "
+    "Отметить приём можно в «Дневнике за сегодня»."
+)
+SLOT_MEDS_HEADER = "Пора принять лекарства 💊"
+FOLLOWUP_PRESSURE = "Не забыли измерить давление? 🩺"
+FOLLOWUP_MEDS = "Не забыли про лекарства? 💊"
+REMINDERS_RESUMED = "Напоминания снова включены ▶️"
+PAUSE_ROW_OFF = "⏸ Пауза: нет"
+PAUSE_ROW_ON = "⏸ На паузе до {date}"
+PAUSE_ASK = "Поставить напоминания на паузу?"
+PAUSE_ACTIVE = "Напоминания на паузе до {date}."
+PAUSE_OPTIONS = {"1": "1 день", "3": "3 дня", "7": "7 дней"}
+BTN_PAUSE_OFF = "▶️ Снять паузу"
+PAUSE_REMOVED = "Пауза снята ▶️"
+PAUSED_TOAST = "Напоминания на паузе до {date}"
+FOLLOWUP_ROW = "🔁 Повторять, если не ответил: {state}"
+FOLLOWUP_ON = "вкл"
+FOLLOWUP_OFF = "выкл"
+
+
+def fmt_slot_message(
+    slot: str,
+    medications: Sequence[str],
+    mode: str = "both",
+    followup: bool = False,
+    resumed: bool = False,
+) -> str:
+    """Сообщение слота по режиму (§6.7): обычное или повтор «если не ответил».
+
+    `both` — «Пора измерить давление ☀️» + «💊 Лекарства: …»; `meds` — «Пора
+    принять лекарства 💊» + перечень; `pressure` — без перечня. Повтор (0.5.6):
+    «Не забыли измерить давление? 🩺» / «Не забыли про лекарства? 💊 …».
+    `resumed` — первой строкой «Напоминания снова включены ▶️» (конец паузы).
+    """
+    listed = ", ".join(medications)
+    if mode == "meds" and not medications:
+        mode = "both"  # «Только лекарства» без лекарств ведёт себя как both (§6.7)
+    lines = [REMINDERS_RESUMED] if resumed else []
+    if followup:
+        if mode in ("both", "pressure"):
+            lines.append(FOLLOWUP_PRESSURE)
+        if mode == "meds":
+            lines.extend([FOLLOWUP_MEDS, listed])
+        elif mode == "both" and medications:
+            lines.append(f"{FOLLOWUP_MEDS} {listed}")
+    elif mode == "meds":
+        lines.extend([SLOT_MEDS_HEADER, listed])
+    else:
+        lines.append(f"Пора измерить давление {SLOT_EMOJI.get(slot, '⏰')}")
+        if mode == "both" and medications:
+            lines.append(MEDS_LINE_PREFIX + listed)
     return "\n".join(lines)
 
 

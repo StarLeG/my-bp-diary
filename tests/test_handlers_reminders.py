@@ -81,6 +81,7 @@ def reminders_svc(mocker):
         cancel_remeasure=mocker.AsyncMock(),
         skip_slot=mocker.AsyncMock(),
         snooze_slot=mocker.AsyncMock(),
+        cancel_followup=mocker.AsyncMock(),
     )
 
 
@@ -851,3 +852,121 @@ class TestAfterIntakeU1:
     def test_labels_u2(self) -> None:
         assert texts.BTN_PARTIAL == "Отметить принятые"
         assert texts.BTN_SKIP_SLOT == "Пропускаю сегодня"
+
+
+# ─────────────────── Ответ на напоминание, режим, пауза (§6.7, 0.5.6) ───────────────────
+
+
+async def add_slot_row(session: AsyncSession, user: UserModel, slot: str = "morning", mode: str = "both"):
+    from bot.models import Reminder
+
+    row = Reminder(
+        user_id=user.id,
+        type=slot,
+        local_time="08:00",
+        next_trigger_time=datetime.now(timezone.utc) + timedelta(hours=1),
+        enabled=True,
+        mode=mode,
+    )
+    session.add(row)
+    await session.commit()
+    return row
+
+
+class TestAnswerCancelsFollowup:
+    async def test_take_all(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(today_of(user))}", make_message()),
+            session=session, state=make_state(), reminders=reminders_svc,
+        )
+        reminders_svc.cancel_followup.assert_awaited_once_with(user.id, "morning")
+
+    async def test_partial_start(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        await call(
+            reminders.cb_partial_start,
+            callback=make_callback(f"rem:partial:morning:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.cancel_followup.assert_awaited_once_with(user.id, "morning")
+
+    async def test_skip(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await call(
+            reminders.cb_skip_slot,
+            callback=make_callback(f"rem:skip:noon:{ymd(today_of(user))}", make_message()),
+            session=session, state=make_state(), reminders=reminders_svc,
+        )
+        reminders_svc.cancel_followup.assert_awaited_once_with(user.id, "noon")
+
+    async def test_snooze_moved(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        reminders_svc.snooze_slot.return_value = True
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:noon:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.cancel_followup.assert_awaited_once_with(user.id, "noon")
+
+    async def test_snooze_not_moved_keeps_followup(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        reminders_svc.snooze_slot.return_value = False
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:noon:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.cancel_followup.assert_not_awaited()
+
+
+class TestPausedSnooze:
+    async def test_toast_and_nothing_moved(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        user.reminders_paused_until = today_of(user) + timedelta(days=2)
+        await session.commit()
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:noon:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        until = (today_of(user) + timedelta(days=2)).strftime("%d.%m")
+        cb_answer.assert_awaited_once_with(texts.PAUSED_TOAST.format(date=until))
+        reminders_svc.snooze_slot.assert_not_awaited()
+        edit.assert_not_awaited()
+
+    async def test_expired_pause_snoozes(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        user.reminders_paused_until = today_of(user) - timedelta(days=1)
+        await session.commit()
+        reminders_svc.snooze_slot.return_value = True
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:noon:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.snooze_slot.assert_awaited_once_with(user.id, "noon")
+
+
+class TestPressureMode:
+    async def test_skip_does_not_log_skipped(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        await add_slot_row(session, user, mode="pressure")
+        await call(
+            reminders.cb_skip_slot,
+            callback=make_callback(f"rem:skip:morning:{ymd(today_of(user))}", make_message()),
+            session=session, state=make_state(), reminders=reminders_svc,
+        )
+        assert await logs_of(session, user.id) == []
+        assert edit.call_args.args[0] == texts.SLOT_SKIPPED
+
+    async def test_partial_cancel_redraws_by_mode(self, session, user, edit, cb_answer) -> None:
+        await add_med(session, user)
+        await add_slot_row(session, user, mode="meds")
+        day = today_of(user)
+        await call(
+            reminders.cb_partial_cancel,
+            callback=make_callback(f"rem:pc:morning:{ymd(day)}", make_message()),
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_slot_message("morning", ["Лозартан 50 мг"], mode="meds")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.slot_message_kb(
+            "morning", day, has_medications=True, mode="meds"
+        )

@@ -2153,3 +2153,32 @@ class TestArchiveSummaryActions:
         )
         assert edit.call_args.args[0] == texts.FEELING_ASK
         assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_feeling_kb()
+
+
+class TestBeginFromSlotReminder:
+    """`rem:write:{slot}:{д}` (0.5.6): «Записать давление» — ответ, повтор отменяется."""
+
+    async def test_cancels_followup(self, session, user, edit, cb_answer, mocker) -> None:
+        svc = mocker.Mock(cancel_followup=mocker.AsyncMock())
+        state = make_state()
+        await call(
+            measure.cb_measure_begin,
+            callback=make_callback("rem:write:evening:20261110", make_message()),
+            state=state,
+            session=session,
+            reminders=svc,
+        )
+        svc.cancel_followup.assert_awaited_once_with(user.id, "evening")
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC)
+
+    async def test_unknown_slot_no_cancel(self, session, user, edit, cb_answer, mocker) -> None:
+        svc = mocker.Mock(cancel_followup=mocker.AsyncMock())
+        await call(
+            measure.cb_measure_begin,
+            callback=make_callback("rem:write:night:20261110", make_message()),
+            state=make_state(),
+            session=session,
+            reminders=svc,
+        )
+        svc.cancel_followup.assert_not_awaited()
+        assert edit.call_args.args[0] == keypad_text(texts.ASK_SYSTOLIC)

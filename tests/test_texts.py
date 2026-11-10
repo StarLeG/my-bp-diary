@@ -93,6 +93,22 @@ class TestFormatting:
         assert message == "Пора измерить давление 🌙"
         assert "💊" not in message
 
+    def test_fmt_slot_message_modes_056(self) -> None:
+        """Режим слота и повтор «если не ответил» (§6.7, 0.5.6)."""
+        meds = ["Лозартан 50 мг"]
+        assert texts.fmt_slot_message("morning", meds, mode="meds") == "Пора принять лекарства 💊\nЛозартан 50 мг"
+        assert texts.fmt_slot_message("morning", [], mode="meds") == "Пора измерить давление ☀️"
+        assert texts.fmt_slot_message("morning", meds, mode="pressure") == "Пора измерить давление ☀️"
+        assert texts.fmt_slot_message("morning", meds, followup=True) == (
+            "Не забыли измерить давление? 🩺\nНе забыли про лекарства? 💊 Лозартан 50 мг"
+        )
+        assert texts.fmt_slot_message("noon", meds, mode="pressure", followup=True) == (
+            "Не забыли измерить давление? 🩺"
+        )
+        assert texts.fmt_slot_message("evening", [], resumed=True) == (
+            "Напоминания снова включены ▶️\nПора измерить давление 🌙"
+        )
+
     def test_fmt_slot_message_unknown_slot_emoji(self) -> None:
         message = texts.fmt_slot_message("unknown", [])
         assert message == "Пора измерить давление ⏰"

@@ -24,7 +24,14 @@
   удаляется (включённая строка без job'а заблокировала бы новые повторы);
 - кнопки слот-сообщения несут дату напоминания; `message_id` отправленного
   слота хранится в `last_message_id`, у прежнего сообщения кнопки снимаются
-  (`clear_markup`) — в чате нет «живых» вчерашних кнопок (§6.7, 0.5.4).
+  (`clear_markup`) — в чате нет «живых» вчерашних кнопок (§6.7, 0.5.4);
+- 0.5.6: режим слота (`reminders.mode`) меняет текст, кнопки и правило
+  «3 часов» (только для режимов с давлением); пауза (`users.reminders_paused_until`)
+  молча переносит слоты и удаляет повторы замера, первое сообщение после паузы
+  начинается строкой «Напоминания снова включены ▶️»; повтор «если не ответил» —
+  `reminders.followup_at` + job `reminder:{id}:followup`: ставится при доставке
+  по расписанию и catch-up'ом, отменяется ответом (кнопка, отметка `taken`
+  слота, запись давления), захватывается атомарно `UPDATE … WHERE followup_at=?`.
 - точка входа job'а — module-level `fire_reminder`, а не bound method:
   `SQLAlchemyJobStore` сериализует job через `pickle`, а bound method тащит
   весь сервис (включая `_scheduler`) и не сериализуется; экземпляр сервиса
@@ -64,6 +71,7 @@ MODE_SLOT = "slot"
 MODE_SNOOZE = "snooze"
 MODE_REMEASURE = "remeasure"
 MODE_CATCHUP = "catchup"
+MODE_FOLLOWUP = "followup"
 
 #: Дефолт snooze — «Через 30 мин».
 SNOOZE_MINUTES = 30
@@ -71,8 +79,17 @@ SNOOZE_MINUTES = 30
 #: Окно catch-up при старте: просроченное больше чем на столько не отправляется (§6.7).
 CATCHUP_WINDOW = timedelta(hours=6)
 
-#: Отправка готового сообщения: (telegram_id, текст, клавиатура) → message_id или None.
-Sender = Callable[[int, str, Optional[object]], Awaitable[Optional[int]]]
+#: Повтор «если не ответил»: через сколько после отправки слота (§6.7, 0.5.6).
+FOLLOWUP_DELAY = timedelta(minutes=60)
+
+#: Ответ другим путём засчитывается, если сделан не раньше чем за столько до отправки.
+FOLLOWUP_ANSWER_WINDOW = timedelta(hours=1)
+
+#: Режимы слота с давлением (правило «3 часов» и ответ записью давления, §6.7).
+PRESSURE_MODES = ("both", "pressure")
+
+#: Отправка готового сообщения: (telegram_id, текст, клавиатура[, silent=…]) → message_id или None.
+Sender = Callable[..., Awaitable[Optional[int]]]
 
 #: Снять кнопки у отправленного сообщения: (telegram_id, message_id).
 MarkupClearer = Callable[[int, int], Awaitable[None]]
@@ -96,6 +113,15 @@ def _current_remeasure_lock() -> asyncio.Lock:
         _remeasure_lock = asyncio.Lock()
         _remeasure_lock_loop = loop
     return _remeasure_lock
+
+
+def effective_mode(mode: Optional[str], has_medications: bool) -> str:
+    """Режим слота для доставки: «Только лекарства» без лекарств — как `both` (§6.7)."""
+    if mode not in ("both", "meds", "pressure"):
+        return "both"
+    if mode == "meds" and not has_medications:
+        return "both"
+    return mode
 
 
 def next_slot_occurrence(local_time: str, tz_name: str, now: datetime) -> datetime:
@@ -152,8 +178,8 @@ class RemindersService:
 
     # ─────────────────────────── Вспомогательное ───────────────────────────
 
-    def _job_id(self, reminder_id: int) -> str:
-        return f"reminder:{reminder_id}"
+    def _job_id(self, reminder_id: int, followup: bool = False) -> str:
+        return f"reminder:{reminder_id}:followup" if followup else f"reminder:{reminder_id}"
 
     def _add_job(self, reminder_id: int, run_date: datetime, mode: str) -> None:
         """Поставить одноразовый DateTrigger-job (или переставить существующий).
@@ -164,7 +190,7 @@ class RemindersService:
         self._scheduler.add_job(
             fire_reminder,
             trigger=DateTrigger(run_date=run_date, timezone="UTC"),
-            id=self._job_id(reminder_id),
+            id=self._job_id(reminder_id, followup=mode == MODE_FOLLOWUP),
             args=[reminder_id, mode],
             replace_existing=True,
             coalesce=True,
@@ -173,10 +199,10 @@ class RemindersService:
             timezone="UTC",
         )
 
-    def _remove_job(self, reminder_id: int) -> None:
+    def _remove_job(self, reminder_id: int, followup: bool = False) -> None:
         """Снять job; отсутствующий job — норма (мог уже сработать и удалиться)."""
         try:
-            self._scheduler.remove_job(self._job_id(reminder_id))
+            self._scheduler.remove_job(self._job_id(reminder_id, followup))
         except JobLookupError:
             pass
 
@@ -439,6 +465,7 @@ class RemindersService:
             )
         for reminder_id in reminder_ids:
             self._remove_job(reminder_id)
+            self._remove_job(reminder_id, followup=True)
         return len(reminder_ids)
 
     # ─────────────────────────── Доставка ───────────────────────────
@@ -446,7 +473,10 @@ class RemindersService:
     async def _fire(self, reminder_id: int, mode: str) -> None:
         """Точка входа job'а: атомарный захват строки → отправка → перепланировка."""
         try:
-            await self._deliver(reminder_id, mode)
+            if mode == MODE_FOLLOWUP:
+                await self._deliver_followup(reminder_id)
+            else:
+                await self._deliver(reminder_id, mode)
         except Exception:  # noqa: BLE001 — job не должен ронять планировщик
             logger.exception("Ошибка доставки напоминания %s", reminder_id)
 
@@ -484,6 +514,29 @@ class RemindersService:
                 self._add_job(reminder.id, next_time, MODE_SLOT)
                 return False
 
+            paused_until = user.reminders_paused_until
+            if paused_until is not None and local_today <= paused_until:
+                # Пауза (§6.7, 0.5.6): повтор замера не нужен — удаляется; слот
+                # молча переносится на следующее вхождение, повтор не ставится.
+                if reminder.type == TYPE_REMEASURE:
+                    await session.delete(reminder)
+                    await session.commit()
+                    return False
+                next_time = await self._silently_reschedule(session, reminder, user, now)
+                await session.execute(
+                    update(Reminder).where(Reminder.id == reminder.id).values(followup_at=None)
+                )
+                await session.commit()
+                self._add_job(reminder.id, next_time, MODE_SLOT)
+                return False
+            resumed = paused_until is not None and reminder.type != TYPE_REMEASURE
+            slot_mode = "both"
+            if reminder.type != TYPE_REMEASURE:
+                has_meds = bool(
+                    await medications_service.slot_medications(session, user, reminder.type)
+                )
+                slot_mode = effective_mode(reminder.mode, has_meds)
+
             if reminder.type == TYPE_REMEASURE:
                 # «Не чаще 1/день» — только для catch-up; после обычной доставки
                 # строка удаляется, поэтому ветка достижима лишь при ручном сбое.
@@ -492,8 +545,10 @@ class RemindersService:
             else:
                 # Правило «не дёргаем зря» — только для регулярных слотов;
                 # ограничение «1/день» — только для catch-up.
-                quiet = mode == MODE_SLOT and await measurements_service.has_recent_measurement(
-                    session, user, now
+                quiet = (
+                    mode == MODE_SLOT
+                    and slot_mode in PRESSURE_MODES
+                    and await measurements_service.has_recent_measurement(session, user, now)
                 )
                 already_sent = (
                     mode == MODE_CATCHUP and reminder.last_sent_date == local_today
@@ -530,8 +585,16 @@ class RemindersService:
                         )
                     )
                 next_time = now
+                followup_time = None
             else:
                 next_time = next_slot_occurrence(reminder.local_time, user.timezone, now)
+                # Повтор «если не ответил» — для доставки по расписанию и catch-up'ом;
+                # отложенное «Через 30 мин» повтора не порождает (§6.7, 0.5.6).
+                followup_time = (
+                    now + FOLLOWUP_DELAY
+                    if mode in (MODE_SLOT, MODE_CATCHUP) and user.followup_enabled
+                    else None
+                )
                 result = await session.execute(
                     update(Reminder)
                     .where(
@@ -541,8 +604,16 @@ class RemindersService:
                     .values(
                         next_trigger_time=next_time,
                         last_sent_date=local_today,
+                        followup_at=followup_time,
                     )
                 )
+                if result.rowcount and resumed:
+                    # Конец паузы: строка «Напоминания снова включены ▶️» — один раз.
+                    await session.execute(
+                        update(User)
+                        .where(User.id == user.id, User.reminders_paused_until == paused_until)
+                        .values(reminders_paused_until=None)
+                    )
             if result.rowcount == 0:
                 await session.rollback()
                 return False  # уже обработано параллельно
@@ -552,13 +623,171 @@ class RemindersService:
             telegram_id = user.telegram_id
             previous_message_id = reminder.last_message_id
 
-        text, markup = await self._compose(reminder_id, reminder_type, user_id, local_today)
+        text, markup = await self._compose(
+            reminder_id, reminder_type, user_id, local_today, resumed=resumed
+        )
         message_id = await self._sender(telegram_id, text, markup)
 
         if reminder_type != TYPE_REMEASURE:
             self._add_job(reminder.id, next_time, MODE_SLOT)
+            if followup_time is not None:
+                self._add_job(reminder.id, followup_time, MODE_FOLLOWUP)
             await self._remember_message(reminder_id, telegram_id, message_id, previous_message_id)
         return True
+
+    # ─────────────────────────── Повтор «если не ответил» (0.5.6) ───────────────────────────
+
+    async def _answered(
+        self, session: AsyncSession, reminder: Reminder, user: User, sent_at: datetime, slot_mode: str
+    ) -> bool:
+        """Ответил ли пользователь другим путём: отметка `taken` слота или запись давления.
+
+        Засчитывается сделанное не раньше `FOLLOWUP_ANSWER_WINDOW` до отправки
+        исходного напоминания; запись давления — только в режимах с давлением.
+        """
+        from bot.models import Measurement, MedicationLog
+
+        since = sent_at - FOLLOWUP_ANSWER_WINDOW
+        taken = (
+            await session.execute(
+                select(MedicationLog.id)
+                .where(
+                    MedicationLog.user_id == user.id,
+                    MedicationLog.slot == reminder.type,
+                    MedicationLog.status == "taken",
+                    MedicationLog.timestamp >= since,
+                )
+                .limit(1)
+            )
+        ).first()
+        if taken is not None:
+            return True
+        if slot_mode not in PRESSURE_MODES:
+            return False
+        measured = (
+            await session.execute(
+                select(Measurement.id)
+                .where(Measurement.user_id == user.id, Measurement.timestamp >= since)
+                .limit(1)
+            )
+        ).first()
+        return measured is not None
+
+    async def _deliver_followup(self, reminder_id: int) -> bool:
+        """Повтор «если не ответил» (§6.7, 0.5.6): тихое сообщение по режиму слота.
+
+        Строка захватывается атомарно (`UPDATE … WHERE followup_at = :expected`):
+        ответ, обнуливший `followup_at` раньше, отменяет повтор. Возвращает True,
+        если повтор отправлен.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            reminder = (
+                await session.execute(select(Reminder).where(Reminder.id == reminder_id))
+            ).scalar_one_or_none()
+            if (
+                reminder is None
+                or reminder.type == TYPE_REMEASURE
+                or reminder.followup_at is None
+            ):
+                return False
+            expected = reminder.followup_at
+            if expected > now:
+                return False  # ложный ранний тик: job стоит на своё время
+            user = (
+                await session.execute(select(User).where(User.id == reminder.user_id))
+            ).scalar_one()
+            tz = ZoneInfo(user.timezone)
+            local_today = now.astimezone(tz).date()
+            sent_at = expected - FOLLOWUP_DELAY
+            meds = await medications_service.slot_medications(session, user, reminder.type)
+            slot_mode = effective_mode(reminder.mode, bool(meds))
+
+            from bot.services import consent as consent_service
+
+            paused = (
+                user.reminders_paused_until is not None
+                and local_today <= user.reminders_paused_until
+            )
+            cancelled = (
+                not reminder.enabled
+                or not user.followup_enabled
+                or paused
+                or not await consent_service.has_processing(session, user.id)
+                or await self._answered(session, reminder, user, sent_at, slot_mode)
+            )
+            claimed = await session.execute(
+                update(Reminder)
+                .where(Reminder.id == reminder_id, Reminder.followup_at == expected)
+                .values(followup_at=None)
+            )
+            await session.commit()
+            if claimed.rowcount == 0 or cancelled:
+                return False
+            reminder_type = reminder.type
+            telegram_id = user.telegram_id
+            previous_message_id = reminder.last_message_id
+            day = sent_at.astimezone(tz).date()
+            lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
+
+        text = texts.fmt_slot_message(reminder_type, lines, mode=slot_mode, followup=True)
+        markup = keyboards.slot_message_kb(
+            reminder_type, day, has_medications=bool(lines), mode=slot_mode
+        )
+        message_id = await self._sender(telegram_id, text, markup, silent=True)
+        await self._remember_message(reminder_id, telegram_id, message_id, previous_message_id)
+        return True
+
+    async def cancel_followup(self, user_id: int, slot: str) -> bool:
+        """Ответ на напоминание слота: повтор «если не ответил» не нужен (§6.7, 0.5.6).
+
+        Обнуляет `followup_at` тем же атомарным UPDATE, что и доставка повтора:
+        кто первым — тот и прав. Возвращает True, если повтор был отменён.
+        """
+        async with self._session_factory() as session:
+            reminder_id = (
+                await session.execute(
+                    select(Reminder.id).where(
+                        Reminder.user_id == user_id,
+                        Reminder.type == slot,
+                        Reminder.followup_at.is_not(None),
+                    )
+                )
+            ).scalar_one_or_none()
+            if reminder_id is None:
+                return False
+            result = await session.execute(
+                update(Reminder)
+                .where(Reminder.id == reminder_id, Reminder.followup_at.is_not(None))
+                .values(followup_at=None)
+            )
+            await session.commit()
+        self._remove_job(reminder_id, followup=True)
+        return bool(result.rowcount)
+
+    async def set_followup_enabled(self, user_id: int, enabled: bool) -> None:
+        """«Повторять, если не ответил»: выключение снимает все отложенные повторы (§6.7)."""
+        async with self._session_factory() as session:
+            await session.execute(
+                update(User).where(User.id == user_id).values(followup_enabled=enabled)
+            )
+            reminder_ids: list[int] = []
+            if not enabled:
+                reminder_ids = list(
+                    (
+                        await session.execute(
+                            select(Reminder.id).where(
+                                Reminder.user_id == user_id, Reminder.followup_at.is_not(None)
+                            )
+                        )
+                    ).scalars()
+                )
+                await session.execute(
+                    update(Reminder).where(Reminder.user_id == user_id).values(followup_at=None)
+                )
+            await session.commit()
+        for reminder_id in reminder_ids:
+            self._remove_job(reminder_id, followup=True)
 
     async def _remember_message(
         self,
@@ -609,7 +838,12 @@ class RemindersService:
         return next_time
 
     async def _compose(
-        self, reminder_id: int, reminder_type: str, user_id: int, day: date
+        self,
+        reminder_id: int,
+        reminder_type: str,
+        user_id: int,
+        day: date,
+        resumed: bool = False,
     ) -> tuple[str, object]:
         """Собрать сообщение: слот с лекарствами или напоминание повторить измерение.
 
@@ -622,11 +856,17 @@ class RemindersService:
             user = (
                 await session.execute(select(User).where(User.id == user_id))
             ).scalar_one()
+            mode = (
+                await session.execute(select(Reminder.mode).where(Reminder.id == reminder_id))
+            ).scalar_one()
             meds = await medications_service.slot_medications(session, user, reminder_type)
             lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
+            mode = effective_mode(mode, bool(meds))
             return (
-                texts.fmt_slot_message(reminder_type, lines),
-                keyboards.slot_message_kb(reminder_type, day, has_medications=bool(meds)),
+                texts.fmt_slot_message(reminder_type, lines, mode=mode, resumed=resumed),
+                keyboards.slot_message_kb(
+                    reminder_type, day, has_medications=bool(meds), mode=mode
+                ),
             )
 
     # ─────────────────────────── Catch-up при старте ───────────────────────────
@@ -646,6 +886,16 @@ class RemindersService:
                     )
                 ).scalars()
             )
+        # Повторы «если не ответил» — до слотов: catch-up слота ставит новый повтор.
+        for reminder in reminders:
+            if reminder.followup_at is None:
+                continue
+            if reminder.followup_at > now:
+                self._add_job(reminder.id, reminder.followup_at, MODE_FOLLOWUP)
+            elif now - reminder.followup_at > CATCHUP_WINDOW:
+                await self._drop_followup(reminder.id)
+            else:
+                await self._deliver_followup(reminder.id)
         for reminder in reminders:
             if reminder.next_trigger_time <= now:
                 overdue = now - reminder.next_trigger_time > CATCHUP_WINDOW
@@ -676,6 +926,14 @@ class RemindersService:
             next_time = await self._silently_reschedule(session, reminder, user, now)
             await session.commit()
         self._add_job(reminder_id, next_time, MODE_SLOT)
+
+    async def _drop_followup(self, reminder_id: int) -> None:
+        """Повтор просрочен больше окна catch-up — обнулить, не отправлять (§6.7)."""
+        async with self._session_factory() as session:
+            await session.execute(
+                update(Reminder).where(Reminder.id == reminder_id).values(followup_at=None)
+            )
+            await session.commit()
 
     async def _drop_undelivered_remeasure(self, reminder_id: int) -> None:
         """Повтор замера не доставлен catch-up'ом — удалить включённую строку (§6.7).

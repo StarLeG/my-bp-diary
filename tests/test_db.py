@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 6
+                assert version == SCHEMA_VERSION == 7
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -385,7 +385,7 @@ class TestMigrateConsents:
                 tables = {r[0] for r in (await conn.exec_driver_sql(
                     "SELECT name FROM sqlite_master WHERE type='table'")).all()}
                 assert "consents" in tables
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 6
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 7
         finally:
             await engine.dispose()
 
@@ -420,10 +420,17 @@ class TestMigrateReminders:
             await init_db(engine)  # повторно — без изменений
             async with engine.connect() as conn:
                 columns = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(reminders)")).all()}
-                assert "last_message_id" in columns
+                assert {"last_message_id", "mode", "followup_at"} <= columns  # поколения 6–7
                 row = (await conn.exec_driver_sql(
-                    "SELECT type, local_time, last_message_id FROM reminders")).one()
-                assert tuple(row) == ("morning", "08:00", None)
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 6
+                    "SELECT type, local_time, last_message_id, mode, followup_at FROM reminders")).one()
+                assert tuple(row) == ("morning", "08:00", None, "both", None)
+                users = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).all()}
+                assert {"followup_enabled", "reminders_paused_until"} <= users
+                urow = (await conn.exec_driver_sql(
+                    "SELECT followup_enabled, reminders_paused_until FROM users")).one()
+                assert tuple(urow) == (1, None)
+                with pytest.raises(Exception):
+                    await conn.exec_driver_sql("UPDATE reminders SET mode = 'zzz'")
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 7
         finally:
             await engine.dispose()

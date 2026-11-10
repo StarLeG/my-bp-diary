@@ -60,6 +60,9 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("diary_kb_mark", keyboards.diary_kb(mark_intake=True)),
         ("mark_intake_slots_kb", keyboards.mark_intake_slots_kb(["morning", "evening"])),
         ("intake_done_kb", keyboards.intake_done_kb()),
+        ("slot_mode_kb", keyboards.slot_mode_kb("morning", "both", True)),
+        ("pause_kb", keyboards.pause_kb(True)),
+        ("reminders_settings_kb_056", keyboards.reminders_settings_kb({"morning": True}, {"morning": "08:00"}, 60, {"morning": "meds"}, paused_until=date(2026, 11, 13))),
         ("partial_meds_kb_diary", keyboards.partial_meds_kb("noon", date(2026, 11, 10), {1}, [med], area="d")),
         ("stats_period_kb", keyboards.stats_period_kb()),
         ("stats_result_kb", keyboards.stats_result_kb("7")),
@@ -345,7 +348,7 @@ class TestSlotMessageKeyboard:
         markup = keyboards.slot_message_kb("morning", self.DAY, True)
         data = [button.callback_data for button in callback_buttons(markup)]
         assert data == [
-            "rem:write",
+            "rem:write:morning:20261110",
             "rem:all:morning:20261110",
             "rem:partial:morning:20261110",
             "rem:snooze:morning:20261110",
@@ -355,7 +358,24 @@ class TestSlotMessageKeyboard:
     def test_without_medications_hides_med_buttons(self) -> None:
         markup = keyboards.slot_message_kb("evening", self.DAY, False)
         data = [button.callback_data for button in callback_buttons(markup)]
-        assert data == ["rem:write", "rem:snooze:evening:20261110", "rem:skip:evening:20261110"]
+        assert data == [
+            "rem:write:evening:20261110", "rem:snooze:evening:20261110", "rem:skip:evening:20261110",
+        ]
+
+    @pytest.mark.parametrize(
+        ("mode", "meds", "expected"),
+        [
+            ("meds", True, ["rem:all", "rem:partial", "rem:snooze", "rem:skip"]),
+            ("meds", False, ["rem:write", "rem:snooze", "rem:skip"]),  # без лекарств — как both
+            ("pressure", True, ["rem:write", "rem:snooze", "rem:skip"]),
+            ("both", True, ["rem:write", "rem:all", "rem:partial", "rem:snooze", "rem:skip"]),
+        ],
+    )
+    def test_modes(self, mode, meds, expected) -> None:
+        """Кнопки по режиму слота (§6.7, 0.5.6)."""
+        markup = keyboards.slot_message_kb("noon", self.DAY, meds, mode=mode)
+        data = [b.callback_data.rsplit(":", 2)[0] for b in callback_buttons(markup)]
+        assert data == expected
 
     def test_partial_checkboxes(self) -> None:
         meds = [(1, "Лозартан", "50 мг"), (2, "Амлодипин", "5 мг"), (3, "Аспирин", "")]
@@ -911,3 +931,48 @@ class TestDiaryIntakeKeyboards:
             "d:pt:noon:20261110:7", "d:pd:noon:20261110", "d:pc:noon:20261110",
         ]
         assert keyboards.partial_checked_ids(markup) == {7}
+
+
+class TestReminderSettings056:
+    """Экран «Напоминания»: пауза, режим слота, «Повторять, если не ответил» (§6.6, 0.5.6)."""
+
+    def test_rows(self) -> None:
+        markup = keyboards.reminders_settings_kb(
+            {"morning": True, "noon": False, "evening": True},
+            {"morning": "08:00", "evening": "21:00"},
+            60,
+            {"morning": "both", "evening": "meds"},
+            followup_enabled=True,
+        )
+        rows = [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+        assert rows[0] == [("⏸ Пауза: нет", "set:rem:pause")]
+        assert ("💊🩺 Давление и лекарства", "set:rem:mode:morning") in [r[0] for r in rows]
+        assert ("💊 Только лекарства", "set:rem:mode:evening") in [r[0] for r in rows]
+        assert not any(d == "set:rem:mode:noon" for r in rows for _, d in r)
+        assert rows[-2] == [("🔁 Повторять, если не ответил: вкл", "set:rem:followup:off")]
+
+    def test_paused_and_followup_off(self) -> None:
+        markup = keyboards.reminders_settings_kb(
+            {}, {}, None, followup_enabled=False, paused_until=date(2026, 11, 13)
+        )
+        rows = [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+        assert rows[0] == [("⏸ На паузе до 13.11", "set:rem:pause")]
+        assert rows[-2] == [("🔁 Повторять, если не ответил: выкл", "set:rem:followup:on")]
+
+    def test_mode_kb(self) -> None:
+        markup = keyboards.slot_mode_kb("morning", "pressure", has_medications=True)
+        rows = [(b.text, b.callback_data) for row in markup.inline_keyboard for b in row]
+        assert rows == [
+            ("💊🩺 Давление и лекарства", "set:rem:mode:morning:both"),
+            ("💊 Только лекарства", "set:rem:mode:morning:meds"),
+            ("✓ 🩺 Только давление", "set:rem:mode:morning:pressure"),
+            ("Назад", "set:reminders"),
+        ]
+        no_meds = [b.callback_data for row in keyboards.slot_mode_kb("noon", "both", False).inline_keyboard for b in row]
+        assert "set:rem:mode:noon:meds" not in no_meds
+
+    def test_pause_kb(self) -> None:
+        free = [b.callback_data for row in keyboards.pause_kb(False).inline_keyboard for b in row]
+        assert free == ["set:rem:pause:1", "set:rem:pause:3", "set:rem:pause:7", "set:reminders"]
+        paused = [b.callback_data for row in keyboards.pause_kb(True).inline_keyboard for b in row]
+        assert "set:rem:pause:off" in paused

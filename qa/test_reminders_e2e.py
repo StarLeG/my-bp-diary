@@ -104,3 +104,45 @@ class TestReminderButtons:
             screen = dialog.press(f"rem:all:evening:{day}", contains=("Индапамид",), message=reminder)
         assert (screen.text or "").startswith("Эти лекарства уже отмечены сегодня ✓")
         assert "нет данных" not in (screen.text or "")
+
+
+class TestRemindersPart2:
+    """Пауза и повтор «если не ответил» (§6.7, 0.5.6).
+
+    Сам повтор приходит через 60 минут — в E2E проверяется, что он
+    запланирован (`followup_at`) и что ответ кнопкой его снимает; доставку и
+    гонку закрывают юнит-тесты.
+    """
+
+    def test_followup_planned_and_answer_cancels(self, dialog, db, tg_me, meds) -> None:
+        tz_name, day = _today_key(db, tg_me)
+        _set_slot(dialog, "evening", tz_name)
+        reminder = dialog.wait_new("Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT)
+        assert db.slot_row(tg_me.id, "evening")["followup_at"] is not None, "повтор запланирован"
+        dialog.press(f"rem:snooze:evening:{day}", contains=texts.SLOT_REMAINING, message=reminder)
+        assert db.slot_row(tg_me.id, "evening")["followup_at"] is None, "ответ снял повтор"
+
+    def test_pause_silences_slot(self, dialog, db, tg_me, meds) -> None:
+        tz_name, _ = _today_key(db, tg_me)
+        dialog.send("/start")
+        dialog.wait_screen(texts.MAIN_MENU)
+        dialog.press("menu:settings")
+        dialog.press("set:reminders", contains=texts.REMINDERS_MENU)
+        dialog.press("set:rem:pause", contains=texts.PAUSE_ASK)
+        screen = dialog.press("set:rem:pause:1", contains=texts.REMINDERS_MENU)
+        assert "На паузе до" in " ".join(b.text for row in screen.buttons for b in row)
+        try:
+            _set_slot(dialog, "morning", tz_name)
+            before = db.slot_row(tg_me.id, "morning")["next_trigger_time"]
+            with pytest.raises(AssertionError):
+                dialog.wait_new("Пора измерить давление", "QA-Лозартан", timeout=REMINDER_TIMEOUT)
+            row = db.slot_row(tg_me.id, "morning")
+            assert row["next_trigger_time"] != before, "слот молча перенесён"
+            assert row["followup_at"] is None
+        finally:
+            dialog.send("/start")
+            dialog.wait_screen(texts.MAIN_MENU)
+            dialog.press("menu:settings")
+            dialog.press("set:reminders", contains=texts.REMINDERS_MENU)
+            dialog.press("set:rem:pause", contains=texts.PAUSE_ACTIVE.split("{")[0])
+            dialog.press("set:rem:pause:off", contains=texts.PAUSE_REMOVED)

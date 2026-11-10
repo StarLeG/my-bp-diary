@@ -153,7 +153,28 @@ async def delete_medication(
         return False
     await session.delete(medication)
     await session.flush()
+    await reset_empty_meds_modes(session, user.id)
     return True
+
+
+async def reset_empty_meds_modes(session: AsyncSession, user_id: int) -> None:
+    """«Только лекарства» у слота без лекарств → «Давление и лекарства» (§6.7, 0.5.6).
+
+    Вызывается после удаления и правки лекарств — той же транзакцией.
+    """
+    from bot.models import Reminder
+
+    has_meds = exists(
+        select(literal(1)).where(
+            Medication.user_id == user_id, Medication.slot == Reminder.type
+        )
+    )
+    await session.execute(
+        update(Reminder)
+        .where(Reminder.user_id == user_id, Reminder.mode == "meds", ~has_meds)
+        .values(mode="both")
+        .execution_options(synchronize_session=False)
+    )
 
 
 async def list_medications(session: AsyncSession, user: User) -> list[Medication]:
@@ -261,6 +282,7 @@ async def delete_medication_group(
     for row in rows:
         await session.delete(row)
     await session.flush()
+    await reset_empty_meds_modes(session, user.id)
     return True
 
 
@@ -317,6 +339,7 @@ async def update_medication(
             row.name = new_name
             row.dosage = dosage
     await session.flush()
+    await reset_empty_meds_modes(session, user.id)
     return await medications_by_name(session, user, new_name)
 
 

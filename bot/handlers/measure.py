@@ -271,12 +271,31 @@ async def _advance(
 # ─────────────────────────── Начало и отмена ───────────────────────────
 
 
-@router.callback_query(F.data.in_({"menu:measure", "rem:write", "rem:now"}))
-async def cb_measure_begin(callback: CallbackQuery, state: FSMContext) -> None:
+@router.callback_query(
+    F.data.in_({"menu:measure", "rem:write", "rem:now"}) | F.data.startswith("rem:write:")
+)
+async def cb_measure_begin(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: Optional[AsyncSession] = None,
+    reminders: Optional[RemindersService] = None,
+) -> None:
     """«Записать давление» / «Записать сейчас» — шаг 1 (§6.3, §6.7).
 
-    Прошлый черновик сбрасывается.
+    Прошлый черновик сбрасывается. `rem:write:{slot}:{д}` (0.5.6) — ответ на
+    напоминание слота: повтор «если не ответил» отменяется.
     """
+    parts = (callback.data or "").split(":")
+    if (
+        len(parts) >= 3
+        and parts[1] == "write"
+        and parts[2] in keyboards.SLOT_ORDER
+        and session is not None
+        and reminders is not None
+    ):
+        user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+        await session.commit()
+        await reminders.cancel_followup(user.id, parts[2])
     await state.clear()
     await state.set_state(MeasureInput.sys_input)
     await state.update_data(**{M_BUF: ""})

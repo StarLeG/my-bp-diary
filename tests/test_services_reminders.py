@@ -1071,3 +1071,349 @@ class TestCatchupHelpersMissingRow:
 
     async def test_drop_missing_remeasure_is_noop(self, svc) -> None:
         await svc._drop_undelivered_remeasure(999_999)
+
+
+# ─────────────────── Удобство напоминаний, часть 2 (§6.7, 0.5.6) ───────────────────
+
+
+class SilentTelegram(FakeTelegram):
+    """`Sender` 0.5.6: отправка с флагом `silent` (повтор — без звука)."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.silent: list[bool] = []
+
+    async def send(self, telegram_id: int, text: str, markup, silent: bool = False) -> int:
+        self.silent.append(silent)
+        return await super().send(telegram_id, text, markup)
+
+
+@pytest.fixture
+def fake() -> SilentTelegram:
+    return SilentTelegram()
+
+
+@pytest.fixture
+def tsvc(session_factory, scheduler, fake) -> rem.RemindersService:
+    return tg_svc(session_factory, scheduler, fake)
+
+
+async def set_mode(session: AsyncSession, reminder: Reminder, mode: str) -> None:
+    await session.execute(update(Reminder).where(Reminder.id == reminder.id).values(mode=mode))
+    await session.commit()
+
+
+async def overdue_followup(
+    session: AsyncSession, reminder: Reminder, ago: timedelta = timedelta(minutes=1)
+) -> datetime:
+    """Повтор слота «пора отправлять»: `followup_at` в прошлом на `ago`."""
+    moment = now_utc() - ago
+    await session.execute(
+        update(Reminder).where(Reminder.id == reminder.id).values(followup_at=moment)
+    )
+    await session.commit()
+    return moment
+
+
+async def set_user(session: AsyncSession, user: User, **values) -> None:
+    await session.execute(update(User).where(User.id == user.id).values(**values))
+    await session.commit()
+
+
+class TestEffectiveMode:
+    @pytest.mark.parametrize(
+        ("mode", "has_meds", "expected"),
+        [
+            ("both", True, "both"),
+            ("meds", True, "meds"),
+            ("meds", False, "both"),
+            ("pressure", False, "pressure"),
+            (None, True, "both"),
+        ],
+    )
+    def test_values(self, mode, has_meds, expected) -> None:
+        assert rem.effective_mode(mode, has_meds) == expected
+
+
+class TestSlotModes:
+    async def test_meds_mode_text_and_buttons(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await set_mode(session, reminder, "meds")
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        _, text, markup = fake.sent[0]
+        assert text == texts.fmt_slot_message("morning", ["Лозартан 50 мг"], mode="meds")
+        assert text.startswith(texts.SLOT_MEDS_HEADER)
+        assert texts.BTN_MEASURE not in kb_texts(markup)
+        assert texts.BTN_TAKE_ALL in kb_texts(markup)
+
+    async def test_meds_mode_ignores_quiet_rule(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await add_measurement(session, user, now_utc() - timedelta(minutes=20))
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await set_mode(session, reminder, "meds")
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT) is True
+
+    async def test_meds_without_medications_acts_as_both(self, session, user, tsvc, fake) -> None:
+        await add_measurement(session, user, now_utc() - timedelta(minutes=20))
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await set_mode(session, reminder, "meds")
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT) is False  # «3 часа», как у both
+        await session.execute(
+            update(Reminder)
+            .where(Reminder.id == reminder.id)
+            .values(next_trigger_time=now_utc() - timedelta(minutes=1))
+        )
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SNOOZE)
+        assert fake.sent[0][1] == texts.fmt_slot_message("morning", [])
+
+    async def test_pressure_mode_hides_medications(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await set_mode(session, reminder, "pressure")
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        _, text, markup = fake.sent[0]
+        assert "Лозартан" not in text
+        assert texts.BTN_TAKE_ALL not in kb_texts(markup)
+        assert texts.BTN_MEASURE in kb_texts(markup)
+
+
+class TestFollowupScheduling:
+    async def test_set_on_slot_delivery(self, session, user, tsvc, scheduler, fake) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        row = await reload_reminder(session, reminder.id)
+        assert row.followup_at is not None
+        delta = row.followup_at - now_utc()
+        assert timedelta(minutes=58) < delta <= rem.FOLLOWUP_DELAY
+        job = scheduler.get_job(f"reminder:{reminder.id}:followup")
+        assert job["args"] == [reminder.id, rem.MODE_FOLLOWUP]
+        assert fake.silent == [False]
+
+    async def test_set_on_catchup(self, session, user, tsvc, scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(hours=1))
+        await session.commit()
+        assert await tsvc.startup() == 1
+        assert (await reload_reminder(session, reminder.id)).followup_at is not None
+        assert scheduler.get_job(f"reminder:{reminder.id}:followup") is not None
+
+    async def test_not_set_on_snooze(self, session, user, tsvc, scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SNOOZE)
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+        assert scheduler.get_job(f"reminder:{reminder.id}:followup") is None
+
+    async def test_not_set_when_disabled(self, session, user, tsvc, scheduler) -> None:
+        await set_user(session, user, followup_enabled=False)
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+        assert scheduler.get_job(f"reminder:{reminder.id}:followup") is None
+
+
+class TestFollowupDelivery:
+    async def test_silent_followup_replaces_message(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        await overdue_followup(session, reminder)
+        assert await tsvc._deliver_followup(reminder.id) is True
+        _, text, markup = fake.sent[1]
+        assert text == texts.fmt_slot_message("morning", ["Лозартан 50 мг"], followup=True)
+        assert texts.FOLLOWUP_PRESSURE in text and texts.FOLLOWUP_MEDS in text
+        assert texts.BTN_TAKE_ALL in kb_texts(markup)
+        assert fake.silent == [False, True]
+        assert fake.cleared == [(user.telegram_id, 101)]
+        row = await reload_reminder(session, reminder.id)
+        assert row.followup_at is None and row.last_message_id == 102
+        assert await tsvc._deliver_followup(reminder.id) is False  # повтор — один
+
+    async def test_meds_followup_text(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "", ("evening",))
+        reminder = await make_slot(session, user, slot="evening", local_time="21:00")
+        await set_mode(session, reminder, "meds")
+        await overdue_followup(session, reminder)
+        assert await tsvc._deliver_followup(reminder.id)
+        assert fake.sent[0][1] == f"{texts.FOLLOWUP_MEDS}\nЛозартан"
+        assert texts.BTN_MEASURE not in kb_texts(fake.sent[0][2])
+        assert fake.silent == [True]
+
+    async def test_early_tick_noop(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await session.execute(
+            update(Reminder)
+            .where(Reminder.id == reminder.id)
+            .values(followup_at=now_utc() + timedelta(minutes=10))
+        )
+        await session.commit()
+        assert await tsvc._deliver_followup(reminder.id) is False
+        assert (await reload_reminder(session, reminder.id)).followup_at is not None
+        assert fake.sent == []
+
+    async def test_missing_or_empty(self, session, user, tsvc) -> None:
+        reminder = await make_slot(session, user)
+        await session.commit()
+        assert await tsvc._deliver_followup(reminder.id) is False
+        assert await tsvc._deliver_followup(999_999) is False
+
+    async def test_answer_by_taken_log(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        reminder = await make_slot(session, user)
+        await overdue_followup(session, reminder)
+        meds = await meds_service.slot_medications(session, user, "morning")
+        await meds_service.log_slot_intake(session, user, "morning", {meds[0].id: "taken"})
+        await session.commit()
+        assert await tsvc._deliver_followup(reminder.id) is False
+        assert fake.sent == []
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+
+    async def test_answer_by_measurement(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await overdue_followup(session, reminder)
+        await add_measurement(session, user, now_utc() - timedelta(minutes=30))
+        await session.commit()
+        assert await tsvc._deliver_followup(reminder.id) is False
+        assert fake.sent == []
+
+    async def test_old_measurement_is_not_answer(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await overdue_followup(session, reminder)
+        # исходное отправлено ~час назад; окно ответа — ещё час до него
+        await add_measurement(session, user, now_utc() - timedelta(hours=2, minutes=30))
+        await session.commit()
+        assert await tsvc._deliver_followup(reminder.id) is True
+
+    async def test_measurement_not_answer_in_meds_mode(self, session, user, tsvc, fake) -> None:
+        await meds_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        reminder = await make_slot(session, user)
+        await set_mode(session, reminder, "meds")
+        await overdue_followup(session, reminder)
+        await add_measurement(session, user, now_utc() - timedelta(minutes=10))
+        await session.commit()
+        assert await tsvc._deliver_followup(reminder.id) is True
+
+    async def test_cancelled_when_disabled_paused_or_slot_off(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await set_user(session, user, followup_enabled=False)
+        await overdue_followup(session, reminder)
+        assert await tsvc._deliver_followup(reminder.id) is False
+        await set_user(session, user, followup_enabled=True, reminders_paused_until=today_minsk())
+        await overdue_followup(session, reminder)
+        assert await tsvc._deliver_followup(reminder.id) is False
+        await set_user(session, user, reminders_paused_until=None)
+        await session.execute(update(Reminder).where(Reminder.id == reminder.id).values(enabled=False))
+        await overdue_followup(session, reminder)
+        assert await tsvc._deliver_followup(reminder.id) is False
+        assert fake.sent == []
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+
+    async def test_fire_dispatches_followup(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await overdue_followup(session, reminder)
+        await tsvc._fire(reminder.id, rem.MODE_FOLLOWUP)
+        assert fake.silent == [True]
+
+
+class TestFollowupCancel:
+    async def test_cancel_followup(self, session, user, tsvc, scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        assert await tsvc.cancel_followup(user.id, "morning") is True
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+        assert scheduler.get_job(f"reminder:{reminder.id}:followup") is None
+        assert await tsvc.cancel_followup(user.id, "morning") is False
+
+    async def test_set_followup_enabled(self, session, user, tsvc, scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        await tsvc.set_followup_enabled(user.id, False)
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+        assert scheduler.get_job(f"reminder:{reminder.id}:followup") is None
+        await session.refresh(user)
+        assert user.followup_enabled is False
+        await tsvc.set_followup_enabled(user.id, True)
+        await session.refresh(user)
+        assert user.followup_enabled is True
+
+    async def test_remove_user_jobs_drops_followup(self, session, user, tsvc, scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        await tsvc.remove_user_jobs(user.id)
+        assert scheduler.get_job(f"reminder:{reminder.id}:followup") is None
+
+
+class TestFollowupStartup:
+    async def test_future_rescheduled(self, session, user, tsvc, scheduler, fake) -> None:
+        reminder = await make_slot(session, user)
+        await session.execute(
+            update(Reminder)
+            .where(Reminder.id == reminder.id)
+            .values(followup_at=now_utc() + timedelta(minutes=20))
+        )
+        await session.commit()
+        await tsvc.startup()
+        job = scheduler.get_job(f"reminder:{reminder.id}:followup")
+        assert job["args"] == [reminder.id, rem.MODE_FOLLOWUP]
+        assert fake.sent == []
+
+    async def test_inside_window_delivered(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await overdue_followup(session, reminder, ago=timedelta(hours=2))
+        await tsvc.startup()
+        assert fake.silent == [True]
+
+    async def test_outside_window_dropped(self, session, user, tsvc, fake) -> None:
+        reminder = await make_slot(session, user)
+        await overdue_followup(session, reminder, ago=timedelta(hours=7))
+        await tsvc.startup()
+        assert fake.sent == []
+        assert (await reload_reminder(session, reminder.id)).followup_at is None
+
+
+class TestPause:
+    async def test_slot_rescheduled_silently(self, session, user, tsvc, scheduler, fake) -> None:
+        await set_user(session, user, reminders_paused_until=today_minsk())
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        reminder.followup_at = now_utc() + timedelta(minutes=5)
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT) is False
+        assert fake.sent == []
+        row = await reload_reminder(session, reminder.id)
+        assert row.next_trigger_time > now_utc() and row.followup_at is None
+        assert scheduler.get_job(f"reminder:{reminder.id}")["args"] == [reminder.id, rem.MODE_SLOT]
+
+    async def test_remeasure_deleted(self, session, user, tsvc, fake) -> None:
+        await set_user(session, user, reminders_paused_until=today_minsk())
+        measurement = await add_measurement(session, user, now_utc())
+        reminder = await make_remeasure(
+            session, user, measurement.id, next_time=now_utc() - timedelta(minutes=1)
+        )
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_REMEASURE) is False
+        assert await reload_reminder(session, reminder.id) is None
+        assert fake.sent == []
+
+    async def test_resumed_line_and_reset(self, session, user, tsvc, fake) -> None:
+        await set_user(session, user, reminders_paused_until=today_minsk() - timedelta(days=1))
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SLOT)
+        assert fake.sent[0][1].split("\n")[0] == texts.REMINDERS_RESUMED
+        await session.refresh(user)
+        assert user.reminders_paused_until is None
+        await session.execute(
+            update(Reminder)
+            .where(Reminder.id == reminder.id)
+            .values(next_trigger_time=now_utc() - timedelta(minutes=1))
+        )
+        await session.commit()
+        assert await tsvc._deliver(reminder.id, rem.MODE_SNOOZE)
+        assert texts.REMINDERS_RESUMED not in fake.sent[1][1]  # строка — один раз

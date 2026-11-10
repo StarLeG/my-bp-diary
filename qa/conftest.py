@@ -243,6 +243,15 @@ class QaDb:
         ).fetchone()
         return int(row["n"])
 
+    def slot_row(self, telegram_id: int, slot: str) -> Optional[sqlite3.Row]:
+        """Строка слота `reminders` (режим, повтор «если не ответил», 0.5.6)."""
+        user = self.user(telegram_id)
+        if user is None:
+            return None
+        return self._conn.execute(
+            "SELECT * FROM reminders WHERE user_id = ? AND type = ?", (user["id"], slot)
+        ).fetchone()
+
     def ensure_patient_consents(self, telegram_id: int) -> None:
         """Согласия пациента для сценария (§6.11): основное и на врачей активных связей.
 

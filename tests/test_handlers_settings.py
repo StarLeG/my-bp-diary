@@ -9,7 +9,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import CallbackQuery, Chat, Message, User
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, schemas, texts
@@ -1438,3 +1438,276 @@ class TestArchiveSection:
         )
         assert edit.call_args.args[0] == texts.ARCHIVE_MENU
         assert edit.call_args.kwargs["reply_markup"] == keyboards.archive_menu_kb()
+
+
+# ─────────────────── Удобство напоминаний, часть 2 (§6.7, 0.5.6) ───────────────────
+
+
+def _labels(markup) -> list[str]:
+    return [btn.text for row in markup.inline_keyboard for btn in row]
+
+
+def _data(markup) -> list[str]:
+    return [btn.callback_data for row in markup.inline_keyboard for btn in row]
+
+
+def _today(user: UserModel):
+    from zoneinfo import ZoneInfo
+
+    return datetime.now(ZoneInfo(user.timezone)).date()
+
+
+class TestReminders056:
+    async def test_screen_has_pause_mode_followup(self, session, user, edit, cb_answer) -> None:
+        await add_reminder(session, user, slot="morning", local_time="08:00")
+        await call(
+            settings.cb_reminders,
+            callback=make_callback("set:reminders", make_message()),
+            session=session,
+        )
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert _labels(markup)[0] == texts.PAUSE_ROW_OFF
+        assert "set:rem:mode:morning" in _data(markup)
+        assert "set:rem:mode:noon" not in _data(markup)  # режим — только у включённого слота
+        assert "set:rem:followup:off" in _data(markup)
+
+    async def test_screen_shows_active_pause(self, session, user, edit, cb_answer) -> None:
+        user.reminders_paused_until = _today(user)
+        await session.commit()
+        await call(
+            settings.cb_reminders,
+            callback=make_callback("set:reminders", make_message()),
+            session=session,
+        )
+        first = _labels(edit.call_args.kwargs["reply_markup"])[0]
+        assert first == texts.PAUSE_ROW_ON.format(date=_today(user).strftime("%d.%m"))
+
+    async def test_expired_pause_hidden(self, session, user, edit, cb_answer) -> None:
+        from datetime import timedelta
+
+        user.reminders_paused_until = _today(user) - timedelta(days=1)
+        await session.commit()
+        await call(
+            settings.cb_reminders,
+            callback=make_callback("set:reminders", make_message()),
+            session=session,
+        )
+        assert _labels(edit.call_args.kwargs["reply_markup"])[0] == texts.PAUSE_ROW_OFF
+
+
+class TestSlotMode:
+    async def test_screen_without_meds(self, session, user, edit, cb_answer) -> None:
+        await add_reminder(session, user)
+        await call(
+            settings.cb_slot_mode,
+            callback=make_callback("set:rem:mode:morning", make_message()),
+            session=session,
+        )
+        text = edit.call_args.args[0]
+        assert text.startswith(texts.MODE_ASK.format(slot=texts.SLOT_LABELS["morning"]))
+        assert texts.MODE_NEED_MEDS in text
+        assert "set:rem:mode:morning:meds" not in _data(edit.call_args.kwargs["reply_markup"])
+
+    async def test_choose_pressure_with_meds_warns(self, session, user, edit, cb_answer) -> None:
+        reminder = await add_reminder(session, user)
+        await add_med(session, user)
+        await call(
+            settings.cb_slot_mode,
+            callback=make_callback("set:rem:mode:morning:pressure", make_message()),
+            session=session,
+        )
+        await session.refresh(reminder)
+        assert reminder.mode == "pressure"
+        assert texts.MODE_PRESSURE_WARNING in edit.call_args.args[0]
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.slot_mode_kb("morning", "pressure", True)
+
+    async def test_choose_meds_with_meds(self, session, user, edit, cb_answer) -> None:
+        reminder = await add_reminder(session, user)
+        await add_med(session, user)
+        await call(
+            settings.cb_slot_mode,
+            callback=make_callback("set:rem:mode:morning:meds", make_message()),
+            session=session,
+        )
+        await session.refresh(reminder)
+        assert reminder.mode == "meds"
+
+    async def test_meds_without_meds_toast(self, session, user, edit, cb_answer) -> None:
+        reminder = await add_reminder(session, user)
+        await call(
+            settings.cb_slot_mode,
+            callback=make_callback("set:rem:mode:morning:meds", make_message()),
+            session=session,
+        )
+        await session.refresh(reminder)
+        assert reminder.mode == "both"
+        cb_answer.assert_awaited_with(texts.MODE_NEED_MEDS_TOAST)
+        edit.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        "data", ["set:rem:mode:night", "set:rem:mode:morning:all", "set:rem:mode:noon", "set:rem:mode:"]
+    )
+    async def test_stale(self, session, user, edit, cb_answer, data) -> None:
+        await add_reminder(session, user)
+        await call(
+            settings.cb_slot_mode, callback=make_callback(data, make_message()), session=session
+        )
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        edit.assert_not_awaited()
+
+    async def test_not_modified_ignored(self, session, user, edit, cb_answer) -> None:
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.methods import EditMessageText
+
+        await add_reminder(session, user)
+        edit.side_effect = TelegramBadRequest(
+            method=EditMessageText(text="x"), message="Bad Request: message is not modified"
+        )
+        await call(
+            settings.cb_slot_mode,
+            callback=make_callback("set:rem:mode:morning:both", make_message()),
+            session=session,
+        )
+        cb_answer.assert_awaited()
+
+    async def test_other_bad_request_raised(self, session, user, edit, cb_answer) -> None:
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.methods import EditMessageText
+
+        await add_reminder(session, user)
+        edit.side_effect = TelegramBadRequest(
+            method=EditMessageText(text="x"), message="Bad Request: chat not found"
+        )
+        with pytest.raises(TelegramBadRequest):
+            await call(
+                settings.cb_slot_mode,
+                callback=make_callback("set:rem:mode:morning", make_message()),
+                session=session,
+            )
+
+    async def test_deleting_last_med_resets_meds(self, session, user) -> None:
+        from bot.services import medications as medications_service
+
+        reminder = await add_reminder(session, user)
+        med = await add_med(session, user)
+        reminder.mode = "meds"
+        await session.commit()
+        assert await medications_service.delete_medication(session, user, med.id)
+        await session.commit()
+        await session.refresh(reminder)
+        assert reminder.mode == "both"
+
+
+class TestPause:
+    async def test_screen_not_paused(self, session, user, edit, cb_answer) -> None:
+        await call(
+            settings.cb_pause, callback=make_callback("set:rem:pause", make_message()), session=session
+        )
+        assert edit.call_args.args[0] == texts.PAUSE_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.pause_kb(False)
+
+    async def test_screen_paused(self, session, user, edit, cb_answer) -> None:
+        user.reminders_paused_until = _today(user)
+        await session.commit()
+        await call(
+            settings.cb_pause, callback=make_callback("set:rem:pause", make_message()), session=session
+        )
+        assert edit.call_args.args[0] == texts.PAUSE_ACTIVE.format(date=_today(user).strftime("%d.%m"))
+        assert texts.BTN_PAUSE_OFF in _labels(edit.call_args.kwargs["reply_markup"])
+
+    @pytest.mark.parametrize(("days", "offset"), [("1", 0), ("3", 2), ("7", 6)])
+    async def test_set_days(self, session, user, edit, cb_answer, days, offset) -> None:
+        from datetime import timedelta
+
+        await call(
+            settings.cb_pause,
+            callback=make_callback(f"set:rem:pause:{days}", make_message()),
+            session=session,
+        )
+        await session.refresh(user)
+        assert user.reminders_paused_until == _today(user) + timedelta(days=offset)
+        assert edit.call_args.args[0] == texts.REMINDERS_MENU
+
+    async def test_off(self, session, user, edit, cb_answer) -> None:
+        user.reminders_paused_until = _today(user)
+        await session.commit()
+        await call(
+            settings.cb_pause,
+            callback=make_callback("set:rem:pause:off", make_message()),
+            session=session,
+        )
+        await session.refresh(user)
+        assert user.reminders_paused_until is None
+        assert edit.call_args.args[0] == f"{texts.PAUSE_REMOVED}\n\n{texts.REMINDERS_MENU}"
+
+    @pytest.mark.parametrize("data", ["set:rem:pause:30", "set:rem:pause:1:2"])
+    async def test_stale(self, session, user, edit, cb_answer, data) -> None:
+        await call(settings.cb_pause, callback=make_callback(data, make_message()), session=session)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        edit.assert_not_awaited()
+
+
+class TestFollowupToggle:
+    async def test_off_and_on(self, session, user, edit, cb_answer, mocker) -> None:
+        async def apply(user_id: int, enabled: bool) -> None:
+            await session.execute(
+                update(UserModel)
+                .where(UserModel.id == user_id)
+                .values(followup_enabled=enabled)
+            )
+            await session.commit()
+
+        reminders = mocker.Mock(set_followup_enabled=mocker.AsyncMock(side_effect=apply))
+        await call(
+            settings.cb_followup,
+            callback=make_callback("set:rem:followup:off", make_message()),
+            session=session,
+            reminders=reminders,
+        )
+        reminders.set_followup_enabled.assert_awaited_with(user.id, False)
+        assert "set:rem:followup:on" in _data(edit.call_args.kwargs["reply_markup"])
+        await call(
+            settings.cb_followup,
+            callback=make_callback("set:rem:followup:on", make_message()),
+            session=session,
+            reminders=reminders,
+        )
+        reminders.set_followup_enabled.assert_awaited_with(user.id, True)
+        assert "set:rem:followup:off" in _data(edit.call_args.kwargs["reply_markup"])
+
+    async def test_stale(self, session, user, edit, cb_answer, mocker) -> None:
+        reminders = mocker.Mock(set_followup_enabled=mocker.AsyncMock())
+        await call(
+            settings.cb_followup,
+            callback=make_callback("set:rem:followup:maybe", make_message()),
+            session=session,
+            reminders=reminders,
+        )
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        reminders.set_followup_enabled.assert_not_awaited()
+
+
+class TestCommitted056:
+    """Регресс живой проверки 0.5.6: middleware не коммитит — хендлер обязан сам."""
+
+    async def test_mode_and_pause_visible_to_other_session(
+        self, session, session_factory, user, edit, cb_answer
+    ) -> None:
+        await add_reminder(session, user)
+        await call(
+            settings.cb_slot_mode,
+            callback=make_callback("set:rem:mode:morning:pressure", make_message()),
+            session=session,
+        )
+        await call(
+            settings.cb_pause,
+            callback=make_callback("set:rem:pause:3", make_message()),
+            session=session,
+        )
+        async with session_factory() as other:
+            mode = (await other.execute(select(Reminder.mode).where(Reminder.user_id == user.id))).scalar_one()
+            paused = (
+                await other.execute(select(UserModel.reminders_paused_until).where(UserModel.id == user.id))
+            ).scalar_one()
+        assert mode == "pressure"
+        assert paused is not None

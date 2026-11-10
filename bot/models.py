@@ -99,6 +99,12 @@ class User(Base):
     """«Имя фамилия» из Telegram — врач видит его, пока данные не заполнены (§6.12)."""
     profile_prompted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     """Предложение заполнить данные (П7) уже показано (§6.12)."""
+    followup_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=True, server_default=text("1")
+    )
+    """«Повторять, если не ответил» — общий для всех слотов (§6.7, 0.5.6)."""
+    reminders_paused_until: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    """Пауза напоминаний: последний день паузы включительно, локальная дата (§6.7, 0.5.6)."""
 
     __table_args__ = (
         CheckConstraint(
@@ -168,12 +174,19 @@ class Reminder(Base):
     )
     last_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     """`message_id` последнего напоминания слота: у него снимаются кнопки при следующем (§6.7, 0.5.4)."""
+    mode: Mapped[str] = mapped_column(
+        String(8), nullable=False, default="both", server_default=text("'both'")
+    )
+    """Режим слота: `both` / `meds` / `pressure` (§6.7, 0.5.6); у `med_remeasure` не используется."""
+    followup_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    """Когда отправить повтор слота, если пользователь не ответил (§6.7, 0.5.6)."""
 
     __table_args__ = (
         CheckConstraint(
             "type IN ('morning', 'noon', 'evening', 'med_remeasure')",
             name="ck_reminders_type",
         ),
+        CheckConstraint("mode IN ('both', 'meds', 'pressure')", name="ck_reminders_mode"),
         CheckConstraint(
             "type = 'med_remeasure' OR local_time IS NOT NULL",
             name="ck_reminders_local_time",

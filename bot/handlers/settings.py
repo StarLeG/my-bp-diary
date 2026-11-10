@@ -11,9 +11,12 @@ Inline-меню: каждая опция редактирует сообщени
 """
 from __future__ import annotations
 
+from datetime import date, datetime, timedelta
 from typing import Mapping, Optional, Sequence
+from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message, User
@@ -92,9 +95,22 @@ async def _reminders_screen(
         for slot in keyboards.SLOT_ORDER
         if slot in rows and rows[slot].local_time
     }
+    modes = {slot: row.mode for slot, row in rows.items()}
     return texts.REMINDERS_MENU, keyboards.reminders_settings_kb(
-        enabled, times, user.med_remeasure_delay
+        enabled,
+        times,
+        user.med_remeasure_delay,
+        modes,
+        followup_enabled=user.followup_enabled,
+        paused_until=_active_pause(user),
     )
+
+
+def _active_pause(user) -> Optional[date]:
+    """Последний день действующей паузы или None (пауза в прошлом — нет паузы)."""
+    until = user.reminders_paused_until
+    today = datetime.now(ZoneInfo(user.timezone)).date()
+    return until if until is not None and until >= today else None
 
 
 async def _meds_screen(session: AsyncSession, user) -> tuple[str, InlineKeyboardMarkup]:
@@ -252,6 +268,105 @@ async def msg_target_dia(
 @router.callback_query(F.data == "set:reminders")
 async def cb_reminders(callback: CallbackQuery, session: AsyncSession) -> None:
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    text, markup = await _reminders_screen(session, user)
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+# ─────────────────── Режим слота, пауза, повтор (§6.7, 0.5.6) ───────────────────
+
+
+async def _mode_screen(session: AsyncSession, user, slot: str) -> tuple[str, InlineKeyboardMarkup]:
+    """«О чём напоминать: {слот}?» с подсказкой и предупреждением (§6.7)."""
+    rows = await _reminder_rows(session, user)
+    current = rows[slot].mode if slot in rows else "both"
+    has_meds = bool(await medications_service.slot_medications(session, user, slot))
+    lines = [texts.MODE_ASK.format(slot=texts.SLOT_LABELS[slot])]
+    if not has_meds:
+        lines.append(texts.MODE_NEED_MEDS)
+    elif current == "pressure":
+        lines.append(texts.MODE_PRESSURE_WARNING)
+    return "\n".join(lines), keyboards.slot_mode_kb(slot, current, has_meds)
+
+
+@router.callback_query(F.data.startswith("set:rem:mode:"))
+async def cb_slot_mode(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Экран режима слота и выбор режима (`set:rem:mode:{slot}[:{mode}]`, §6.7)."""
+    parts = (callback.data or "").split(":")
+    slot = parts[3] if len(parts) in (4, 5) else ""
+    mode = parts[4] if len(parts) == 5 else None
+    if slot not in keyboards.SLOT_ORDER or (mode is not None and mode not in texts.MODE_LABELS):
+        await callback.answer(texts.STALE_MESSAGE)
+        return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    rows = await _reminder_rows(session, user)
+    if slot not in rows:
+        await callback.answer(texts.STALE_MESSAGE)  # слот не настроен — кнопки режима не было
+        return
+    if mode is not None:
+        if mode == "meds" and not await medications_service.slot_medications(session, user, slot):
+            await callback.answer(texts.MODE_NEED_MEDS_TOAST)
+            return
+        rows[slot].mode = mode
+        await session.commit()
+    text, markup = await _mode_screen(session, user, slot)
+    try:
+        await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    except TelegramBadRequest as error:
+        if "message is not modified" not in str(error):
+            raise
+    await callback.answer()
+
+
+@router.callback_query((F.data == "set:rem:pause") | F.data.startswith("set:rem:pause:"))
+async def cb_pause(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Пауза напоминаний: экран, 1 / 3 / 7 дней, «Снять паузу» (§6.7, 0.5.6)."""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    value = (callback.data or "").split(":")[3:]
+    today = datetime.now(ZoneInfo(user.timezone)).date()
+    if not value:
+        paused = _active_pause(user)
+        text = (
+            texts.PAUSE_ACTIVE.format(date=paused.strftime("%d.%m"))
+            if paused is not None
+            else texts.PAUSE_ASK
+        )
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=keyboards.pause_kb(paused is not None)
+        )
+        await callback.answer()
+        return
+    choice = value[0] if len(value) == 1 else ""
+    if choice == "off":
+        user.reminders_paused_until = None
+        header = texts.PAUSE_REMOVED
+    elif choice in texts.PAUSE_OPTIONS:
+        user.reminders_paused_until = today + timedelta(days=int(choice) - 1)
+        header = None
+    else:
+        await callback.answer(texts.STALE_MESSAGE)
+        return
+    await session.commit()
+    text, markup = await _reminders_screen(session, user)
+    if header:
+        text = f"{header}\n\n{text}"
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("set:rem:followup:"))
+async def cb_followup(
+    callback: CallbackQuery, session: AsyncSession, reminders: RemindersService
+) -> None:
+    """«Повторять, если не ответил»: вкл / выкл (§6.7, 0.5.6)."""
+    value = (callback.data or "").split(":", 3)[3]
+    if value not in ("on", "off"):
+        await callback.answer(texts.STALE_MESSAGE)
+        return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await session.commit()  # транзакция закрыта до работы сервиса (своя сессия)
+    await reminders.set_followup_enabled(user.id, value == "on")
+    await session.refresh(user)
     text, markup = await _reminders_screen(session, user)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()

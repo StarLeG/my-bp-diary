@@ -1133,3 +1133,69 @@ class TestCabinetRegistrationRace:
         results = await asyncio.gather(register(1), register(2))
         assert sorted(results) == [False, True]
         assert await count(session_factory, WebUser) == 1
+
+
+class TestFollowupAnswerRace:
+    """Гонка «ответ и повтор» (§6.7, 0.5.6): прав тот, кто первым обнулил `followup_at`.
+
+    Чередование детерминированное: доставка повтора останавливается между
+    чтением строки и атомарным захватом (на проверке `_answered`), в этот
+    момент проходит ответ.
+    """
+
+    async def _setup(self, session_factory, user: DbUser):
+        sent: list[tuple] = []
+
+        async def sender(telegram_id: int, text: str, markup, silent: bool = False) -> int:
+            sent.append((telegram_id, text, silent))
+            return 500
+
+        svc = RemindersService(session_factory, sender, FakeScheduler())
+        reminder = await svc.ensure_slot(user.id, "morning", "08:00", "Europe/Minsk")
+        async with session_factory() as session:
+            await session.execute(
+                Reminder.__table__.update()
+                .where(Reminder.id == reminder.id)
+                .values(followup_at=datetime.now(timezone.utc) - timedelta(minutes=1))
+            )
+            await session.commit()
+        return svc, reminder, sent
+
+    async def _followup_at(self, session_factory, reminder_id: int):
+        async with session_factory() as session:
+            return (
+                await session.execute(select(Reminder.followup_at).where(Reminder.id == reminder_id))
+            ).scalar_one()
+
+    async def test_answer_between_read_and_claim_wins(self, session_factory, user: DbUser, monkeypatch) -> None:
+        svc, reminder, sent = await self._setup(session_factory, user)
+        reached, release = asyncio.Event(), asyncio.Event()
+        original = svc._answered
+
+        async def paused_answered(*args, **kwargs) -> bool:
+            reached.set()
+            await release.wait()
+            return await original(*args, **kwargs)
+
+        monkeypatch.setattr(svc, "_answered", paused_answered)
+        delivery = asyncio.create_task(svc._deliver_followup(reminder.id))
+        await reached.wait()
+        assert await svc.cancel_followup(user.id, "morning") is True  # ответ — первым
+        release.set()
+        assert await delivery is False
+        assert sent == []
+        assert await self._followup_at(session_factory, reminder.id) is None
+
+    async def test_followup_claimed_first_answer_is_noop(self, session_factory, user: DbUser) -> None:
+        svc, reminder, sent = await self._setup(session_factory, user)
+        assert await svc._deliver_followup(reminder.id) is True
+        assert await svc.cancel_followup(user.id, "morning") is False
+        assert [silent for *_, silent in sent] == [True]
+
+    async def test_parallel_followups_send_once(self, session_factory, user: DbUser) -> None:
+        svc, reminder, sent = await self._setup(session_factory, user)
+        results = await asyncio.gather(
+            svc._deliver_followup(reminder.id), svc._deliver_followup(reminder.id)
+        )
+        assert sorted(results) == [False, True]
+        assert len(sent) == 1

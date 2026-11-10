@@ -227,8 +227,19 @@ class TestBuildApp:
         send_message = mocker.patch.object(app.bot, "send_message", new_callable=mocker.AsyncMock)
         await app.reminders._sender(42, "Пора измерить давление", "клавиатура")
         send_message.assert_awaited_once_with(
-            42, "Пора измерить давление", reply_markup="клавиатура"
+            42, "Пора измерить давление", reply_markup="клавиатура", disable_notification=False
         )
+
+    async def test_sender_silent_and_clear_markup(self, settings: Settings, mocker) -> None:
+        """Повтор «если не ответил» — без звука; кнопки прежнего сообщения снимаются (§6.7)."""
+        app = build_app(settings)
+        send_message = mocker.patch.object(app.bot, "send_message", new_callable=mocker.AsyncMock)
+        send_message.return_value = mocker.Mock(message_id=77)
+        assert await app.reminders._sender(42, "Повтор", None, silent=True) == 77
+        assert send_message.call_args.kwargs["disable_notification"] is True
+        edit = mocker.patch.object(app.bot, "edit_message_reply_markup", new_callable=mocker.AsyncMock)
+        await app.reminders._clear_markup(42, 5)
+        edit.assert_awaited_once_with(chat_id=42, message_id=5, reply_markup=None)
 
     def test_invalid_token_raises(self, tmp_path: Path) -> None:
         bad = Settings(bot_token="не-токен", db_path=str(tmp_path / "bot.sqlite3"))

@@ -691,9 +691,20 @@ def reminders_settings_kb(
     enabled_slots: Mapping[str, bool],
     slot_times: Mapping[str, str],
     med_remeasure_delay: Optional[int],
+    slot_modes: Optional[Mapping[str, str]] = None,
+    followup_enabled: bool = True,
+    paused_until: Optional[date] = None,
 ) -> InlineKeyboardMarkup:
-    """Настройка напоминаний: слоты вкл/выкл, время, повтор после лекарства."""
+    """Настройка напоминаний: пауза, слоты вкл/выкл, время, режим слота,
+    повтор после лекарства, «Повторять, если не ответил» (§6.6, 0.5.6)."""
     builder = InlineKeyboardBuilder()
+    pause_label = (
+        texts.PAUSE_ROW_ON.format(date=paused_until.strftime("%d.%m"))
+        if paused_until is not None
+        else texts.PAUSE_ROW_OFF
+    )
+    builder.row(InlineKeyboardButton(text=pause_label, callback_data="set:rem:pause"))
+    modes = slot_modes or {}
     for slot in SLOT_ORDER:
         mark = "✅" if enabled_slots.get(slot) else "☐"
         label = f"{mark} {texts.SLOT_LABELS[slot]}"
@@ -705,6 +716,12 @@ def reminders_settings_kb(
                     text=f"⏰ {time_str}", callback_data=f"set:time:{slot}:show"
                 )
             )
+            builder.row(
+                InlineKeyboardButton(
+                    text=texts.MODE_LABELS[modes.get(slot, "both")],
+                    callback_data=f"set:rem:mode:{slot}",
+                )
+            )
     delay_label = (
         texts.REMEASURE_OFF if med_remeasure_delay is None else f"{med_remeasure_delay} минут"
     )
@@ -713,7 +730,47 @@ def reminders_settings_kb(
             text=f"Повтор после лекарства: {delay_label}", callback_data="set:remeasure"
         )
     )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.FOLLOWUP_ROW.format(
+                state=texts.FOLLOWUP_ON if followup_enabled else texts.FOLLOWUP_OFF
+            ),
+            callback_data=f"set:rem:followup:{'off' if followup_enabled else 'on'}",
+        )
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    return builder.as_markup()
+
+
+def slot_mode_kb(slot: str, current: str, has_medications: bool) -> InlineKeyboardMarkup:
+    """«О чём напоминать: {слот}?» — три режима (✓ у текущего) и «Назад» (§6.7, 0.5.6).
+
+    Без лекарств в слоте «Только лекарства» не предлагается.
+    """
+    builder = InlineKeyboardBuilder()
+    for mode, label in texts.MODE_LABELS.items():
+        if mode == "meds" and not has_medications:
+            continue
+        mark = PARTIAL_MARK if mode == current else ""
+        builder.row(
+            InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"set:rem:mode:{slot}:{mode}")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:reminders"))
+    return builder.as_markup()
+
+
+def pause_kb(paused: bool) -> InlineKeyboardMarkup:
+    """Пауза напоминаний: 1 / 3 / 7 дней, на паузе — «▶️ Снять паузу», «Назад» (§6.7)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        *(
+            InlineKeyboardButton(text=label, callback_data=f"set:rem:pause:{days}")
+            for days, label in texts.PAUSE_OPTIONS.items()
+        )
+    )
+    if paused:
+        builder.row(InlineKeyboardButton(text=texts.BTN_PAUSE_OFF, callback_data="set:rem:pause:off"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:reminders"))
     return builder.as_markup()
 
 
@@ -865,17 +922,27 @@ def reminder_day_key(day: date) -> str:
     return day.strftime("%Y%m%d")
 
 
-def slot_message_kb(slot: str, day: date, has_medications: bool = True) -> InlineKeyboardMarkup:
-    """Кнопки слот-сообщения (SPEC.md, §6.7, 0.5.4).
+def slot_message_kb(
+    slot: str, day: date, has_medications: bool = True, mode: str = "both"
+) -> InlineKeyboardMarkup:
+    """Кнопки слот-сообщения (SPEC.md, §6.7, 0.5.4–0.5.6).
 
     Каждая кнопка несёт слот и дату напоминания (`{д}`): приём пишется за
-    этот день, строка слота находится на сервере по `(users.id, type)`.
-    Без лекарств в слоте кнопки «Принял всё ✓» и «Частично…» не показываются.
+    этот день, строка слота находится на сервере по `(users.id, type)`;
+    нажатие любой — ответ для повтора «если не ответил» (0.5.6).
+    Без лекарств в слоте кнопки «Принял всё ✓» и «Отметить принятые» не
+    показываются; режим `meds` — без «Записать давление», `pressure` — без
+    кнопок лекарств.
     """
+    if mode == "meds" and not has_medications:
+        mode = "both"
     key = f"{slot}:{reminder_day_key(day)}"
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="rem:write"))
-    if has_medications:
+    if mode != "meds":
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data=f"rem:write:{key}")
+        )
+    if has_medications and mode != "pressure":
         builder.row(InlineKeyboardButton(text=texts.BTN_TAKE_ALL, callback_data=f"rem:all:{key}"))
         builder.row(InlineKeyboardButton(text=texts.BTN_PARTIAL, callback_data=f"rem:partial:{key}"))
     builder.row(InlineKeyboardButton(text=texts.BTN_SNOOZE_30, callback_data=f"rem:snooze:{key}"))

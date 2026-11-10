@@ -28,7 +28,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData, UploadFile  # request.form() возвращает starlette-экземпляр
 from pydantic import ValidationError
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -926,6 +926,14 @@ def create_app(
             "daily_max_days": DAILY_AVERAGES_MAX_DAYS,
             "medications": medications,
             "reminders": {r.type: r for r in reminders},
+            "slot_has_meds": {slot: any(m.slot == slot for m in medications) for slot in SLOT_ORDER},
+            "mode_labels": texts.MODE_LABELS,
+            "paused_until": (
+                user.reminders_paused_until
+                if user.reminders_paused_until is not None
+                and user.reminders_paused_until >= now_local.date()
+                else None
+            ),
             "doctor_notes": doctor_notes,
             "chart": _chart_payload(measurements, user.timezone),
             "chart_zones": CHART_ZONES,
@@ -1391,12 +1399,36 @@ def create_app(
         """Настройка слотов и повторного замера — те же слоты, что в боте.
 
         Строки `reminders` — источник истины; job'ы APScheduler живут в
-        процессе бота и пересоздаются из строк при его старте.
+        процессе бота и пересоздаются из строк при его старте. С 0.5.6 —
+        режим слота, «Повторять, если не ответил» и пауза (§6.7, §16.2):
+        выключенный повтор обнуляет `followup_at` (job бота это увидит и
+        ничего не отправит).
         """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
         now = datetime.now(ZoneInfo("UTC"))
+        meds_slots = {m.slot for m in await medications_service.list_medications(db, user)}
+        modes: dict[str, str] = {}
+        for slot in SLOT_ORDER:
+            mode = str(form.get(f"slot_{slot}_mode", "both"))
+            if mode not in ("both", "meds", "pressure"):
+                return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
+            if mode == "meds" and slot not in meds_slots:
+                return RedirectResponse(url="/?error=reminder_meds#reminders", status_code=303)
+            modes[slot] = mode
+        today = now.astimezone(ZoneInfo(user.timezone)).date()
+        pause_raw = str(form.get("pause", "keep"))
+        if form.get("pause_off"):
+            paused_until = None
+        elif pause_raw == "keep":
+            paused_until = user.reminders_paused_until
+        elif pause_raw == "":
+            paused_until = None
+        elif pause_raw in ("1", "3", "7"):
+            paused_until = today + timedelta(days=int(pause_raw) - 1)
+        else:
+            return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
         for slot in SLOT_ORDER:
             local_time = _normalize_hhmm(str(form.get(f"slot_{slot}_time", "")).strip())
             enabled = bool(form.get(f"slot_{slot}_enabled"))
@@ -1419,6 +1451,7 @@ def create_app(
                             local_time, user.timezone, now
                         ),
                         enabled=True,
+                        mode=modes[slot],
                     )
                     db.add(reminder)
                 else:
@@ -1428,6 +1461,15 @@ def create_app(
                     )
             elif reminder is not None:
                 reminder.enabled = False
+            if reminder is not None:
+                reminder.mode = modes[slot]
+        followup_enabled = bool(form.get("followup_enabled"))
+        if not followup_enabled:
+            await db.execute(
+                update(Reminder).where(Reminder.user_id == user.id).values(followup_at=None)
+            )
+        user.followup_enabled = followup_enabled
+        user.reminders_paused_until = paused_until
         delay_raw = str(form.get("med_remeasure_delay", ""))
         if delay_raw == "":
             user.med_remeasure_delay = None

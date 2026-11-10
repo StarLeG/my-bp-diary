@@ -40,9 +40,11 @@ RETRY_BASE_DELAY = 0.05
 #: 5 — данные пациента (§4.1, §6.12): ФИО, дата рождения, пол, имя из
 #:     Telegram, отметка предложения заполнить.
 #: 6 — `reminders.last_message_id`: снятие кнопок прежнего напоминания (§4.3, §6.7).
-SCHEMA_VERSION = 6
+#: 7 — режим слота, повтор «если не ответил», пауза: `reminders.mode`,
+#:     `reminders.followup_at`, `users.followup_enabled`, `users.reminders_paused_until`.
+SCHEMA_VERSION = 7
 
-#: Колонки поколений 4–6 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
+#: Колонки поколений 4–7 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
 _ADDED_COLUMNS = (
     ("users", "deletion_requested_at", "DATETIME"),
     ("doctors", "consent_version", "VARCHAR(32)"),
@@ -65,6 +67,15 @@ _ADDED_COLUMNS = (
     ("users", "telegram_name", "VARCHAR(64)"),
     ("users", "profile_prompted_at", "DATETIME"),
     ("reminders", "last_message_id", "INTEGER"),
+    (
+        "reminders",
+        "mode",
+        "VARCHAR(8) NOT NULL DEFAULT 'both' CONSTRAINT ck_reminders_mode "
+        "CHECK (mode IN ('both', 'meds', 'pressure'))",
+    ),
+    ("reminders", "followup_at", "DATETIME"),
+    ("users", "followup_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
+    ("users", "reminders_paused_until", "DATE"),
 )
 
 T = TypeVar("T")

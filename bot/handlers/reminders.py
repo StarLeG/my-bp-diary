@@ -29,7 +29,7 @@ from bot import keyboards, texts
 from bot.models import Medication, User
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
-from bot.services.reminders import RemindersService
+from bot.services.reminders import RemindersService, effective_mode
 
 router = Router(name="reminders")
 
@@ -112,6 +112,20 @@ def _id_of(callback: CallbackQuery) -> int:
     return int(raw) if raw.isdigit() else 0
 
 
+async def _slot_mode(session: AsyncSession, user: User, slot: str) -> str:
+    """Режим слота пользователя (§6.7, 0.5.6); строки нет — `both`."""
+    from sqlalchemy import select
+
+    from bot.models import Reminder
+
+    mode = (
+        await session.execute(
+            select(Reminder.mode).where(Reminder.user_id == user.id, Reminder.type == slot)
+        )
+    ).scalar_one_or_none()
+    return mode or "both"
+
+
 async def _stale(callback: CallbackQuery) -> None:
     """Устаревшая или мусорная кнопка — уведомление вместо молчания (§6.7)."""
     await callback.answer(texts.REMINDER_STALE)
@@ -153,6 +167,7 @@ async def _log_and_finish(
         session, user, slot, decisions, timestamp=_intake_moment(callback, user, day)
     )
     await session.commit()
+    await reminders.cancel_followup(user.id, slot)  # ответ на напоминание (§6.7, 0.5.6)
     if user.med_remeasure_delay is not None and result.taken and day == _today(user):
         await reminders.ensure_remeasure(user.id, None, user.med_remeasure_delay)
     header = f"{texts.SLOT_EMOJI[slot]} {texts.SLOT_LABELS[slot]}"
@@ -189,7 +204,11 @@ async def cb_take_all(
 
 
 @router.callback_query(F.data.startswith("rem:partial:"))
-async def cb_partial_start(callback: CallbackQuery, session: AsyncSession) -> None:
+async def cb_partial_start(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    reminders: Optional[RemindersService] = None,
+) -> None:
     """«Частично…»: список лекарств слота, все отмечены (§6.7).
 
     `rem:partial:done` / `rem:partial:cancel` — кнопки списков 0.5.3 (FSM):
@@ -205,6 +224,9 @@ async def cb_partial_start(callback: CallbackQuery, session: AsyncSession) -> No
     if day is None or not meds:
         await _stale(callback)
         return
+    await session.commit()
+    if reminders is not None:
+        await reminders.cancel_followup(user.id, slot)  # ответ на напоминание (§6.7, 0.5.6)
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.PARTIAL_PROMPT,
         reply_markup=keyboards.partial_meds_kb(
@@ -275,9 +297,10 @@ async def cb_partial_cancel(callback: CallbackQuery, session: AsyncSession) -> N
         return
     meds = await medications_service.slot_medications(session, user, slot)
     lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
+    mode = effective_mode(await _slot_mode(session, user, slot), bool(meds))
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.fmt_slot_message(slot, lines),
-        reply_markup=keyboards.slot_message_kb(slot, day, has_medications=bool(meds)),
+        texts.fmt_slot_message(slot, lines, mode=mode),
+        reply_markup=keyboards.slot_message_kb(slot, day, has_medications=bool(meds), mode=mode),
     )
     await callback.answer()
 
@@ -308,6 +331,8 @@ async def cb_skip_slot(
         await _stale(callback)
         return
     meds = await medications_service.slot_medications(session, user, slot)
+    if effective_mode(await _slot_mode(session, user, slot), bool(meds)) == "pressure":
+        meds = []  # «Только давление»: лекарства не напоминались — `skipped` не пишем (§6.7)
     if meds:
         await medications_service.log_slot_intake(
             session,
@@ -317,6 +342,7 @@ async def cb_skip_slot(
             timestamp=_intake_moment(callback, user, day),
         )
     await session.commit()
+    await reminders.cancel_followup(user.id, slot)  # ответ на напоминание (§6.7, 0.5.6)
     if day == _today(user):
         await reminders.skip_slot(user.id, slot)
     await _finish_screen(callback, texts.SLOT_SKIPPED)
@@ -345,10 +371,16 @@ async def cb_snooze(
     args = _slot_args(callback)
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)  # type: ignore[arg-type]
     await session.commit()  # транзакция закрыта до работы сервиса (своя сессия)
+    paused_until = user.reminders_paused_until
+    if paused_until is not None and paused_until >= _today(user):
+        await callback.answer(texts.PAUSED_TOAST.format(date=paused_until.strftime("%d.%m")))
+        return
     if args is not None:
         slot, raw_day, _ = args
         day = _reminder_day(callback, user, raw_day)
         moved = day == _today(user) and await reminders.snooze_slot(user.id, slot)
+        if moved:
+            await reminders.cancel_followup(user.id, slot)  # ответ на напоминание (§6.7, 0.5.6)
     else:
         reminder_id = _id_of(callback)
         if reminder_id <= 0:

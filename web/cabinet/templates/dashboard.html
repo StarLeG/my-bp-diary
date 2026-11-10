@@ -41,6 +41,8 @@
       <p class="alert alert-error">Не удалось сохранить лекарство: проверьте название, дозировку и слот.</p>
     {% elif error == "reminder" %}
       <p class="alert alert-error">Не удалось сохранить напоминания: проверьте время (ЧЧ:ММ).</p>
+    {% elif error == "reminder_meds" %}
+      <p class="alert alert-error">Сначала добавьте лекарства в этот слот.</p>
     {% elif error == "measurement" %}
       <p class="alert alert-error">Не удалось сохранить измерение: проверьте дату, время и значения.</p>
     {% elif error == "duplicate" %}
@@ -541,8 +543,27 @@
       <p class="muted">Те же слоты, что в боте. Изменения подхватываются ботом при следующем срабатывании или перезапуске.</p>
       <form method="post" action="/settings" class="stack">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <div class="row">
+          <label>
+            Пауза
+            <select name="pause">
+              {% if paused_until %}
+                <option value="keep" selected>На паузе до {{ paused_until.strftime("%d.%m") }}</option>
+              {% else %}
+                <option value="" selected>Нет</option>
+              {% endif %}
+              <option value="1">1 день</option>
+              <option value="3">3 дня</option>
+              <option value="7">7 дней</option>
+            </select>
+          </label>
+          {% if paused_until %}
+            <button type="submit" name="pause_off" value="1" class="btn btn-ghost">Снять паузу</button>
+          {% endif %}
+        </div>
         {% for slot in slot_order %}
           {% set reminder = reminders.get(slot) %}
+          {% set mode = reminder.mode if reminder else "both" %}
           <div class="row slot-row">
             <label class="check">
               <input type="checkbox" name="slot_{{ slot }}_enabled" value="1"
@@ -554,7 +575,21 @@
               <input type="time" name="slot_{{ slot }}_time"
                      value="{{ reminder.local_time if reminder and reminder.local_time else '08:00' }}">
             </label>
+            <label>
+              О чём напоминать
+              <select name="slot_{{ slot }}_mode">
+                {% for value, label in mode_labels.items() %}
+                  <option value="{{ value }}" {% if value == mode %}selected{% endif %}
+                          {% if value == "meds" and not slot_has_meds[slot] %}disabled{% endif %}>{{ label }}</option>
+                {% endfor %}
+              </select>
+            </label>
           </div>
+          {% if not slot_has_meds[slot] %}
+            <p class="muted">«Только лекарства»: сначала добавьте лекарства в этот слот.</p>
+          {% elif mode == "pressure" %}
+            <p class="muted">Лекарства этого слота не будут напоминаться. Отметить приём можно в «Дневнике за сегодня».</p>
+          {% endif %}
         {% endfor %}
         <label>
           Повторный замер после лекарства
@@ -566,6 +601,10 @@
               </option>
             {% endfor %}
           </select>
+        </label>
+        <label class="check">
+          <input type="checkbox" name="followup_enabled" value="1" {% if user.followup_enabled %}checked{% endif %}>
+          Повторять, если не ответил (через 60 минут, без звука)
         </label>
         <button type="submit" class="btn">Сохранить напоминания</button>
       </form>

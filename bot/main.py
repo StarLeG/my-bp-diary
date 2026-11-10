@@ -133,9 +133,16 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     if scheduler is None:
         scheduler = build_scheduler(settings.db_path)
 
-    async def send(telegram_id: int, text: str, markup: object | None) -> int:
-        """Доставка напоминания (контракт `Sender`): `message_id` отправленного."""
-        message = await bot.send_message(telegram_id, text, reply_markup=markup)  # type: ignore[arg-type]
+    async def send(
+        telegram_id: int, text: str, markup: object | None, silent: bool = False
+    ) -> int:
+        """Доставка напоминания (контракт `Sender`): `message_id` отправленного.
+
+        `silent` — без звука: повтор «если не ответил» (§6.7, 0.5.6).
+        """
+        message = await bot.send_message(
+            telegram_id, text, reply_markup=markup, disable_notification=silent  # type: ignore[arg-type]
+        )
         return message.message_id
 
     async def clear_markup(telegram_id: int, message_id: int) -> None:
