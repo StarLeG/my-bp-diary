@@ -320,22 +320,61 @@ async def update_medication(
     return await medications_by_name(session, user, new_name)
 
 
-async def _logged_ids_today(
+async def _logged_statuses_today(
     session: AsyncSession, user: User, slot: str, day: date
-) -> set[int]:
-    """Id лекарств, уже отмеченных в этом слоте за локальные сутки (идемпотентность)."""
+) -> dict[int, str]:
+    """{id лекарства: статус} отметок слота за локальные сутки (идемпотентность).
+
+    При нескольких строках одного лекарства (исторические данные) `taken` главнее.
+    """
     start, end = day_bounds_utc(user.timezone, day)
     rows = (
         await session.execute(
-            select(MedicationLog.medication_id).where(
+            select(MedicationLog.medication_id, MedicationLog.status).where(
                 MedicationLog.user_id == user.id,
                 MedicationLog.slot == slot,
                 MedicationLog.timestamp >= start,
                 MedicationLog.timestamp < end,
             )
         )
-    ).scalars()
-    return set(rows)
+    ).all()
+    statuses: dict[int, str] = {}
+    for med_id, status in rows:
+        if statuses.get(med_id) != "taken":
+            statuses[med_id] = status
+    return statuses
+
+
+#: Слоты расписания (без «Кризиса») — для строки лекарств дневника (§6.4).
+DAY_SLOTS = ("morning", "noon", "evening")
+
+
+async def day_slot_statuses(
+    session: AsyncSession, user: User, day: date
+) -> list[tuple[str, str]]:
+    """Статус приёма по слотам с лекарствами за локальные сутки (§6.4, 0.5.5).
+
+    `taken` — все лекарства слота приняты; `none` — отметок нет; `skipped` —
+    все отмечены и ни одно не принято; иначе — `partial`. Слоты без лекарств
+    и «Кризис» не возвращаются.
+    """
+    result: list[tuple[str, str]] = []
+    for slot in DAY_SLOTS:
+        meds = await slot_medications(session, user, slot)
+        if not meds:
+            continue
+        logged = await _logged_statuses_today(session, user, slot, day)
+        statuses = [logged.get(m.id) for m in meds]
+        if all(status is None for status in statuses):
+            status = "none"
+        elif all(status == "taken" for status in statuses):
+            status = "taken"
+        elif all(status is not None for status in statuses) and "taken" not in statuses:
+            status = "skipped"
+        else:
+            status = "partial"
+        result.append((slot, status))
+    return result
 
 
 async def log_slot_intake(
@@ -344,8 +383,14 @@ async def log_slot_intake(
     slot: str,
     decisions: Mapping[int, str],
     timestamp: Optional[datetime] = None,
+    upgrade_skipped: bool = False,
 ) -> SlotIntakeResult:
     """Отметить приём лекарств слота одной транзакцией.
+
+    `upgrade_skipped` — повторная отметка из дневника (§6.4, 0.5.5): лекарство,
+    записанное за эти сутки как не принятое, при решении `taken` переводится
+    в `taken` (строка журнала обновляется, момент — `timestamp`); уже принятое
+    не меняется.
 
     `decisions` — {id лекарства: 'taken' | 'skipped' | 'partial'}.
     Уже отмеченные за сегодня в этом слоте лекарства повторно не логируются:
@@ -362,13 +407,28 @@ async def log_slot_intake(
     result = SlotIntakeResult()
     new_logs = 0
     async with _current_intake_lock():
-        logged_today = await _logged_ids_today(session, user, slot, local_day)
+        logged_today = await _logged_statuses_today(session, user, slot, local_day)
         for med_id, status in decisions.items():
             medication = by_id.get(med_id)
             if medication is None:
                 continue  # чужое или удалённое лекарство — тихо игнорируем
             label = texts.fmt_med_item(medication.name, medication.dosage)
             if med_id in logged_today:
+                if upgrade_skipped and status == "taken" and logged_today[med_id] != "taken":
+                    await session.execute(
+                        update(MedicationLog)
+                        .where(
+                            MedicationLog.user_id == user.id,
+                            MedicationLog.medication_id == med_id,
+                            MedicationLog.slot == slot,
+                            MedicationLog.timestamp >= day_start,
+                            MedicationLog.timestamp < day_end,
+                        )
+                        .values(status="taken", timestamp=moment)
+                    )
+                    new_logs += 1
+                    result.taken.append(label)
+                    continue
                 result.already.append(label)
                 continue
             duplicate = exists(

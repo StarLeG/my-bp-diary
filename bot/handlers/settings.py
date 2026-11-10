@@ -266,7 +266,7 @@ async def cb_slot_toggle(
     """Клик по слоту: включить (с сохранённым или дефолтным временем) / выключить."""
     slot = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     if slot not in keyboards.SLOT_ORDER:
-        await callback.answer()
+        await callback.answer(texts.STALE_MESSAGE)  # §8, аудит U8
         return
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     rows = await _reminder_rows(session, user)
@@ -292,7 +292,7 @@ async def cb_slot_time(
     value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     slot, _, action = value.partition(":")
     if slot not in keyboards.SLOT_ORDER:
-        await callback.answer()
+        await callback.answer(texts.STALE_MESSAGE)  # §8, аудит U8
         return
     if action == "show":
         text = texts.SLOT_TIME_ASK.format(slot=texts.SLOT_LABELS[slot])
@@ -656,7 +656,7 @@ async def cb_med_slot(callback: CallbackQuery, state: FSMContext) -> None:
     """Мультивыбор слотов: повторное нажатие снимает отметку (§6.6)."""
     slot = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     if slot not in keyboards.MED_SLOT_ORDER:
-        await callback.answer()
+        await callback.answer(texts.STALE_MESSAGE)  # §8, аудит U8
         return
     data = await state.get_data()
     selected = list(data.get(M_SLOTS, []))

@@ -70,9 +70,9 @@ BTN_ADD = "Добавить"
 BTN_DELETE = "Удалить"
 
 BTN_TAKE_ALL = "Принял всё ✓"
-BTN_PARTIAL = "Частично…"
+BTN_PARTIAL = "Отметить принятые"  # до 0.5.5 — «Частично…» (U2)
 BTN_SNOOZE_30 = "Через 30 мин"
-BTN_SKIP_SLOT = "Пропускаю"
+BTN_SKIP_SLOT = "Пропускаю сегодня"  # до 0.5.5 — «Пропускаю» (U2)
 BTN_REMEASURE_NOW = "Записать сейчас"
 BTN_REMEASURE_OFF = "Больше не напоминать"
 
@@ -184,6 +184,18 @@ BTN_ARCHIVE_MORE = "➕ Ещё запись"
 
 DIARY_EMPTY = "Сегодня записей ещё нет"
 DIARY_TOTAL = "Всего записей: {count}"
+# Лекарства на сегодня в дневнике (§6.4, 0.5.5, U6)
+DIARY_MEDS_PREFIX = "💊 Лекарства: "
+DIARY_MEDS_STATUS = {
+    "taken": "{slot} ✓",
+    "partial": "{slot} — частично",
+    "skipped": "{slot} — пропущено",
+    "none": "{slot} — ещё не отмечено",
+}
+BTN_MARK_INTAKE = "💊 Отметить приём"
+MARK_INTAKE_ASK = "Какой приём отметить?"
+#: Устаревшая или непринятая кнопка (§8, 0.5.5, U8).
+STALE_MESSAGE = "Это сообщение устарело"
 
 FEELING_LABELS = {
     "normal": "норма",

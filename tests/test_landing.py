@@ -126,7 +126,9 @@ class TestManualSync:
             "мало данных для тренда",  # STATS_TREND_FEW
             "5000",  # ALL_TIME_LIMIT
             "Самочувствие",  # BTN_FEELING
-            "Пропускаю",  # BTN_SKIP_SLOT
+            "Пропускаю сегодня",  # BTN_SKIP_SLOT (0.5.5)
+            "Отметить принятые",  # BTN_PARTIAL (0.5.5)
+            "💊 Отметить приём",  # BTN_MARK_INTAKE (§6.4, 0.5.5)
             "Оставить как есть",  # BTN_KEEP_AS_IS
             "Экспорт PDF",  # BTN_EXPORT_PDF
             "Архивные записи",  # BTN_ARCHIVE
@@ -144,6 +146,7 @@ class TestManualSync:
             "или в личном кабинете",  # записи в ЛК нет — там только просмотр
             "Напишите автору",  # удаление аккаунта — самоудаление в боте
             "хранятся на сервере проекта",  # сервер в Германии, Telegram (§16.1, Т6)
+            "Частично…",  # кнопка переименована в 0.5.5 («Отметить принятые»)
         ],
     )
     def test_stale_phrase_absent(self, html: str, stale: str) -> None:

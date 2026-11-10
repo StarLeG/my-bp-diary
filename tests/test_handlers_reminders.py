@@ -118,11 +118,12 @@ class TestTakeAll:
         assert [(row.medication_id, row.status, row.slot) for row in logs] == [
             (med.id, "taken", "morning")
         ]
-        expected = texts.MEDS_LOGGED.format(
+        expected = "☀️ Утро\n" + texts.MEDS_LOGGED.format(
             summary=texts.fmt_meds_summary(["Лозартан 50 мг"], [])
         )
         assert edit.call_args.args[0] == expected
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        # U1 (0.5.5): после отметки — «Записать давление» / «В меню».
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_done_kb()
 
     async def test_schedules_remeasure(self, session, user, edit, cb_answer, reminders_svc) -> None:
         user.med_remeasure_delay = 60
@@ -327,8 +328,10 @@ class TestPartial:
         )
         statuses = {row.medication_id: row.status for row in await logs_of(session, user.id)}
         assert statuses == {med1.id: "taken", med2.id: "skipped"}
-        assert edit.call_args.args[0] == texts.fmt_intake_result(["Лозартан 50 мг"], ["Амлодипин 5 мг"], [])
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        assert edit.call_args.args[0] == "☀️ Утро\n" + texts.fmt_intake_result(
+            ["Лозартан 50 мг"], ["Амлодипин 5 мг"], []
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.intake_done_kb()
         reminders_svc.ensure_remeasure.assert_awaited_once_with(user.id, None, 60)
 
     async def test_done_nothing_checked_no_remeasure(self, session, user, edit, cb_answer, reminders_svc) -> None:
@@ -562,7 +565,7 @@ class TestReminderDates:
             session=session, reminders=reminders_svc,
         )
         assert len(await logs_of(session, user.id)) == 2
-        assert edit.call_args.args[0].startswith("Отметил")
+        assert edit.call_args.args[0].splitlines()[1].startswith("Отметил")
 
 
 class TestIntakeTexts:
@@ -574,7 +577,7 @@ class TestIntakeTexts:
         for _ in range(2):
             await call(reminders.cb_take_all, callback=make_callback(data, make_message()),
                        session=session, reminders=reminders_svc)
-        assert edit.call_args.args[0] == "Эти лекарства уже отмечены сегодня ✓: Лозартан 50 мг"
+        assert edit.call_args.args[0] == "☀️ Утро\nЭти лекарства уже отмечены сегодня ✓: Лозартан 50 мг"
         assert "нет данных" not in edit.call_args.args[0]
 
     async def test_mixed(self, session, user, edit, cb_answer, reminders_svc) -> None:
@@ -586,7 +589,7 @@ class TestIntakeTexts:
         await call(reminders.cb_take_all, callback=make_callback(f"rem:all:morning:{ymd(day)}", make_message()),
                    session=session, reminders=reminders_svc)
         assert edit.call_args.args[0] == (
-            "Отметил: принято: Амлодипин 5 мг\nУже отмечено сегодня: Лозартан 50 мг"
+            "☀️ Утро\nОтметил: принято: Амлодипин 5 мг\nУже отмечено сегодня: Лозартан 50 мг"
         )
         assert med1.id
 
@@ -817,3 +820,34 @@ class TestStaleBranches:
             session=session, reminders=reminders_svc,
         )
         cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+
+class TestAfterIntakeU1:
+    """После отметки — слот в итоге и «Записать давление» / «В меню» (§6.7, 0.5.5)."""
+
+    @pytest.mark.parametrize(("slot", "header"), [("noon", "🌤 Обед"), ("evening", "🌙 Вечер")])
+    async def test_header_per_slot(self, session, user, edit, cb_answer, reminders_svc, slot, header) -> None:
+        await add_med(session, user, slot=slot)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:{slot}:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        assert edit.call_args.args[0].splitlines()[0] == header
+        buttons = [b for row in edit.call_args.kwargs["reply_markup"].inline_keyboard for b in row]
+        assert [(b.text, b.callback_data) for b in buttons] == [
+            ("Записать давление", "rem:write"), ("В меню", "menu:back"),
+        ]
+
+    async def test_skip_keeps_old_finish(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await call(
+            reminders.cb_skip_slot,
+            callback=make_callback(f"rem:skip:morning:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        assert edit.call_args.args[0] == texts.SLOT_SKIPPED
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+
+    def test_labels_u2(self) -> None:
+        assert texts.BTN_PARTIAL == "Отметить принятые"
+        assert texts.BTN_SKIP_SLOT == "Пропускаю сегодня"

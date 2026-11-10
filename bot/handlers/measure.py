@@ -853,8 +853,8 @@ async def cb_archive_date(
         await callback.answer()
         return
     offset = keyboards.ARCHIVE_DATE_PRESETS.get(action)
-    if offset is None:  # устаревшие кнопки — экран не трогаем
-        await callback.answer()
+    if offset is None:  # устаревшие кнопки — экран не трогаем (§8, аудит U8)
+        await callback.answer(texts.STALE_MESSAGE)
         return
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     today = datetime.now(ZoneInfo(user.timezone)).date()

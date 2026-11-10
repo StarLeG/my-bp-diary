@@ -2,7 +2,7 @@
 
 Слот-сообщение (утро/обед/вечер) и повтор замера (med_remeasure) доставляются
 планировщиком (`bot/services/reminders.py`); здесь — обработка нажатий:
-«Принял всё ✓», «Частично…», «Через 30 мин», «Пропускаю», а также «Больше не
+«Принял всё ✓», «Отметить принятые», «Через 30 мин», «Пропускаю сегодня», а также «Больше не
 напоминать» повтора замера. «Записать давление» / «Записать сейчас» запускают
 сценарий записи (6.3) и обрабатываются в `bot/handlers/measure.py`.
 
@@ -155,9 +155,12 @@ async def _log_and_finish(
     await session.commit()
     if user.med_remeasure_delay is not None and result.taken and day == _today(user):
         await reminders.ensure_remeasure(user.id, None, user.med_remeasure_delay)
-    await _finish_screen(
-        callback, texts.fmt_intake_result(result.taken, result.skipped, result.already)
+    header = f"{texts.SLOT_EMOJI[slot]} {texts.SLOT_LABELS[slot]}"
+    body = texts.fmt_intake_result(result.taken, result.skipped, result.already)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        f"{header}\n{body}", reply_markup=keyboards.intake_done_kb()
     )
+    await callback.answer()
 
 
 # ─────────────────────────── Слот-сообщение ───────────────────────────

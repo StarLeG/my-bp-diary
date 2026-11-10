@@ -7,7 +7,7 @@ from __future__ import annotations
 
 from aiogram import Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import CallbackQuery, Message
 
 from bot import keyboards, texts
 from bot.config import admin_ids_from_env
@@ -59,6 +59,15 @@ async def unknown_text(message: Message, state: FSMContext) -> None:
     if await state.get_state() is not None:
         return
     await message.answer(texts.MENU_HINT, reply_markup=keyboards.back_to_menu())
+
+
+@fallback_router.callback_query()
+async def stale_callback(callback: CallbackQuery) -> None:
+    """Кнопка, которую не принял ни один обработчик: «Это сообщение устарело» (§8, U8).
+
+    Только уведомление — без нового сообщения; «часики» на кнопке не висят.
+    """
+    await callback.answer(texts.STALE_MESSAGE)
 
 
 router.include_router(fallback_router)

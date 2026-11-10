@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import select
@@ -1296,3 +1297,52 @@ class TestTakenIntakeIdsToday:
         )
         ids = await service.taken_intake_ids_today(session, user, timestamp=aware(2026, 11, 4, 12))
         assert ids == {taken[0].id}
+
+
+class TestDaySlotStatuses:
+    """Статусы приёма по слотам за день (§6.4, 0.5.5)."""
+
+    async def _med(self, session, user, name, slot):
+        row = Medication(user_id=user.id, name=name, dosage="", slot=slot)
+        session.add(row)
+        await session.flush()
+        return row
+
+    async def _log(self, session, user, med, status, when):
+        session.add(MedicationLog(user_id=user.id, medication_id=med.id, timestamp=when, status=status, slot=med.slot))
+        await session.flush()
+
+    async def test_duplicate_rows_taken_wins(self, session, user) -> None:
+        med = await self._med(session, user, "Лозартан", "morning")
+        now = datetime.now(timezone.utc)
+        await self._log(session, user, med, "taken", now)
+        await self._log(session, user, med, "skipped", now)
+        day = now.astimezone(ZoneInfo(user.timezone)).date()
+        assert await service.day_slot_statuses(session, user, day) == [("morning", "taken")]
+
+    async def test_order_and_skip_empty_slots(self, session, user) -> None:
+        await self._med(session, user, "Индапамид", "evening")
+        await self._med(session, user, "Лозартан", "morning")
+        await self._med(session, user, "Каптоприл", "crisis")
+        day = datetime.now(ZoneInfo(user.timezone)).date()
+        assert await service.day_slot_statuses(session, user, day) == [
+            ("morning", "none"), ("evening", "none"),
+        ]
+
+    async def test_reminder_path_does_not_upgrade(self, session, user) -> None:
+        """Без `upgrade_skipped` (напоминание) уже отмеченное «пропущено» не меняется."""
+        med = await self._med(session, user, "Лозартан", "morning")
+        now = datetime.now(timezone.utc)
+        await self._log(session, user, med, "skipped", now)
+        result = await service.log_slot_intake(session, user, "morning", {med.id: "taken"})
+        assert result.taken == [] and result.already == ["Лозартан"]
+        day = now.astimezone(ZoneInfo(user.timezone)).date()
+        assert await service.day_slot_statuses(session, user, day) == [("morning", "skipped")]
+
+    async def test_upgrade_does_not_downgrade(self, session, user) -> None:
+        med = await self._med(session, user, "Лозартан", "morning")
+        await self._log(session, user, med, "taken", datetime.now(timezone.utc))
+        result = await service.log_slot_intake(
+            session, user, "morning", {med.id: "skipped"}, upgrade_skipped=True
+        )
+        assert result.skipped == [] and result.already == ["Лозартан"]

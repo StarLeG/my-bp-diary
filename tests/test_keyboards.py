@@ -57,6 +57,10 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("meds_ask_kb", keyboards.meds_ask_kb()),
         ("diary_kb", keyboards.diary_kb()),
         ("diary_kb_empty", keyboards.diary_kb(is_empty=True)),
+        ("diary_kb_mark", keyboards.diary_kb(mark_intake=True)),
+        ("mark_intake_slots_kb", keyboards.mark_intake_slots_kb(["morning", "evening"])),
+        ("intake_done_kb", keyboards.intake_done_kb()),
+        ("partial_meds_kb_diary", keyboards.partial_meds_kb("noon", date(2026, 11, 10), {1}, [med], area="d")),
         ("stats_period_kb", keyboards.stats_period_kb()),
         ("stats_result_kb", keyboards.stats_result_kb("7")),
         ("stats_result_kb_custom", keyboards.stats_result_kb("20261101:20261115")),
@@ -891,3 +895,19 @@ class TestStatsCalendar:
     def test_callback_data_fits_limit(self) -> None:
         markup = keyboards.stats_calendar_kb(2026, 10, self.TODAY, date(2026, 10, 31))
         assert max(len(b.callback_data.encode()) for b in callback_buttons(markup)) <= 64
+
+
+class TestDiaryIntakeKeyboards:
+    """«💊 Отметить приём» в дневнике (§6.4, §8, 0.5.5)."""
+
+    def test_diary_mark_button(self) -> None:
+        data = [b.callback_data for b in callback_buttons(keyboards.diary_kb(mark_intake=True))]
+        assert data == ["m:edit", "d:mt", "menu:back"]
+        assert "d:mt" not in [b.callback_data for b in callback_buttons(keyboards.diary_kb())]
+
+    def test_partial_diary_area(self) -> None:
+        markup = keyboards.partial_meds_kb("noon", date(2026, 11, 10), {7}, [(7, "Аспирин", "100 мг")], area="d")
+        assert [b.callback_data for b in callback_buttons(markup)] == [
+            "d:pt:noon:20261110:7", "d:pd:noon:20261110", "d:pc:noon:20261110",
+        ]
+        assert keyboards.partial_checked_ids(markup) == {7}

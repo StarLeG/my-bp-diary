@@ -386,15 +386,37 @@ def archive_feeling_kb() -> InlineKeyboardMarkup:
 # ─────────────────────────── Дневник ───────────────────────────
 
 
-def diary_kb(is_empty: bool = False) -> InlineKeyboardMarkup:
+def diary_kb(is_empty: bool = False, mark_intake: bool = False) -> InlineKeyboardMarkup:
     """Дневник за сегодня: при пустом списке — «Записать давление»,
-    при непустом — «Изменить последнюю» (§6.3), всегда «Назад»."""
+    при непустом — «Изменить последнюю» (§6.3); «💊 Отметить приём», если есть
+    неотмеченный слот лекарств (§6.4, 0.5.5); всегда «Назад»."""
     builder = InlineKeyboardBuilder()
     if is_empty:
         builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
     else:
         builder.row(InlineKeyboardButton(text=texts.BTN_EDIT_LAST, callback_data="m:edit"))
+    if mark_intake:
+        builder.row(InlineKeyboardButton(text=texts.BTN_MARK_INTAKE, callback_data="d:mt"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def mark_intake_slots_kb(slots: Sequence[str]) -> InlineKeyboardMarkup:
+    """«Какой приём отметить?» — неотмеченные слоты и «Назад» к дневнику (§6.4)."""
+    builder = InlineKeyboardBuilder()
+    for slot in slots:
+        builder.row(
+            InlineKeyboardButton(text=texts.SLOT_LABELS[slot], callback_data=f"d:mt:{slot}")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:diary"))
+    return builder.as_markup()
+
+
+def intake_done_kb() -> InlineKeyboardMarkup:
+    """После отметки в напоминании: «Записать давление» / «В меню» (§6.7, 0.5.5, U1)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="rem:write"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()
 
 
@@ -866,10 +888,13 @@ def partial_meds_kb(
     day: date,
     checked: Iterable[int],
     medications: Sequence[tuple[int, str, str]],
+    area: str = "rem",
 ) -> InlineKeyboardMarkup:
-    """Список «Частично…» без FSM: отметки — «✓ » в подписях кнопок (§6.7, 0.5.4).
+    """Список «Отметить принятые» без FSM: отметки — «✓ » в подписях кнопок (§6.7).
 
     `medications` — кортежи (id, название, дозировка); `checked` — id отмеченных.
+    `area` — `rem` (напоминание) или `d` (дневник, §6.4: «Готово» и «Отмена»
+    возвращают «Дневник за сегодня»).
     """
     key = f"{slot}:{reminder_day_key(day)}"
     chosen = set(checked)
@@ -878,10 +903,10 @@ def partial_meds_kb(
         mark = PARTIAL_MARK if med_id in chosen else ""
         label = f"{name} {dosage}".strip()
         builder.row(
-            InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"rem:pt:{key}:{med_id}")
+            InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"{area}:pt:{key}:{med_id}")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data=f"rem:pd:{key}"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=f"rem:pc:{key}"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data=f"{area}:pd:{key}"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=f"{area}:pc:{key}"))
     return builder.as_markup()
 
 
@@ -891,7 +916,7 @@ def partial_checked_ids(markup: Optional[InlineKeyboardMarkup]) -> set[int]:
     for row in markup.inline_keyboard if markup is not None else []:
         for button in row:
             data = button.callback_data or ""
-            if data.startswith("rem:pt:") and button.text.startswith(PARTIAL_MARK):
+            if data.startswith(("rem:pt:", "d:pt:")) and button.text.startswith(PARTIAL_MARK):
                 value = data.rsplit(":", 1)[1]
                 if value.isdigit():
                     checked.add(int(value))
