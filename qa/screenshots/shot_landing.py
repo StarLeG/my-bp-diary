@@ -467,6 +467,15 @@ def shoot_bot(bot_username: str, stats_only: bool = False) -> None:
             dialog.wait_text("Лекарства:")  # эмодзи 💊 в Telegram Web — картинка
             dialog.shot("bot-diary", keep=1)
 
+            # «Настройки» → «Напоминания»: пауза, режим слота, повтор (§6.6, 0.5.6).
+            dialog.send("/start")
+            dialog.wait_text(texts.BTN_SETTINGS)
+            dialog.tap(texts.BTN_SETTINGS)
+            dialog.wait_text(texts.BTN_REMINDERS)
+            dialog.tap(texts.BTN_REMINDERS)
+            dialog.wait_text("Повторять, если не ответил")
+            dialog.shot("bot-reminder-settings", keep=1)
+
         dialog.send("/start")
         dialog.wait_text(texts.BTN_STATS)
         dialog.tap(texts.BTN_STATS)

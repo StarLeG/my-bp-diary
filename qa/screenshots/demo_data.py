@@ -148,6 +148,8 @@ async def _patient(
                     local_time=local_time,
                     next_trigger_time=next_time,
                     enabled=True,
+                    # Кадр «Напоминания» (0.5.6): утро — «Только лекарства».
+                    mode="meds" if slot == "morning" else "both",
                 )
             )
         await session.flush()
