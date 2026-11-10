@@ -325,6 +325,9 @@ class TelegramDialog:
             """(t) => { const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
                         return all.length && all[all.length - 1].innerText.includes(t); }""",
             arg=text, timeout=timeout,
+            # Опрос раз в 0,5 с, а не на каждом кадре: за 10 минут ожидания
+            # напоминания опрос по requestAnimationFrame ронял вкладку Telegram Web.
+            polling=500,
         )
         self.page.wait_for_timeout(700)  # дорисовка клавиатуры
 
@@ -413,6 +416,12 @@ def shoot_bot(bot_username: str, stats_only: bool = False) -> None:
         page.wait_for_selector(".input-message-input", timeout=60_000)
         page.add_style_tag(content=_TG_CSS)
         page.wait_for_timeout(3000)
+        # Telegram Web открывает чат на позиции из кэша сессии (старые сообщения):
+        # «вниз» — к концу переписки, иначе последний пузырь в DOM — не последний в чате.
+        go_down = page.locator("#column-center .bubbles-go-down")
+        if go_down.count() and go_down.first.is_visible():
+            go_down.first.click()
+            page.wait_for_timeout(3000)
         dialog = TelegramDialog(page)
         print("Бот:")
 
@@ -450,6 +459,13 @@ def shoot_bot(bot_username: str, stats_only: bool = False) -> None:
             dialog.shot("bot-meds", keep=2)
             dialog.tap(texts.BTN_CANCEL)  # без отметок: журнал не трогаем
             dialog.page.wait_for_timeout(1000)
+
+            # «Дневник за сегодня» со строкой лекарств (§6.4, 0.5.5).
+            dialog.send("/start")
+            dialog.wait_text(texts.BTN_DIARY)
+            dialog.tap(texts.BTN_DIARY)
+            dialog.wait_text("Лекарства:")  # эмодзи 💊 в Telegram Web — картинка
+            dialog.shot("bot-diary", keep=1)
 
         dialog.send("/start")
         dialog.wait_text(texts.BTN_STATS)
