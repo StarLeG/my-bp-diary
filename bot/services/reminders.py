@@ -88,6 +88,20 @@ FOLLOWUP_ANSWER_WINDOW = timedelta(hours=1)
 #: Режимы слота с давлением (правило «3 часов» и ответ записью давления, §6.7).
 PRESSURE_MODES = ("both", "pressure")
 
+#: Типы строк-слотов (ежедневные напоминания).
+SLOT_TYPES = ("morning", "noon", "evening")
+
+#: Тик сверки job'ов слотов с базой (§6.7, 0.5.7): id job'а и период.
+TICK_JOB_ID = "reminders:tick"
+TICK_INTERVAL_SECONDS = 60
+
+#: Просроченный слот без job'а тик трогает не раньше, чем через столько:
+#: штатный job мог только что сработать и ещё не переставить строку.
+TICK_GRACE = timedelta(minutes=2)
+
+#: Допуск сравнения времени job'а и строки (job store хранит время float'ом).
+TICK_TOLERANCE = timedelta(seconds=1)
+
 #: Отправка готового сообщения: (telegram_id, текст, клавиатура[, silent=…]) → message_id или None.
 Sender = Callable[..., Awaitable[Optional[int]]]
 
@@ -871,6 +885,62 @@ class RemindersService:
 
     # ─────────────────────────── Catch-up при старте ───────────────────────────
 
+    async def tick(self) -> int:
+        """Сверка job'ов слотов со строками `reminders` (§6.7, 0.5.7).
+
+        Личный кабинет — отдельный процесс и меняет только строки: без сверки
+        время слота, изменённое в ЛК, доходило до бота лишь после перезапуска.
+        Job'ы читаются одним вызовом `get_jobs()`. Включённый слот без job'а
+        или с job'ом не на `next_trigger_time` — job ставится заново; job
+        выключенного слота снимается; просроченный слот без job'а (дольше
+        `TICK_GRACE`) — как при старте: catch-up в окне, иначе перенос. Повторы
+        замера и «если не ответил» не трогаются. Возвращает число исправлений.
+        """
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            rows = (
+                await session.execute(
+                    select(Reminder.id, Reminder.enabled, Reminder.next_trigger_time).where(
+                        Reminder.type.in_(SLOT_TYPES)
+                    )
+                )
+            ).all()
+        jobs = {job.id: job for job in self._scheduler.get_jobs()}
+        fixed = 0
+        for reminder_id, enabled, next_time in rows:
+            job = jobs.get(self._job_id(reminder_id))
+            if not enabled:
+                if job is not None:
+                    self._remove_job(reminder_id)
+                    fixed += 1
+                continue
+            if next_time > now:
+                run_at = getattr(job, "next_run_time", None)
+                if run_at is None or abs(run_at - next_time) > TICK_TOLERANCE:
+                    self._add_job(reminder_id, next_time, MODE_SLOT)
+                    fixed += 1
+            elif job is None and now - next_time > TICK_GRACE:
+                fixed += 1
+                if now - next_time > CATCHUP_WINDOW:
+                    await self._reschedule_overdue_slot(reminder_id)
+                else:
+                    await self._deliver(reminder_id, MODE_CATCHUP)
+        return fixed
+
+    def schedule_tick(self) -> None:
+        """Периодический job тика (раз в минуту, UTC); идемпотентно (`replace_existing`)."""
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        self._scheduler.add_job(
+            fire_tick,
+            trigger=IntervalTrigger(seconds=TICK_INTERVAL_SECONDS, timezone="UTC"),
+            id=TICK_JOB_ID,
+            replace_existing=True,
+            coalesce=True,
+            max_instances=1,
+            misfire_grace_time=30,
+        )
+
     async def startup(self) -> int:
         """Пересоздать job'ы из строк и доставить просроченное (один раз на тип).
 
@@ -968,6 +1038,20 @@ def bind_service(service: Optional[RemindersService]) -> None:
     """
     global _service
     _service = service
+
+
+async def fire_tick() -> None:
+    """Точка входа тика (§6.7, 0.5.7): ошибки — в лог, планировщик не падает."""
+    if _service is None:
+        logger.error("Сработал тик напоминаний без привязанного сервиса (bind_service)")
+        return
+    try:
+        fixed = await _service.tick()
+    except Exception:
+        logger.exception("Ошибка тика напоминаний")
+        return
+    if fixed:
+        logger.info("Тик напоминаний: исправлено job'ов слотов: %s", fixed)
 
 
 async def fire_reminder(reminder_id: int, mode: str) -> None:

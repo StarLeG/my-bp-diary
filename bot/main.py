@@ -155,6 +155,8 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     # Job'ы сериализуются в SQLAlchemyJobStore: точка входа — module-level
     # `fire_reminder`, экземпляр сервиса привязывается явно.
     bind_service(reminders)
+    # Сверка job'ов слотов с базой раз в минуту: ЛК меняет только строки (§6.7, 0.5.7).
+    reminders.schedule_tick()
 
     uploader = (
         S3Uploader(

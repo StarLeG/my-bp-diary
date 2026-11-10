@@ -217,3 +217,53 @@ def test_csrf_required(app_client, settings) -> None:  # noqa: F811
     assert _sql(settings, "SELECT followup_enabled, reminders_paused_until FROM users WHERE id = ?", (user_id,)) == [
         (1, None)
     ]
+
+
+class TestTickAfterCabinet:
+    """0.5.7 (§6.7): время слота, изменённое в ЛК, доходит до бота тиком — без перезапуска."""
+
+    def test_job_follows_cabinet_time(self, app_client, settings) -> None:  # noqa: F811
+        import asyncio
+        from types import SimpleNamespace
+
+        from bot.db import create_engine, create_session_factory
+        from bot.services import reminders as rem
+
+        class Scheduler:
+            def __init__(self) -> None:
+                self.jobs: dict[str, dict] = {}
+
+            def add_job(self, func, **kwargs) -> None:
+                self.jobs[kwargs["id"]] = kwargs
+
+            def remove_job(self, job_id: str) -> None:
+                self.jobs.pop(job_id, None)
+
+            def get_jobs(self):
+                return [SimpleNamespace(id=k, next_run_time=v["trigger"].run_date) for k, v in self.jobs.items()]
+
+        client, user_id = app_client
+        _register(client)
+        client.post("/settings", data=_form(client, slot_morning_time="08:30"))
+        scheduler = Scheduler()
+
+        async def run(old_job: bool):
+            engine = create_engine(settings.db_path)
+            try:
+                svc = rem.RemindersService(create_session_factory(engine), None, scheduler)
+                if old_job:  # бот поставил job на прежнее время
+                    rid, = _sql(settings, "SELECT id FROM reminders WHERE user_id = ?", (user_id,))[0]
+                    svc._add_job(rid, datetime.now(TZ) + timedelta(minutes=3), rem.MODE_SLOT)
+                    return 0
+                return await svc.tick()
+            finally:
+                await engine.dispose()
+
+        asyncio.run(run(old_job=True))
+        client.post("/settings", data=_form(client, slot_morning_time="09:45"))
+        assert asyncio.run(run(old_job=False)) == 1
+        rid, stored = _sql(settings, "SELECT id, next_trigger_time FROM reminders WHERE user_id = ?", (user_id,))[0]
+        run_at = scheduler.jobs[f"reminder:{rid}"]["trigger"].run_date
+        assert run_at.astimezone(TZ).strftime("%H:%M") == "09:45"
+        assert run_at.replace(tzinfo=None).isoformat(" ").startswith(stored[:16])
+        assert "Бот применит изменения в течение минуты." in client.get("/").text

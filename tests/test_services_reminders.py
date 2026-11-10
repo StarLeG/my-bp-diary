@@ -1417,3 +1417,174 @@ class TestPause:
         await session.commit()
         assert await tsvc._deliver(reminder.id, rem.MODE_SNOOZE)
         assert texts.REMINDERS_RESUMED not in fake.sent[1][1]  # строка — один раз
+
+
+# ─────────────────── Сверка слотов с базой — тик (§6.7, 0.5.7) ───────────────────
+
+
+class TickScheduler(FakeScheduler):
+    """Фейк с `get_jobs()`: время job'а — из DateTrigger, как у APScheduler."""
+
+    def get_jobs(self):
+        from types import SimpleNamespace
+
+        return [
+            SimpleNamespace(id=job_id, next_run_time=getattr(job["trigger"], "run_date", None))
+            for job_id, job in self.jobs.items()
+        ]
+
+
+@pytest.fixture
+def tick_scheduler() -> TickScheduler:
+    return TickScheduler()
+
+
+@pytest.fixture
+def tick_svc(session_factory, tick_scheduler, sent) -> rem.RemindersService:
+    async def sender(user_id: int, text: str, markup, silent: bool = False) -> None:
+        sent.append((user_id, text, markup))
+
+    return rem.RemindersService(session_factory, sender, tick_scheduler)
+
+
+async def move_row(session: AsyncSession, reminder: Reminder, when: datetime, **values) -> None:
+    """Правка «в обход» бота — как форма ЛК: меняется только строка."""
+    await session.execute(
+        update(Reminder).where(Reminder.id == reminder.id).values(next_trigger_time=when, **values)
+    )
+    await session.commit()
+
+
+def job_time(scheduler, reminder_id: int):
+    job = scheduler.get_job(f"reminder:{reminder_id}")
+    return None if job is None else job["trigger"].run_date
+
+
+class TestTick:
+    async def test_later_time_from_cabinet(self, session, user, tick_svc, tick_scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() + timedelta(hours=1))
+        await session.commit()
+        tick_svc._add_job(reminder.id, reminder.next_trigger_time, rem.MODE_SLOT)
+        new_time = now_utc().replace(microsecond=0) + timedelta(hours=5)
+        await move_row(session, reminder, new_time)
+        assert await tick_svc.tick() == 1
+        assert job_time(tick_scheduler, reminder.id) == new_time
+        assert tick_scheduler.get_job(f"reminder:{reminder.id}")["args"] == [reminder.id, rem.MODE_SLOT]
+
+    async def test_earlier_time_from_cabinet(self, session, user, tick_svc, tick_scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() + timedelta(hours=5))
+        await session.commit()
+        tick_svc._add_job(reminder.id, reminder.next_trigger_time, rem.MODE_SLOT)
+        new_time = now_utc().replace(microsecond=0) + timedelta(minutes=20)
+        await move_row(session, reminder, new_time)
+        assert await tick_svc.tick() == 1
+        assert job_time(tick_scheduler, reminder.id) == new_time
+
+    async def test_enabled_in_cabinet_gets_job(self, session, user, tick_svc, tick_scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() + timedelta(hours=2))
+        await session.commit()
+        assert await tick_svc.tick() == 1
+        assert job_time(tick_scheduler, reminder.id) == reminder.next_trigger_time
+
+    async def test_matching_job_untouched(self, session, user, tick_svc, tick_scheduler) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() + timedelta(hours=2))
+        await session.commit()
+        tick_svc._add_job(reminder.id, reminder.next_trigger_time, rem.MODE_SNOOZE)
+        assert await tick_svc.tick() == 0
+        # режим job'а («Через 30 мин») сохранён
+        assert tick_scheduler.get_job(f"reminder:{reminder.id}")["args"] == [reminder.id, rem.MODE_SNOOZE]
+
+    async def test_disabled_job_removed(self, session, user, tick_svc, tick_scheduler) -> None:
+        reminder = await make_slot(session, user, enabled=False)
+        await session.commit()
+        tick_svc._add_job(reminder.id, reminder.next_trigger_time, rem.MODE_SLOT)
+        assert await tick_svc.tick() == 1
+        assert tick_scheduler.get_job(f"reminder:{reminder.id}") is None
+        assert await tick_svc.tick() == 0  # нечего снимать
+
+    async def test_overdue_inside_window_catchup(self, session, user, tick_svc, tick_scheduler, sent) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=10))
+        await session.commit()
+        assert await tick_svc.tick() == 1
+        assert len(sent) == 1
+        assert job_time(tick_scheduler, reminder.id) > now_utc()
+
+    async def test_overdue_beyond_window_rescheduled(self, session, user, tick_svc, tick_scheduler, sent) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(hours=7))
+        await session.commit()
+        assert await tick_svc.tick() == 1
+        assert sent == []
+        assert (await reload_reminder(session, reminder.id)).next_trigger_time > now_utc()
+        assert job_time(tick_scheduler, reminder.id) > now_utc()
+
+    async def test_overdue_within_grace_left_alone(self, session, user, tick_svc, tick_scheduler, sent) -> None:
+        await make_slot(session, user, next_time=now_utc() - timedelta(seconds=30))
+        await session.commit()
+        assert await tick_svc.tick() == 0
+        assert sent == [] and tick_scheduler.jobs == {}
+
+    async def test_overdue_with_job_left_alone(self, session, user, tick_svc, tick_scheduler, sent) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=10))
+        await session.commit()
+        tick_svc._add_job(reminder.id, reminder.next_trigger_time, rem.MODE_SLOT)
+        assert await tick_svc.tick() == 0
+        assert sent == []
+
+    async def test_remeasure_and_followup_untouched(self, session, user, tick_svc, tick_scheduler) -> None:
+        measurement = await add_measurement(session, user, now_utc())
+        remeasure = await make_remeasure(session, user, measurement.id)
+        await session.commit()
+        assert await tick_svc.tick() == 0
+        assert tick_scheduler.get_job(f"reminder:{remeasure.id}") is None
+        tick_svc._add_job(999, now_utc() + timedelta(minutes=5), rem.MODE_FOLLOWUP)
+        assert await tick_svc.tick() == 0
+        assert tick_scheduler.get_job("reminder:999:followup") is not None
+
+    def test_schedule_tick(self, tick_svc, tick_scheduler) -> None:
+        from apscheduler.triggers.interval import IntervalTrigger
+
+        tick_svc.schedule_tick()
+        job = tick_scheduler.get_job(rem.TICK_JOB_ID)
+        assert job["func"] is rem.fire_tick
+        assert isinstance(job["trigger"], IntervalTrigger)
+        assert job["trigger"].interval == timedelta(seconds=60)
+        assert job["replace_existing"] and job["coalesce"] and job["max_instances"] == 1
+
+
+class TestFireTick:
+    async def test_without_service_logs(self, caplog) -> None:
+        rem.bind_service(None)
+        await rem.fire_tick()
+        assert "без привязанного сервиса" in caplog.text
+
+    async def test_delegates_and_logs_fixes(self, mocker, caplog) -> None:
+        import logging
+
+        svc = mocker.Mock(tick=mocker.AsyncMock(return_value=2))
+        rem.bind_service(svc)
+        try:
+            with caplog.at_level(logging.INFO, logger="bot.services.reminders"):
+                await rem.fire_tick()
+        finally:
+            rem.bind_service(None)
+        svc.tick.assert_awaited_once()
+        assert "исправлено job'ов слотов: 2" in caplog.text
+
+    async def test_nothing_fixed_is_quiet(self, mocker, caplog) -> None:
+        import logging
+
+        rem.bind_service(mocker.Mock(tick=mocker.AsyncMock(return_value=0)))
+        try:
+            with caplog.at_level(logging.INFO, logger="bot.services.reminders"):
+                await rem.fire_tick()
+        finally:
+            rem.bind_service(None)
+        assert "Тик" not in caplog.text
+
+    async def test_errors_swallowed(self, mocker, caplog) -> None:
+        rem.bind_service(mocker.Mock(tick=mocker.AsyncMock(side_effect=RuntimeError("boom"))))
+        try:
+            await rem.fire_tick()
+        finally:
+            rem.bind_service(None)
+        assert "Ошибка тика напоминаний" in caplog.text
