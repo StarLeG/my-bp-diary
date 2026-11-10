@@ -24,6 +24,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, texts
 from bot.models import Measurement, User
+from bot.services import appointments as appointments_service
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services.reminders import RemindersService
@@ -77,6 +78,11 @@ async def _diary_screen(
         lines.append(texts.DIARY_TOTAL.format(count=len(rows)))
     if statuses:
         lines.append(_meds_line(statuses))
+    events_line = appointments_service.diary_line(
+        *await appointments_service.day_events(session, user, today)
+    )
+    if events_line:
+        lines.append(events_line)  # ближайшее событие (§6.4, 0.5.8)
     markup = keyboards.diary_kb(is_empty=not rows, mark_intake=bool(_unmarked(statuses)))
     return "\n".join(lines), markup
 

@@ -1588,3 +1588,40 @@ class TestFireTick:
         finally:
             rem.bind_service(None)
         assert "Ошибка тика напоминаний" in caplog.text
+
+
+
+class TestTickAppointments:
+    """Тот же тик доставляет уведомления о визитах (§6.13, 0.5.8)."""
+
+    async def test_tick_sends_due_appointment(self, session, user, session_factory, tick_scheduler, mocker, caplog) -> None:
+        import logging
+
+        from bot.services import appointments as ap
+
+        sent = []
+
+        async def sender(telegram_id, text, markup, silent=False):
+            sent.append((telegram_id, text, markup))
+            return 900
+
+        svc = rem.RemindersService(session_factory, sender, tick_scheduler)
+        appt = await ap.create(session, user, "doctor", "Кардиолог", today_minsk() + timedelta(days=1), "10:30")
+        await session.execute(
+            update(type(appt)).where(type(appt).id == appt.id).values(sent_eve_at=None)
+        )
+        await session.commit()
+        mocker.patch.object(ap, "notice_moments", lambda *a: {"eve": now_utc() - timedelta(minutes=1), "soon": None, "morning": None, "after": None})
+        with caplog.at_level(logging.INFO, logger="bot.services.reminders"):
+            await svc.tick()
+        assert sent and sent[0][1].startswith("Завтра визит 🩺")
+        assert [b.callback_data for row in sent[0][2].inline_keyboard for b in row][0] == f"ap:report:{appt.id}"
+        assert "отправлено уведомлений о визитах: 1" in caplog.text
+
+    async def test_appointments_error_does_not_break_tick(self, session_factory, tick_scheduler, mocker, caplog) -> None:
+        from bot.services import appointments as ap
+
+        mocker.patch.object(ap, "deliver_due", mocker.AsyncMock(side_effect=RuntimeError("boom")))
+        svc = rem.RemindersService(session_factory, None, tick_scheduler)
+        assert await svc.tick() == 0
+        assert "Ошибка тика уведомлений о визитах" in caplog.text

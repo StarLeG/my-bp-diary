@@ -39,6 +39,7 @@ from bot.models import Doctor, Measurement, Medication, Reminder, User, WebSessi
 from bot.services import consent as consent_service
 from bot.services import csv_export
 from bot.services import doctor as doctor_service
+from bot.services import appointments as appointments_service
 from bot.services import medications as medications_service
 from bot.services import pdf_report
 from bot.services import profile as profile_service
@@ -869,6 +870,15 @@ def create_app(
         daily = _daily_averages(measurements, user.timezone, start_day, end_day)
         medication_cells = await medications_service.medication_cells(db, user, measurements)
         medications = await medications_service.list_medications(db, user)
+        ap_upcoming = await appointments_service.list_upcoming(db, user, now_local.date())
+        ap_past = [
+            (
+                appt,
+                appointments_service.status_label(appt, now_local.date()),
+                appointments_service.awaiting_answer(appt, now_local.date()),
+            )
+            for appt in (await appointments_service.list_past(db, user, now_local.date(), limit=None))[0]
+        ]
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         consent = await consent_service.current_processing(db, user.id)
         personal_messages = {
@@ -935,6 +945,13 @@ def create_app(
                 else None
             ),
             "doctor_notes": doctor_notes,
+            "ap_upcoming": ap_upcoming,
+            "ap_past": ap_past,
+            "ap_kinds": texts.AP_KIND_BUTTONS,
+            "ap_icons": texts.AP_ICONS,
+            "ap_suggestions": [t for kind in texts.AP_KINDS for t in texts.AP_SUGGESTIONS[kind]],
+            "ap_max_day": appointments_service.max_day(now_local.date()),
+            "ap_after_buttons": texts.AP_AFTER_BUTTONS,
             "chart": _chart_payload(measurements, user.timezone),
             "chart_zones": CHART_ZONES,
             "days": days,
@@ -1188,6 +1205,159 @@ def create_app(
         await medications_service.delete_medication(db, user, medication_id)
         await db.commit()
         return RedirectResponse(url="/?saved=medication#medications", status_code=303)
+
+    # ───────────────────── Визиты и анализы (§6.13, §16.2, 0.5.8) ─────────────────────
+
+    def _appointment_form(form, user: User, kind_required: bool):
+        """Проверить поля формы события; ошибка — None (те же правила, что в боте)."""
+        kind = str(form.get("kind", ""))
+        title = appointments_service.valid_title(str(form.get("title", "")))
+        note = appointments_service.valid_note(str(form.get("note", "")))
+        raw_time = str(form.get("time", "")).strip()
+        hhmm = appointments_service.parse_hhmm(raw_time) if raw_time else None
+        try:
+            day = date.fromisoformat(str(form.get("date", "")))
+        except ValueError:
+            return None
+        if (
+            (kind_required and kind not in texts.AP_KINDS)
+            or title is None
+            or note is None
+            or (raw_time and hhmm is None)
+            or appointments_service.day_problem(user, day) is not None
+            or appointments_service.time_passed(user, day, hhmm)
+        ):
+            return None
+        return kind, title, day, hhmm, note
+
+    async def _owned_appointment(db: AsyncSession, user: User, appointment_id: int):
+        appt = await appointments_service.get_owned(db, user, appointment_id)
+        if appt is None:
+            raise HTTPException(status_code=404)
+        return appt
+
+    def _ap_redirect(kind: str) -> Response:
+        if kind == "saved":
+            return RedirectResponse(url="/?saved=appointment#appointments", status_code=303)
+        return RedirectResponse(url=f"/?error={kind}#appointments", status_code=303)
+
+    @app.post("/appointments")
+    async def appointment_add(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Добавить визит, анализы или обследование (§16.2); лимит — 30 «Скоро»."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        fields = _appointment_form(form, user, kind_required=True)
+        if fields is None:
+            return _ap_redirect("appointment")
+        kind, title, day, hhmm, note = fields
+        try:
+            await appointments_service.create(db, user, kind, title, day, hhmm, note)
+        except appointments_service.LimitReached:
+            return _ap_redirect("appointment_limit")
+        return _ap_redirect("saved")
+
+    @app.post("/appointments/{appointment_id}")
+    async def appointment_update(
+        appointment_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Изменить событие «Скоро»: название, дату, время, заметку (смена даты/времени — флаги заново)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        appt = await _owned_appointment(db, user, appointment_id)
+        fields = _appointment_form(form, user, kind_required=False)
+        if fields is None or not appointments_service.is_upcoming(appt, appointments_service.today(user)):
+            return _ap_redirect("appointment")
+        _, title, day, hhmm, note = fields
+        if (day, hhmm) != (appt.starts_on, appt.starts_at):
+            await appointments_service.reschedule(db, user, appt, day, hhmm)
+        await appointments_service.set_title(db, appt, title)
+        await appointments_service.set_note(db, appt, note)
+        return _ap_redirect("saved")
+
+    @app.post("/appointments/{appointment_id}/cancel")
+    async def appointment_cancel(
+        appointment_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        appt = await _owned_appointment(db, user, appointment_id)
+        if not appointments_service.is_upcoming(appt, appointments_service.today(user)):
+            return _ap_redirect("appointment")
+        await appointments_service.set_status(db, appt, "cancelled")
+        return _ap_redirect("saved")
+
+    @app.post("/appointments/{appointment_id}/status")
+    async def appointment_status(
+        appointment_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """«Был(а)» / «Не был(а)» у события, которое ждёт отметки (Н2)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        appt = await _owned_appointment(db, user, appointment_id)
+        status = str(form.get("status", ""))
+        if status not in ("done", "missed") or not appointments_service.awaiting_answer(
+            appt, appointments_service.today(user)
+        ):
+            return _ap_redirect("appointment")
+        await appointments_service.set_status(db, appt, status)
+        return _ap_redirect("saved")
+
+    @app.post("/appointments/{appointment_id}/moved")
+    async def appointment_moved(
+        appointment_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """«Перенесли на…» после даты: прежняя → `moved`, новая `planned` (Н1)."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        appt = await _owned_appointment(db, user, appointment_id)
+        merged = {"title": appt.title, "note": appt.note, "date": form.get("date", ""), "time": form.get("time", "")}
+        fields = _appointment_form(merged, user, kind_required=False)
+        if fields is None or not appointments_service.awaiting_answer(appt, appointments_service.today(user)):
+            return _ap_redirect("appointment")
+        _, _, day, hhmm, _ = fields
+        try:
+            created = await appointments_service.moved_after(db, user, appt, day, hhmm)
+        except appointments_service.LimitReached:
+            await db.rollback()
+            return _ap_redirect("appointment_limit")
+        if created is None:
+            return _ap_redirect("appointment")
+        return _ap_redirect("saved")
+
+    @app.post("/appointments/{appointment_id}/delete")
+    async def appointment_delete(
+        appointment_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        await _owned_appointment(db, user, appointment_id)
+        await appointments_service.remove(db, user, appointment_id)
+        return _ap_redirect("saved")
 
     # ───────────────────── Записи измерений ─────────────────────
 

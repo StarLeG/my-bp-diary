@@ -10,7 +10,7 @@ middleware: параллельные сохранения, двойной тап
 from __future__ import annotations
 
 import asyncio
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 import pytest
 import pytest_asyncio
@@ -1199,3 +1199,53 @@ class TestFollowupAnswerRace:
         )
         assert sorted(results) == [False, True]
         assert len(sent) == 1
+
+
+class TestAppointmentsRaces:
+    """Визиты (§6.13, §7.2): двойной тик — одно уведомление; лимит 30 под гонкой."""
+
+    async def test_parallel_ticks_send_once(self, session_factory, user: DbUser) -> None:
+        from bot.services import appointments as ap
+
+        moment = datetime(2026, 11, 11, 17, 1, tzinfo=timezone.utc)
+        async with session_factory() as session:
+            db_user = await session.get(DbUser, user.id)
+            await ap.create(session, db_user, "doctor", "Кардиолог", date(2026, 11, 12), "10:30",
+                            now=moment - timedelta(hours=8))
+            await session.commit()
+        sent = []
+
+        async def sender(telegram_id, text, markup):
+            sent.append(text)
+            return 1
+
+        results = await asyncio.gather(*(
+            ap.deliver_due(session_factory, sender, lambda *a: None, None, now=moment) for _ in range(3)
+        ))
+        assert sum(results) == 1 and len(sent) == 1
+
+    async def test_parallel_adds_respect_limit(self, session_factory, user: DbUser) -> None:
+        from bot.services import appointments as ap
+
+        moment = datetime(2026, 11, 11, 9, 0, tzinfo=timezone.utc)
+        async with session_factory() as session:
+            db_user = await session.get(DbUser, user.id)
+            for index in range(ap.UPCOMING_LIMIT - 1):
+                await ap.create(session, db_user, "lab", f"А{index}", date(2026, 12, 1), None, now=moment)
+            await session.commit()
+
+        async def one(index: int) -> bool:
+            async with session_factory() as session:
+                db_user = await session.get(DbUser, user.id)
+                try:
+                    await ap.create(session, db_user, "lab", f"Б{index}", date(2026, 12, 2), None, now=moment)
+                except ap.LimitReached:
+                    return False
+                await session.commit()
+                return True
+
+        results = await asyncio.gather(*(one(i) for i in range(4)))
+        assert results.count(True) == 1
+        async with session_factory() as session:
+            db_user = await session.get(DbUser, user.id)
+            assert await ap.count_upcoming(session, db_user, date(2026, 11, 11)) == ap.UPCOMING_LIMIT

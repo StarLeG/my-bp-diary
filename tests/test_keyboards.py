@@ -11,7 +11,7 @@ from bot import keyboards, texts
 from bot.models import Medication
 
 #: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
-KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm"}
+KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm", "ap"}
 
 CALLBACK_RE = re.compile(r"^(?P<area>[a-z]+):(?P<action>[a-z0-9_-]+)(?::(?P<value>.*))?$")
 
@@ -420,6 +420,7 @@ class TestMainMenuKeyboards:
         assert data == {
             "menu:measure",
             "menu:diary",
+            "ap:list",
             "menu:stats",
             "menu:settings",
             "menu:cabinet",

@@ -483,24 +483,27 @@ async def cb_send_report(
     Перешлите её ему: [ссылка]». Без связи с врачом — подсказка добавить;
     отзывавшаяся связь — предложение добавить врача заново.
     """
-    settings = get_settings()
-    if not settings.cabinet_button_visible:
-        text, markup = texts.DOCTOR_WEB_DISABLED, keyboards.back_to_menu()
-    else:
-        user = await get_or_create_user(session, callback.from_user.id)
-        links = await links_for_patient(session, user.id)
-        active = [(link, doctor) for link, doctor in links if link.status != "revoked"]
-        if not active:
-            text = (
-                texts.DOCTOR_REPORT_REVOKED if links else texts.DOCTOR_REPORT_NO_LINK
-            )
-            markup = keyboards.back_to_menu()
-        else:
-            _, doctor = active[0]
-            link = make_doctor_link(settings, doctor.id, user.id)
-            text = await _report_text(session, settings, user.id, doctor, callback, link, bot)
-            markup = keyboards.back_to_menu()
+    text = await report_text(session, callback, bot)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        text, reply_markup=markup, link_preview_options=keyboards.NO_LINK_PREVIEW
+        text, reply_markup=keyboards.back_to_menu(), link_preview_options=keyboards.NO_LINK_PREVIEW
     )
     await callback.answer()
+
+
+async def report_text(session: AsyncSession, callback: CallbackQuery, bot: Bot) -> str:
+    """Текст «Отправить отчет» (§21): ссылка врачу и пациенту или подсказка.
+
+    Общий для главного меню и кнопки «Отправить врачу» в уведомлении о
+    визите (§6.13, 0.5.8).
+    """
+    settings = get_settings()
+    if not settings.cabinet_button_visible:
+        return texts.DOCTOR_WEB_DISABLED
+    user = await get_or_create_user(session, callback.from_user.id)
+    links = await links_for_patient(session, user.id)
+    active = [(link, doctor) for link, doctor in links if link.status != "revoked"]
+    if not active:
+        return texts.DOCTOR_REPORT_REVOKED if links else texts.DOCTOR_REPORT_NO_LINK
+    _, doctor = active[0]
+    link = make_doctor_link(settings, doctor.id, user.id)
+    return await _report_text(session, settings, user.id, doctor, callback, link, bot)

@@ -252,6 +252,36 @@ class QaDb:
             "SELECT * FROM reminders WHERE user_id = ? AND type = ?", (user["id"], slot)
         ).fetchone()
 
+    def appointments(self, telegram_id: int) -> list[sqlite3.Row]:
+        """События «Визиты и анализы» пользователя (§6.13), по id."""
+        user = self.user(telegram_id)
+        if user is None:
+            return []
+        return self._conn.execute(
+            "SELECT * FROM appointments WHERE user_id = ? ORDER BY id", (user["id"],)
+        ).fetchall()
+
+    def add_appointment(
+        self, telegram_id: int, starts_on: str, starts_at: str | None, title: str = "QA-Кардиолог",
+        kind: str = "doctor",
+    ) -> int:
+        """Событие напрямую в БД стенда; флаги уведомлений — NULL (тик решит сам)."""
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        cursor = self._conn.execute(
+            "INSERT INTO appointments (user_id, kind, title, starts_on, starts_at, note, status, created_at)"
+            " VALUES (?, ?, ?, ?, ?, '', 'planned', ?)",
+            (user["id"], kind, title, starts_on, starts_at, time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def delete_appointments(self, telegram_id: int) -> None:
+        user = self.user(telegram_id)
+        if user is not None:
+            self._conn.execute("DELETE FROM appointments WHERE user_id = ?", (user["id"],))
+            self._conn.commit()
+
     def ensure_patient_consents(self, telegram_id: int) -> None:
         """Согласия пациента для сценария (§6.11): основное и на врачей активных связей.
 

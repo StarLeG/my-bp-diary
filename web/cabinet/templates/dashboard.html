@@ -47,6 +47,10 @@
       <p class="alert alert-error">Не удалось сохранить измерение: проверьте дату, время и значения.</p>
     {% elif error == "duplicate" %}
       <p class="alert alert-error">Это давление уже записано.</p>
+    {% elif error == "appointment" %}
+      <p class="alert alert-error">Проверьте название, дату и время.</p>
+    {% elif error == "appointment_limit" %}
+      <p class="alert alert-error">Запланировано уже 30 событий. Удалите ненужные, чтобы добавить новое.</p>
     {% elif error == "medication_missing" %}
       <p class="alert alert-error">Лекарство не найдено.</p>
     {% elif saved == "profile" %}
@@ -55,6 +59,8 @@
       <p class="alert alert-ok">Лекарства обновлены.</p>
     {% elif saved == "reminder" %}
       <p class="alert alert-ok">Напоминания сохранены.</p>
+    {% elif saved == "appointment" %}
+      <p class="alert alert-ok">Визиты и анализы обновлены.</p>
     {% elif saved == "measurement" %}
       <p class="alert alert-ok">Запись сохранена.</p>
     {% endif %}
@@ -535,6 +541,130 @@
         </fieldset>
         <button type="submit" class="btn">Добавить</button>
       </form>
+    </section>
+
+    <!-- ── Визиты и анализы (§6.13, 0.5.8) ── -->
+    <section class="card" id="appointments">
+      <h2>Визиты и анализы</h2>
+      <h3>Скоро</h3>
+      {% if not ap_upcoming %}
+        <p>Пока ничего не запланировано. Добавьте визит к врачу, анализы или обследование — бот напомнит заранее.</p>
+      {% else %}
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Дата</th><th>Время</th><th>Вид</th><th>Название</th><th>Заметка</th><th></th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for ap in ap_upcoming %}
+                <tr>
+                  <td><input form="ap-edit-{{ ap.id }}" type="date" name="date" value="{{ ap.starts_on.isoformat() }}"
+                             min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required></td>
+                  <td><input form="ap-edit-{{ ap.id }}" type="time" name="time" value="{{ ap.starts_at or '' }}"></td>
+                  <td>{{ ap_kinds[ap.kind] }}</td>
+                  <td><input form="ap-edit-{{ ap.id }}" type="text" name="title" value="{{ ap.title }}" maxlength="60"
+                             list="ap-suggestions" required></td>
+                  <td><input form="ap-edit-{{ ap.id }}" type="text" name="note" value="{{ ap.note }}" maxlength="200"></td>
+                  <td class="actions">
+                    <form id="ap-edit-{{ ap.id }}" method="post" action="/appointments/{{ ap.id }}" class="inline">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-ghost">✏️ Сохранить</button>
+                    </form>
+                    <form method="post" action="/appointments/{{ ap.id }}/cancel" class="inline"
+                          onsubmit="return confirm('Отменить: {{ ap.title }} — {{ ap.starts_on.strftime('%d.%m') }}?');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-ghost">Отменить</button>
+                    </form>
+                  </td>
+                  <td class="actions">
+                    <form method="post" action="/appointments/{{ ap.id }}/delete" class="inline"
+                          onsubmit="return confirm('Удалить «{{ ap.title }} — {{ ap.starts_on.strftime('%d.%m') }}»? Это нельзя отменить.');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-danger">🗑</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
+      <datalist id="ap-suggestions">
+        {% for title in ap_suggestions %}<option value="{{ title }}">{% endfor %}
+      </datalist>
+
+      <h3>➕ Добавить</h3>
+      <form method="post" action="/appointments" class="stack form-narrow">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <label>
+          Вид
+          <select name="kind">
+            {% for kind, label in ap_kinds.items() %}<option value="{{ kind }}">{{ label }}</option>{% endfor %}
+          </select>
+        </label>
+        <label>
+          Название
+          <input type="text" name="title" maxlength="60" list="ap-suggestions" required placeholder="Например: Кардиолог">
+        </label>
+        <label>
+          Дата
+          <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
+        </label>
+        <label>
+          Время (необязательно)
+          <input type="time" name="time">
+        </label>
+        <label>
+          Заметка (необязательно)
+          <input type="text" name="note" maxlength="200" placeholder="Адрес, кабинет, что взять с собой">
+        </label>
+        <button type="submit" class="btn">Добавить</button>
+      </form>
+
+      {% if ap_past %}
+        <h3>Прошедшие</h3>
+        <div class="table-scroll">
+          <table>
+            <thead>
+              <tr><th>Дата</th><th>Время</th><th>Вид</th><th>Название</th><th>Статус</th><th></th><th></th></tr>
+            </thead>
+            <tbody>
+              {% for ap, status, waiting in ap_past %}
+                <tr>
+                  <td>{{ ap.starts_on.strftime('%d.%m.%Y') }}</td>
+                  <td>{{ ap.starts_at or '—' }}</td>
+                  <td>{{ ap_kinds[ap.kind] }}</td>
+                  <td>{{ ap.title }}{% if ap.note %}<br><span class="muted">{{ ap.note }}</span>{% endif %}</td>
+                  <td>{{ status }}</td>
+                  <td class="actions">
+                    {% if waiting %}
+                      <form method="post" action="/appointments/{{ ap.id }}/status" class="inline">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        <button type="submit" name="status" value="done" class="btn btn-ghost">{{ ap_after_buttons[ap.kind][0] }}</button>
+                        <button type="submit" name="status" value="missed" class="btn btn-ghost">{{ ap_after_buttons[ap.kind][2] }}</button>
+                      </form>
+                      <form method="post" action="/appointments/{{ ap.id }}/moved" class="inline">
+                        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                        Перенесли на
+                        <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
+                        <input type="time" name="time">
+                        <button type="submit" class="btn btn-ghost">Сохранить</button>
+                      </form>
+                    {% endif %}
+                  </td>
+                  <td class="actions">
+                    <form method="post" action="/appointments/{{ ap.id }}/delete" class="inline"
+                          onsubmit="return confirm('Удалить «{{ ap.title }} — {{ ap.starts_on.strftime('%d.%m') }}»? Это нельзя отменить.');">
+                      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+                      <button type="submit" class="btn btn-danger">🗑</button>
+                    </form>
+                  </td>
+                </tr>
+              {% endfor %}
+            </tbody>
+          </table>
+        </div>
+      {% endif %}
     </section>
 
     <!-- ── Напоминания ── -->

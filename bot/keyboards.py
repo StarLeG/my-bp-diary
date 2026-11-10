@@ -95,6 +95,7 @@ def main_menu(is_doctor: bool = False) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
     builder.row(InlineKeyboardButton(text=texts.BTN_DIARY, callback_data="menu:diary"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_APPOINTMENTS, callback_data="ap:list"))
     builder.row(InlineKeyboardButton(text=texts.BTN_STATS, callback_data="menu:stats"))
     builder.row(InlineKeyboardButton(text=texts.BTN_SETTINGS, callback_data="menu:settings"))
     builder.row(InlineKeyboardButton(text=texts.BTN_CABINET, callback_data="menu:cabinet"))
@@ -1315,4 +1316,193 @@ def profile_prompt_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_FILL, callback_data="prof:edit"))
     builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_LATER, callback_data="prof:later"))
+    return builder.as_markup()
+
+
+# ─────────────────── Визиты и анализы (SPEC.md, §6.13, 0.5.8) ───────────────────
+
+
+def _btn(text: str, data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data)
+
+
+def ap_list_kb(upcoming: Sequence[tuple[int, str]], has_past: bool) -> InlineKeyboardMarkup:
+    """Список: кнопка на событие «Скоро», «➕ Добавить», «🗂 Прошедшие», «В меню»."""
+    builder = InlineKeyboardBuilder()
+    for appointment_id, label in upcoming:
+        builder.row(_btn(label, f"ap:open:{appointment_id}"))
+    builder.row(_btn(texts.BTN_AP_ADD, "ap:add"))
+    if has_past:
+        builder.row(_btn(texts.BTN_AP_PAST, "ap:past"))
+    builder.row(_btn(texts.BTN_IN_MENU, "menu:back"))
+    return builder.as_markup()
+
+
+def ap_past_kb(items: Sequence[tuple[int, str]]) -> InlineKeyboardMarkup:
+    """«Прошедшие»: кнопка на событие и «Назад» к списку."""
+    builder = InlineKeyboardBuilder()
+    for appointment_id, label in items:
+        builder.row(_btn(label, f"ap:open:{appointment_id}"))
+    builder.row(_btn(texts.BTN_BACK, "ap:list"))
+    return builder.as_markup()
+
+
+def ap_kind_kb() -> InlineKeyboardMarkup:
+    """Шаг 1: тип события."""
+    builder = InlineKeyboardBuilder()
+    for kind in texts.AP_KINDS:
+        builder.row(_btn(texts.AP_KIND_BUTTONS[kind], f"ap:kind:{kind}"))
+    builder.row(_btn(texts.BTN_BACK, "ap:list"))
+    return builder.as_markup()
+
+
+def ap_title_kb(kind: str, back: str = "ap:add") -> InlineKeyboardMarkup:
+    """Шаг 2: подсказки по две в строке, «Другой…», «Назад»."""
+    builder = InlineKeyboardBuilder()
+    buttons = [
+        _btn(title, f"ap:title:{kind}:{index}")
+        for index, title in enumerate(texts.AP_SUGGESTIONS[kind])
+    ]
+    for start in range(0, len(buttons), 2):
+        builder.row(*buttons[start : start + 2])
+    builder.row(_btn(texts.BTN_AP_OTHER_TITLE, "ap:title:other"))
+    builder.row(_btn(texts.BTN_BACK, back))
+    return builder.as_markup()
+
+
+def ap_calendar_kb(year: int, month: int, today: date, last: date, back: str) -> InlineKeyboardMarkup:
+    """Шаг 3: календарь дат от `today` до `last`, прочие дни — «·» (§6.13)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_noop(f"{texts.STATS_CAL_MONTHS[month - 1]} {year}"))
+    builder.row(*(_noop(name) for name in texts.STATS_CAL_WEEKDAYS))
+    for week in calendar.Calendar(firstweekday=0).monthdayscalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(_noop())
+                continue
+            current = date(year, month, day)
+            if current < today or current > last:
+                row.append(_noop("·"))
+            else:
+                row.append(_btn(str(day), f"ap:day:{current:%Y%m%d}"))
+        builder.row(*row)
+    nav = []
+    if (year, month) > (today.year, today.month):
+        prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
+        nav.append(_btn("◀", f"ap:cal:{prev_year:04d}{prev_month:02d}"))
+    if (year, month) < (last.year, last.month):
+        next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
+        nav.append(_btn("▶", f"ap:cal:{next_year:04d}{next_month:02d}"))
+    builder.row(*nav)  # хотя бы одна стрелка есть всегда: «▶» до месяца сегодня + 2 года
+    builder.row(_btn(texts.BTN_BACK, back))
+    return builder.as_markup()
+
+
+def ap_time_kb(back: str) -> InlineKeyboardMarkup:
+    """Шаг 4: 07:00…18:00 по 4, «Другое время», «Без времени», «Назад»."""
+    builder = InlineKeyboardBuilder()
+    hours = [_btn(f"{hour:02d}:00", f"ap:time:{hour:02d}00") for hour in range(7, 19)]
+    for start in range(0, len(hours), 4):
+        builder.row(*hours[start : start + 4])
+    builder.row(_btn(texts.BTN_AP_TIME_OTHER, "ap:time:other"))
+    builder.row(_btn(texts.BTN_AP_NO_TIME, "ap:time:none"))
+    builder.row(_btn(texts.BTN_BACK, back))
+    return builder.as_markup()
+
+
+def ap_note_kb(back: str, clear_id: Optional[int] = None) -> InlineKeyboardMarkup:
+    """Шаг 5: «Пропустить» (при правке заполненной — ещё «Убрать заметку»), «Назад»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(texts.BTN_AP_SKIP, "ap:note:skip"))
+    if clear_id is not None:
+        builder.row(_btn(texts.BTN_AP_NOTE_CLEAR, f"ap:edit:{clear_id}:note:clear"))
+    builder.row(_btn(texts.BTN_BACK, back))
+    return builder.as_markup()
+
+
+def ap_back_kb() -> InlineKeyboardMarkup:
+    """Только «Назад» — под приглашением свободного ввода (название, время)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(texts.BTN_BACK, "ap:back"))
+    return builder.as_markup()
+
+
+def ap_done_kb() -> InlineKeyboardMarkup:
+    """«📅 К списку» / «В меню»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(texts.BTN_AP_LIST, "ap:list"), _btn(texts.BTN_IN_MENU, "menu:back"))
+    return builder.as_markup()
+
+
+def ap_after_kb(appointment_id: int, kind: str) -> InlineKeyboardMarkup:
+    """«✓ Был(а)» / «Перенёс(ла)» / «Не был(а)» (у анализов — «Сдал(а)»), §6.13."""
+    done, moved, missed = texts.AP_AFTER_BUTTONS[kind]
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(done, f"ap:after:{appointment_id}:done"))
+    builder.row(
+        _btn(moved, f"ap:after:{appointment_id}:moved"),
+        _btn(missed, f"ap:after:{appointment_id}:missed"),
+    )
+    return builder.as_markup()
+
+
+def ap_notice_kb(appointment_id: int, kind: str, notice: str, with_doctor: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки уведомления (§6.13, В9, В12); «Как прошёл визит?» — `ap_after_kb`."""
+    if notice == "after":
+        return ap_after_kb(appointment_id, kind)
+    builder = InlineKeyboardBuilder()
+    if kind == "doctor":
+        top = [_btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}")]
+        if with_doctor:
+            top.append(_btn(texts.BTN_AP_SEND, f"ap:send:{appointment_id}"))
+        builder.row(*top)
+    builder.row(_btn(texts.BTN_AP_SEEN, f"ap:seen:{appointment_id}"))
+    builder.row(
+        _btn(texts.BTN_AP_MOVE, f"ap:move:{appointment_id}"),
+        _btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"),
+    )
+    return builder.as_markup()
+
+
+def ap_card_kb(appointment_id: int, kind: str, state: str, back: str) -> InlineKeyboardMarkup:
+    """Карточка: `upcoming` — отчёт, правка, отмена; `waiting` — ответ; дальше — «Удалить», «Назад»."""
+    builder = InlineKeyboardBuilder()
+    if state == "upcoming":
+        if kind == "doctor":
+            builder.row(_btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}"))
+        builder.row(_btn(texts.BTN_AP_EDIT, f"ap:edit:{appointment_id}"))
+        builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
+    elif state == "waiting":
+        for row in ap_after_kb(appointment_id, kind).inline_keyboard:
+            builder.row(*row)
+    builder.row(_btn(texts.BTN_AP_DELETE, f"ap:del:{appointment_id}"))
+    builder.row(_btn(texts.BTN_BACK, back))
+    return builder.as_markup()
+
+
+def ap_edit_kb(appointment_id: int) -> InlineKeyboardMarkup:
+    """«Что изменить?»: дата и время / название / заметка (Н4)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(texts.BTN_AP_EDIT_WHEN, f"ap:edit:{appointment_id}:when"))
+    builder.row(_btn(texts.BTN_AP_EDIT_TITLE, f"ap:edit:{appointment_id}:title"))
+    builder.row(_btn(texts.BTN_AP_EDIT_NOTE, f"ap:edit:{appointment_id}:note"))
+    builder.row(_btn(texts.BTN_BACK, f"ap:open:{appointment_id}"))
+    return builder.as_markup()
+
+
+def ap_confirm_kb(yes_text: str, yes_data: str, no_data: str) -> InlineKeyboardMarkup:
+    """Подтверждение: «Да, …» / «Нет»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(yes_text, yes_data), _btn(texts.BTN_AP_NO, no_data))
+    return builder.as_markup()
+
+
+def ap_next_kb(appointment_id: int) -> InlineKeyboardMarkup:
+    """«Записать следующий?» — через 1 / 3 / 6 / 12 месяцев, «Не нужно» (В11)."""
+    builder = InlineKeyboardBuilder()
+    choices = [_btn(label, f"ap:next:{appointment_id}:{months}") for months, label in texts.AP_NEXT_BUTTONS]
+    builder.row(*choices[:2])
+    builder.row(*choices[2:4])
+    builder.row(choices[4])
     return builder.as_markup()

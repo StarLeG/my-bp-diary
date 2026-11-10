@@ -552,3 +552,49 @@ class Consent(Base):
         ),
         Index("ix_consents_doctor", "doctor_id"),
     )
+
+
+class Appointment(Base):
+    """Визит к врачу, анализы или обследование (SPEC.md, §4.16, §6.13; 0.5.8).
+
+    Дата и время — **локальные** (`users.timezone`): моменты уведомлений
+    считаются тиком в момент проверки, смена пояса пересчитывает их сама.
+    Флаги `sent_*_at` — уведомление обработано (отправлено или пропущено);
+    захват — `UPDATE … WHERE sent_*_at IS NULL`. «Без отметки» — не статус:
+    `planned` больше 3 дней после даты. Удаляется вместе с пациентом (§19).
+    """
+
+    __tablename__ = "appointments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    kind: Mapped[str] = mapped_column(String(8), nullable=False)
+    title: Mapped[str] = mapped_column(String(60), nullable=False)
+    starts_on: Mapped[date] = mapped_column(Date, nullable=False)
+    starts_at: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
+    note: Mapped[str] = mapped_column(
+        String(200), nullable=False, default="", server_default=text("''")
+    )
+    status: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="planned", server_default=text("'planned'")
+    )
+    sent_eve_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    sent_soon_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    sent_morning_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    sent_after_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    last_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        CheckConstraint("kind IN ('doctor', 'lab', 'exam')", name="ck_appointments_kind"),
+        CheckConstraint(
+            "status IN ('planned', 'done', 'moved', 'missed', 'cancelled')",
+            name="ck_appointments_status",
+        ),
+        CheckConstraint("length(title) BETWEEN 1 AND 60", name="ck_appointments_title"),
+        CheckConstraint("length(note) <= 200", name="ck_appointments_note"),
+        Index("ix_appointments_user_day", "user_id", "starts_on"),
+        Index("ix_appointments_status_day", "status", "starts_on"),
+    )

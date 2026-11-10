@@ -29,6 +29,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot.models import Measurement, Medication, Reminder, User
+from bot.services import appointments as appointments_service
 from bot.services import consent as consent_service
 from bot.services import profile as profile_service
 
@@ -120,6 +121,9 @@ class DbStats:
 
     profiles: int = 0
     """Сколько пациентов заполнили данные для врача (§18.2, §6.12) — только счётчик."""
+
+    appointments: int = 0
+    """Запланированных визитов и анализов (§18.2, 0.5.8) — только `COUNT(*)`."""
 
 
 @dataclass(frozen=True)
@@ -269,6 +273,7 @@ class AdminService:
             ).scalar_one()
             consented = await consent_service.count_with_processing(session)
             profiles = await profile_service.count_filled(session)
+            appointments = await appointments_service.count_planned(session)
             slot_rows = (
                 await session.execute(
                     select(Reminder.type, func.count())
@@ -290,6 +295,7 @@ class AdminService:
             slots_enabled=slots_enabled,
             consented=consented,
             profiles=profiles,
+            appointments=appointments,
         )
 
     @staticmethod

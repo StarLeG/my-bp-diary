@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 7
+                assert version == SCHEMA_VERSION == 8
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -385,7 +385,7 @@ class TestMigrateConsents:
                 tables = {r[0] for r in (await conn.exec_driver_sql(
                     "SELECT name FROM sqlite_master WHERE type='table'")).all()}
                 assert "consents" in tables
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 7
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 8
         finally:
             await engine.dispose()
 
@@ -431,6 +431,46 @@ class TestMigrateReminders:
                 assert tuple(urow) == (1, None)
                 with pytest.raises(Exception):
                     await conn.exec_driver_sql("UPDATE reminders SET mode = 'zzz'")
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 7
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 8
+        finally:
+            await engine.dispose()
+
+
+class TestMigrateAppointments:
+    """Поколение 8 (0.5.8): таблица `appointments` в старой БД (§4.16)."""
+
+    async def test_table_created_in_old_db(self, tmp_path) -> None:
+        engine = create_engine(str(tmp_path / "gen7.sqlite3"))
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL UNIQUE,"
+                    " timezone VARCHAR(64) NOT NULL, target_systolic INTEGER NOT NULL,"
+                    " target_diastolic INTEGER NOT NULL, med_remeasure_delay INTEGER,"
+                    " onboarded BOOLEAN NOT NULL, last_support_shown_at DATETIME,"
+                    " created_at DATETIME NOT NULL)"
+                )
+                await conn.exec_driver_sql("PRAGMA user_version = 7")
+            await init_db(engine)
+            async with engine.connect() as conn:
+                tables = {r[0] for r in (await conn.exec_driver_sql("SELECT name FROM sqlite_master WHERE type='table'")).all()}
+                assert "appointments" in tables
+                indexes = {r[1] for r in (await conn.exec_driver_sql("PRAGMA index_list(appointments)")).all()}
+                assert {"ix_appointments_user_day", "ix_appointments_status_day"} <= indexes
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 8
+                await conn.exec_driver_sql(
+                    "INSERT INTO users (id, telegram_id, timezone, target_systolic, target_diastolic, onboarded, created_at)"
+                    " VALUES (1, 111, 'Europe/Minsk', 130, 80, 1, '2026-01-01 00:00:00')"
+                )
+                for bad in ("kind = 'dentist'", "status = 'lost'", "title = ''"):
+                    column, value = bad.split(" = ")
+                    values = {"kind": "'doctor'", "status": "'planned'", "title": "'Кардиолог'"}
+                    values[column] = value
+                    with pytest.raises(Exception):
+                        await conn.exec_driver_sql(
+                            "INSERT INTO appointments (user_id, kind, title, starts_on, status, note, created_at)"
+                            f" VALUES (1, {values['kind']}, {values['title']}, '2026-11-20', {values['status']}, '',"
+                            " '2026-11-11 00:00:00')"
+                        )
         finally:
             await engine.dispose()

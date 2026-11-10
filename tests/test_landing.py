@@ -81,6 +81,7 @@ class TestSections:
             "docs-start",
             "docs-record",
             "docs-reminders",
+            "docs-visits",
             "docs-meds",
             "docs-stats",
             "docs-cabinet",

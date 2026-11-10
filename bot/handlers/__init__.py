@@ -13,6 +13,7 @@ from bot import keyboards, texts
 from bot.config import admin_ids_from_env
 from bot.handlers import (
     admin,
+    appointments,
     consent,
     diary,
     doctor,
@@ -34,6 +35,7 @@ router.include_router(consent.router)
 router.include_router(start.router)
 router.include_router(measure.router)
 router.include_router(diary.router)
+router.include_router(appointments.router)
 router.include_router(stats.router)
 router.include_router(settings.router)
 router.include_router(profile.router)

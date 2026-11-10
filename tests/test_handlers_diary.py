@@ -366,3 +366,23 @@ class TestMarkIntake:
     async def test_cancel_stale(self, session, user, edit, cb_answer) -> None:
         await diary.cb_diary_cancel(make_callback("d:pc:morning:20200101", make_message()), session)
         cb_answer.assert_awaited_once_with(texts.STALE_MESSAGE)
+
+
+
+class TestNearestAppointment:
+    """Строка «📅 Сегодня / Завтра» под лекарствами (§6.4, 0.5.8, В15)."""
+
+    async def test_line_shown(self, session, user, edit, cb_answer) -> None:
+        from datetime import timedelta
+
+        from bot.services import appointments as ap
+
+        tomorrow = datetime.now(ZoneInfo(user.timezone)).date() + timedelta(days=1)
+        await ap.create(session, user, "doctor", "Кардиолог", tomorrow, "10:30")
+        await session.commit()
+        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        assert edit.call_args.args[0].split("\n")[-1] == "📅 Завтра: Кардиолог, 10:30"
+
+    async def test_no_line_without_events(self, session, user, edit, cb_answer) -> None:
+        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        assert "📅" not in edit.call_args.args[0]

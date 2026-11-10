@@ -42,7 +42,8 @@ RETRY_BASE_DELAY = 0.05
 #: 6 — `reminders.last_message_id`: снятие кнопок прежнего напоминания (§4.3, §6.7).
 #: 7 — режим слота, повтор «если не ответил», пауза: `reminders.mode`,
 #:     `reminders.followup_at`, `users.followup_enabled`, `users.reminders_paused_until`.
-SCHEMA_VERSION = 7
+#: 8 — визиты и анализы: таблица `appointments` (§4.16, 0.5.8; `create_all`).
+SCHEMA_VERSION = 8
 
 #: Колонки поколений 4–7 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
 _ADDED_COLUMNS = (

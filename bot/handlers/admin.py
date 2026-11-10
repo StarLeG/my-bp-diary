@@ -80,6 +80,7 @@ def _fmt_stats(stats: DbStats) -> str:
         ),
         texts.ADMIN_STATS_CONSENTED.format(count=stats.consented),
         texts.ADMIN_STATS_PROFILES.format(count=stats.profiles),
+        texts.ADMIN_STATS_APPOINTMENTS.format(count=stats.appointments),
         texts.ADMIN_STATS_CACHE_NOTE,
     ]
     return "\n".join(lines)

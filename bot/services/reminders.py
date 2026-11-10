@@ -925,7 +925,23 @@ class RemindersService:
                     await self._reschedule_overdue_slot(reminder_id)
                 else:
                     await self._deliver(reminder_id, MODE_CATCHUP)
+        await self._appointments_tick()
         return fixed
+
+    async def _appointments_tick(self) -> int:
+        """Уведомления о визитах (§6.13, 0.5.8) — тем же тиком; ошибка не мешает сверке слотов."""
+        from bot.services import appointments as appointments_service
+
+        try:
+            sent = await appointments_service.deliver_due(
+                self._session_factory, self._sender, _appointment_markup, self._clear_markup
+            )
+        except Exception:
+            logger.exception("Ошибка тика уведомлений о визитах")
+            return 0
+        if sent:
+            logger.info("Тик: отправлено уведомлений о визитах: %s", sent)
+        return sent
 
     def schedule_tick(self) -> None:
         """Периодический job тика (раз в минуту, UTC); идемпотентно (`replace_existing`)."""
@@ -1038,6 +1054,11 @@ def bind_service(service: Optional[RemindersService]) -> None:
     """
     global _service
     _service = service
+
+
+def _appointment_markup(appt, notice: str, with_doctor: bool):
+    """Клавиатура уведомления о визите (контракт `appointments.NoticeMarkup`)."""
+    return keyboards.ap_notice_kb(appt.id, appt.kind, notice, with_doctor)
 
 
 async def fire_tick() -> None:

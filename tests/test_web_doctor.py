@@ -931,3 +931,28 @@ class TestDoctorSignIn:
         con.close()
         _login_doctor(client, tg_doctor_id)
         assert "Анна Иванова" in client.get("/doctor").text
+
+
+class TestAppointmentsHidden:
+    """Визиты и анализы пациента врачу не показываются (§21, §6.13, В19)."""
+
+    def test_card_and_exports_without_appointments(self, app_client, settings) -> None:
+        client, user_id, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        _add_measurement(settings, user_id)
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO appointments (user_id, kind, title, starts_on, starts_at, note, status, created_at)"
+            " VALUES (?, 'doctor', 'Секретный эндокринолог', '2030-01-10', '10:00', 'тайная заметка', 'planned',"
+            " '2026-01-01 00:00:00')",
+            (user_id,),
+        )
+        con.commit()
+        con.close()
+        _login_doctor(client, doctor_id)
+        card = client.get(f"/doctor/patient/{user_id}")
+        assert card.status_code == 200
+        assert "Секретный эндокринолог" not in card.text and "тайная заметка" not in card.text
+        assert "appointments" not in card.text
+        csv = client.get(f"/doctor/patient/{user_id}/export.csv")
+        assert "Секретный" not in csv.text
