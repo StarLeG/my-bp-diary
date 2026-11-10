@@ -35,9 +35,11 @@ Pydantic для валидации, python-dotenv для конфига. Код 
 - Не показывать просьбу поддержать/рекламу, пока пользователь не сделал 3 записи давления.
 - В терминах — «поддержать», не «донат».
 - Схема БД: `users` (telegram_id, timezone, target_systolic, target_diastolic,
-  med_remeasure_delay, last_support_shown_at, onboarded), `measurements` (user_id, timestamp,
+  med_remeasure_delay, last_support_shown_at, onboarded, followup_enabled,
+  reminders_paused_until), `measurements` (user_id, timestamp,
   systolic, diastolic, pulse, medication_taken, feeling, note), `reminders` (user_id, type,
-  local_time, next_trigger_time, enabled, last_sent_date, measurement_id), `medications`
+  local_time, next_trigger_time, enabled, last_sent_date, measurement_id, last_message_id,
+  mode: both|meds|pressure, followup_at), `medications`
   (name, dosage, slot; UNIQUE(user_id, name, slot)), `medication_logs` (medication_id,
   timestamp, status: taken|skipped|partial, slot), `measurement_medications`
   (measurement_id, medication_id; UNIQUE(measurement_id, medication_id) — отмеченные
