@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 5
+                assert version == SCHEMA_VERSION == 6
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -385,6 +385,45 @@ class TestMigrateConsents:
                 tables = {r[0] for r in (await conn.exec_driver_sql(
                     "SELECT name FROM sqlite_master WHERE type='table'")).all()}
                 assert "consents" in tables
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 5
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 6
+        finally:
+            await engine.dispose()
+
+
+class TestMigrateReminders:
+    """Поколение 6 (0.5.4): `reminders.last_message_id` (§4.3, §6.7)."""
+
+    async def test_column_added_to_old_db(self, tmp_path) -> None:
+        engine = create_engine(str(tmp_path / "gen5.sqlite3"))
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL UNIQUE,"
+                    " timezone VARCHAR(64) NOT NULL, target_systolic INTEGER NOT NULL,"
+                    " target_diastolic INTEGER NOT NULL, med_remeasure_delay INTEGER,"
+                    " onboarded BOOLEAN NOT NULL, last_support_shown_at DATETIME,"
+                    " created_at DATETIME NOT NULL)"
+                )
+                await conn.exec_driver_sql(
+                    "CREATE TABLE reminders (id INTEGER PRIMARY KEY, user_id INTEGER NOT NULL,"
+                    " type VARCHAR(16) NOT NULL, local_time VARCHAR(5), next_trigger_time DATETIME NOT NULL,"
+                    " enabled BOOLEAN NOT NULL, last_sent_date DATE, measurement_id INTEGER)"
+                )
+                await conn.exec_driver_sql(
+                    "INSERT INTO users VALUES (1, 111, 'Europe/Minsk', 130, 80, 60, 1, NULL,"
+                    " '2026-01-01 00:00:00')"
+                )
+                await conn.exec_driver_sql(
+                    "INSERT INTO reminders VALUES (1, 1, 'morning', '08:00', '2026-11-11 05:00:00', 1, NULL, NULL)"
+                )
+            await init_db(engine)
+            await init_db(engine)  # повторно — без изменений
+            async with engine.connect() as conn:
+                columns = {r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(reminders)")).all()}
+                assert "last_message_id" in columns
+                row = (await conn.exec_driver_sql(
+                    "SELECT type, local_time, last_message_id FROM reminders")).one()
+                assert tuple(row) == ("morning", "08:00", None)
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 6
         finally:
             await engine.dispose()

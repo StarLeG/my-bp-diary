@@ -874,3 +874,200 @@ class TestRemeasureButtonsAfterDelivery:
         slot.enabled = False
         await session.commit()
         assert await svc.snooze(user.id, slot.id) is False
+
+
+# ─────────────────────────── 0.5.4: кнопки, уборка, catch-up ───────────────────────────
+
+
+class FakeTelegram:
+    """Отправка с `message_id` и снятие кнопок (контракты `Sender` / `MarkupClearer`)."""
+
+    def __init__(self, fail_clear: bool = False) -> None:
+        self.sent: list[tuple[int, str, object]] = []
+        self.cleared: list[tuple[int, int]] = []
+        self.fail_clear = fail_clear
+        self.next_id = 100
+
+    async def send(self, telegram_id: int, text: str, markup) -> int:
+        self.sent.append((telegram_id, text, markup))
+        self.next_id += 1
+        return self.next_id
+
+    async def clear(self, telegram_id: int, message_id: int) -> None:
+        if self.fail_clear:
+            raise RuntimeError("Bad Request: message to edit not found")
+        self.cleared.append((telegram_id, message_id))
+
+
+def tg_svc(session_factory, scheduler, fake: FakeTelegram) -> rem.RemindersService:
+    return rem.RemindersService(session_factory, fake.send, scheduler, clear_markup=fake.clear)
+
+
+class TestSlotMessageKeyboardDay:
+    async def test_buttons_carry_local_day(self, session, user, svc, sent) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_SLOT)
+        data = [b.callback_data for row in sent[0][2].inline_keyboard for b in row]
+        key = today_minsk().strftime("%Y%m%d")
+        assert f"rem:snooze:morning:{key}" in data and f"rem:skip:morning:{key}" in data
+
+
+class TestLastMessage:
+    async def test_message_id_saved_and_previous_cleared(self, session, user, session_factory, scheduler) -> None:
+        fake = FakeTelegram()
+        svc = tg_svc(session_factory, scheduler, fake)
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_SLOT)
+        assert (await reload_reminder(session, reminder.id)).last_message_id == 101
+        assert fake.cleared == []  # прежнего сообщения не было
+        await session.execute(
+            update(Reminder).where(Reminder.id == reminder.id)
+            .values(next_trigger_time=now_utc() - timedelta(minutes=1))
+        )
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_SLOT)
+        assert (await reload_reminder(session, reminder.id)).last_message_id == 102
+        assert fake.cleared == [(user.telegram_id, 101)]
+
+    async def test_clear_failure_is_not_fatal(self, session, user, session_factory, scheduler) -> None:
+        fake = FakeTelegram(fail_clear=True)
+        svc = tg_svc(session_factory, scheduler, fake)
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        reminder.last_message_id = 55
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_SLOT) is True
+        assert (await reload_reminder(session, reminder.id)).last_message_id == 101
+        assert len(fake.sent) == 1
+
+    async def test_without_clearer_only_saves(self, session, user, session_factory, scheduler) -> None:
+        fake = FakeTelegram()
+        svc = rem.RemindersService(session_factory, fake.send, scheduler)
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        reminder.last_message_id = 55
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_SLOT)
+        assert (await reload_reminder(session, reminder.id)).last_message_id == 101
+
+    async def test_sender_without_id_keeps_previous(self, session, user, svc) -> None:
+        """Отправка без `message_id` (старый контракт) — прежний id не затирается."""
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(minutes=1))
+        reminder.last_message_id = 55
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_SLOT)
+        assert (await reload_reminder(session, reminder.id)).last_message_id == 55
+
+    async def test_remeasure_has_no_cleanup(self, session, user, session_factory, scheduler) -> None:
+        fake = FakeTelegram()
+        svc = tg_svc(session_factory, scheduler, fake)
+        measurement = await add_measurement(session, user, now_utc())
+        reminder = await make_remeasure(session, user, measurement.id, next_time=now_utc() - timedelta(minutes=1))
+        reminder.last_message_id = 55
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_REMEASURE)
+        assert fake.cleared == []
+
+
+class TestSnoozeResetsLastSent:
+    async def test_slot_snooze_resets(self, session, user, svc) -> None:
+        reminder = await make_slot(session, user, last_sent=today_minsk())
+        await session.commit()
+        assert await svc.snooze_slot(user.id, "morning")
+        row = await reload_reminder(session, reminder.id)
+        assert row.last_sent_date is None
+        assert row.next_trigger_time > now_utc() + timedelta(minutes=29)
+
+    async def test_snooze_slot_missing_or_disabled(self, session, user, svc) -> None:
+        assert await svc.snooze_slot(user.id, "evening") is False
+        await make_slot(session, user, slot="noon", local_time="13:00", enabled=False)
+        await session.commit()
+        assert await svc.snooze_slot(user.id, "noon") is False
+
+    async def test_snooze_slot_other_user(self, session, user, svc) -> None:
+        other = User(telegram_id=222_222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.flush()
+        await make_slot(session, other)
+        await session.commit()
+        assert await svc.snooze_slot(user.id, "morning") is False
+
+    async def test_snoozed_delivered_by_catchup(self, session, user, svc, sent) -> None:
+        """Регресс E5: отложенное, не сработавшее при простое, доставляется при старте."""
+        reminder = await make_slot(session, user, last_sent=today_minsk())
+        await session.commit()
+        assert await svc.snooze_slot(user.id, "morning")
+        await session.execute(
+            update(Reminder).where(Reminder.id == reminder.id)
+            .values(next_trigger_time=now_utc() - timedelta(minutes=10))
+        )
+        await session.commit()
+        assert await svc.startup() == 1
+        assert len(sent) == 1
+
+    async def test_remeasure_snooze_resets(self, session, user, svc) -> None:
+        measurement = await add_measurement(session, user, now_utc())
+        reminder = await make_remeasure(session, user, measurement.id, last_sent=today_minsk())
+        reminder.enabled = False
+        await session.commit()
+        assert await svc.snooze(user.id, reminder.id)
+        assert (await reload_reminder(session, reminder.id)).last_sent_date is None
+
+
+class TestCatchupWindow:
+    async def test_slot_older_than_window_rescheduled_silently(self, session, user, svc, scheduler, sent) -> None:
+        reminder = await make_slot(session, user, next_time=now_utc() - timedelta(hours=7))
+        await session.commit()
+        assert await svc.startup() == 0
+        assert sent == []
+        row = await reload_reminder(session, reminder.id)
+        assert row.next_trigger_time > now_utc()
+        assert scheduler.get_job(f"reminder:{reminder.id}")["args"] == [reminder.id, rem.MODE_SLOT]
+
+    async def test_slot_inside_window_delivered(self, session, user, svc, sent) -> None:
+        await make_slot(session, user, next_time=now_utc() - timedelta(hours=5, minutes=50))
+        await session.commit()
+        assert await svc.startup() == 1
+
+    async def test_remeasure_older_than_window_deleted(self, session, user, svc, sent) -> None:
+        measurement = await add_measurement(session, user, now_utc())
+        reminder = await make_remeasure(session, user, measurement.id, next_time=now_utc() - timedelta(hours=7))
+        await session.commit()
+        assert await svc.startup() == 0
+        assert sent == []
+        assert await reload_reminder(session, reminder.id) is None
+
+    async def test_undelivered_remeasure_deleted_and_new_allowed(self, session, user, svc, sent) -> None:
+        """Регресс E5: застрявший повтор блокировал новые повторы после «Принял всё ✓»."""
+        reminder = Reminder(
+            user_id=user.id, type="med_remeasure", local_time=None,
+            next_trigger_time=now_utc() - timedelta(minutes=20), enabled=True,
+            measurement_id=None, last_sent_date=today_minsk(),
+        )
+        session.add(reminder)
+        await session.commit()
+        assert await svc.startup() == 0
+        assert await reload_reminder(session, reminder.id) is None
+        assert await svc.ensure_remeasure(user.id, None, 60) is True
+
+    async def test_remeasure_without_consent_deleted(self, session, user, svc, sent) -> None:
+        from bot.models import Consent
+
+        await session.execute(
+            update(Consent).where(Consent.user_id == user.id).values(withdrawn_at=now_utc())
+        )
+        measurement = await add_measurement(session, user, now_utc())
+        reminder = await make_remeasure(session, user, measurement.id, next_time=now_utc() - timedelta(minutes=1))
+        await session.commit()
+        assert await svc._deliver(reminder.id, rem.MODE_REMEASURE) is False
+        assert await reload_reminder(session, reminder.id) is None
+        assert sent == []
+
+
+class TestCatchupHelpersMissingRow:
+    async def test_reschedule_missing_row_is_noop(self, svc, scheduler) -> None:
+        await svc._reschedule_overdue_slot(999_999)
+        assert scheduler.jobs == {}
+
+    async def test_drop_missing_remeasure_is_noop(self, svc) -> None:
+        await svc._drop_undelivered_remeasure(999_999)

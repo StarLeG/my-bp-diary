@@ -133,11 +133,18 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
     if scheduler is None:
         scheduler = build_scheduler(settings.db_path)
 
-    async def send(telegram_id: int, text: str, markup: object | None) -> None:
-        """Доставка напоминания (контракт `Sender`)."""
-        await bot.send_message(telegram_id, text, reply_markup=markup)  # type: ignore[arg-type]
+    async def send(telegram_id: int, text: str, markup: object | None) -> int:
+        """Доставка напоминания (контракт `Sender`): `message_id` отправленного."""
+        message = await bot.send_message(telegram_id, text, reply_markup=markup)  # type: ignore[arg-type]
+        return message.message_id
 
-    reminders = RemindersService(session_factory, send, scheduler)
+    async def clear_markup(telegram_id: int, message_id: int) -> None:
+        """Снять кнопки у прежнего напоминания слота (§6.7, 0.5.4)."""
+        await bot.edit_message_reply_markup(
+            chat_id=telegram_id, message_id=message_id, reply_markup=None
+        )
+
+    reminders = RemindersService(session_factory, send, scheduler, clear_markup=clear_markup)
     # Job'ы сериализуются в SQLAlchemyJobStore: точка входа — module-level
     # `fire_reminder`, экземпляр сервиса привязывается явно.
     bind_service(reminders)

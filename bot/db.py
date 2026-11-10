@@ -39,9 +39,10 @@ RETRY_BASE_DELAY = 0.05
 #:     `users.deletion_requested_at`.
 #: 5 — данные пациента (§4.1, §6.12): ФИО, дата рождения, пол, имя из
 #:     Telegram, отметка предложения заполнить.
-SCHEMA_VERSION = 5
+#: 6 — `reminders.last_message_id`: снятие кнопок прежнего напоминания (§4.3, §6.7).
+SCHEMA_VERSION = 6
 
-#: Колонки поколений 4 и 5 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1).
+#: Колонки поколений 4–6 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
 _ADDED_COLUMNS = (
     ("users", "deletion_requested_at", "DATETIME"),
     ("doctors", "consent_version", "VARCHAR(32)"),
@@ -63,6 +64,7 @@ _ADDED_COLUMNS = (
     ),
     ("users", "telegram_name", "VARCHAR(64)"),
     ("users", "profile_prompted_at", "DATETIME"),
+    ("reminders", "last_message_id", "INTEGER"),
 )
 
 T = TypeVar("T")

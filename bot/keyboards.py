@@ -834,52 +834,68 @@ def slots_multiselect_kb(
 # ─────────────────────────── Напоминания (слот-сообщения) ───────────────────────────
 
 
-def slot_message_kb(
-    slot: str, reminder_id: int, has_medications: bool = True
-) -> InlineKeyboardMarkup:
-    """Кнопки слот-сообщения (SPEC.md, раздел 6.7).
+#: Префикс отметки лекарства в списке «Частично…»: по нему читаются отметки (§6.7).
+PARTIAL_MARK = "✓ "
 
-    В callback_data несётся слот и id строки напоминания: «Принял всё ✓» /
-    «Частично…» / «Пропускаю» действуют по слоту, «Через 30 мин» — по строке.
+
+def reminder_day_key(day: date) -> str:
+    """Дата напоминания в callback_data: `ГГГГММДД` (§8, 0.5.4)."""
+    return day.strftime("%Y%m%d")
+
+
+def slot_message_kb(slot: str, day: date, has_medications: bool = True) -> InlineKeyboardMarkup:
+    """Кнопки слот-сообщения (SPEC.md, §6.7, 0.5.4).
+
+    Каждая кнопка несёт слот и дату напоминания (`{д}`): приём пишется за
+    этот день, строка слота находится на сервере по `(users.id, type)`.
     Без лекарств в слоте кнопки «Принял всё ✓» и «Частично…» не показываются.
     """
+    key = f"{slot}:{reminder_day_key(day)}"
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="rem:write"))
     if has_medications:
-        builder.row(
-            InlineKeyboardButton(text=texts.BTN_TAKE_ALL, callback_data=f"rem:all:{slot}")
-        )
-        builder.row(
-            InlineKeyboardButton(text=texts.BTN_PARTIAL, callback_data=f"rem:partial:{slot}")
-        )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_SNOOZE_30, callback_data=f"rem:snooze:{reminder_id}")
-    )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_SKIP_SLOT, callback_data=f"rem:skip:{slot}")
-    )
+        builder.row(InlineKeyboardButton(text=texts.BTN_TAKE_ALL, callback_data=f"rem:all:{key}"))
+        builder.row(InlineKeyboardButton(text=texts.BTN_PARTIAL, callback_data=f"rem:partial:{key}"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_SNOOZE_30, callback_data=f"rem:snooze:{key}"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_SKIP_SLOT, callback_data=f"rem:skip:{key}"))
     return builder.as_markup()
 
 
 def partial_meds_kb(
-    checked: Iterable[int], medications: Sequence[tuple[int, str, str]]
+    slot: str,
+    day: date,
+    checked: Iterable[int],
+    medications: Sequence[tuple[int, str, str]],
 ) -> InlineKeyboardMarkup:
-    """Чекбоксы «Частично…»: ✓ у отмеченных + «Готово».
+    """Список «Частично…» без FSM: отметки — «✓ » в подписях кнопок (§6.7, 0.5.4).
 
     `medications` — кортежи (id, название, дозировка); `checked` — id отмеченных.
     """
+    key = f"{slot}:{reminder_day_key(day)}"
     chosen = set(checked)
     builder = InlineKeyboardBuilder()
     for med_id, name, dosage in medications:
-        mark = "✓ " if med_id in chosen else ""
+        mark = PARTIAL_MARK if med_id in chosen else ""
+        label = f"{name} {dosage}".strip()
         builder.row(
-            InlineKeyboardButton(
-                text=f"{mark}{name} {dosage}", callback_data=f"rem:med:{med_id}"
-            )
+            InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"rem:pt:{key}:{med_id}")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="rem:partial:done"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="rem:partial:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data=f"rem:pd:{key}"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=f"rem:pc:{key}"))
     return builder.as_markup()
+
+
+def partial_checked_ids(markup: Optional[InlineKeyboardMarkup]) -> set[int]:
+    """Id отмеченных лекарств из клавиатуры списка «Частично…» (кнопки с «✓ »)."""
+    checked: set[int] = set()
+    for row in markup.inline_keyboard if markup is not None else []:
+        for button in row:
+            data = button.callback_data or ""
+            if data.startswith("rem:pt:") and button.text.startswith(PARTIAL_MARK):
+                value = data.rsplit(":", 1)[1]
+                if value.isdigit():
+                    checked.add(int(value))
+    return checked
 
 
 def remeasure_kb(reminder_id: int) -> InlineKeyboardMarkup:

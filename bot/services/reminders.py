@@ -18,8 +18,13 @@
   не напоминать» удаляет; при следующей доставке или постановке повтора
   прежние доставленные строки пользователя убираются (не копятся);
 - catch-up при старте: просроченное отправляется один раз, не чаще 1 раза
-  в день на тип (`last_sent_date`); ограничение действует только на catch-up,
-  snooze в тот же день доставляется.
+  в день на тип (`last_sent_date`); «Через 30 мин» сбрасывает `last_sent_date`,
+  поэтому отложенное тоже доставляется. Окно — `CATCHUP_WINDOW` (6 ч): слот
+  старше окна молча переносится, повтор замера старше окна или не доставленный
+  удаляется (включённая строка без job'а заблокировала бы новые повторы);
+- кнопки слот-сообщения несут дату напоминания; `message_id` отправленного
+  слота хранится в `last_message_id`, у прежнего сообщения кнопки снимаются
+  (`clear_markup`) — в чате нет «живых» вчерашних кнопок (§6.7, 0.5.4).
 - точка входа job'а — module-level `fire_reminder`, а не bound method:
   `SQLAlchemyJobStore` сериализует job через `pickle`, а bound method тащит
   весь сервис (включая `_scheduler`) и не сериализуется; экземпляр сервиса
@@ -29,7 +34,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
 from zoneinfo import ZoneInfo
 
@@ -63,8 +68,14 @@ MODE_CATCHUP = "catchup"
 #: Дефолт snooze — «Через 30 мин».
 SNOOZE_MINUTES = 30
 
-#: Отправка готового сообщения: (telegram_id, текст, клавиатура).
-Sender = Callable[[int, str, Optional[object]], Awaitable[None]]
+#: Окно catch-up при старте: просроченное больше чем на столько не отправляется (§6.7).
+CATCHUP_WINDOW = timedelta(hours=6)
+
+#: Отправка готового сообщения: (telegram_id, текст, клавиатура) → message_id или None.
+Sender = Callable[[int, str, Optional[object]], Awaitable[Optional[int]]]
+
+#: Снять кнопки у отправленного сообщения: (telegram_id, message_id).
+MarkupClearer = Callable[[int, int], Awaitable[None]]
 
 _remeasure_lock: Optional[asyncio.Lock] = None
 _remeasure_lock_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -132,10 +143,12 @@ class RemindersService:
         session_factory: async_sessionmaker[AsyncSession],
         sender: Sender,
         scheduler=None,
+        clear_markup: Optional[MarkupClearer] = None,
     ) -> None:
         self._session_factory = session_factory
         self._sender = sender
         self._scheduler = scheduler
+        self._clear_markup = clear_markup
 
     # ─────────────────────────── Вспомогательное ───────────────────────────
 
@@ -336,13 +349,30 @@ class RemindersService:
                     Reminder.user_id == user_id,
                     Reminder.next_trigger_time == reminder.next_trigger_time,
                 )
-                .values(next_trigger_time=new_time, enabled=True)
+                # Отложенное ещё не доставлено: catch-up его доставит (§6.7, 0.5.4).
+                .values(next_trigger_time=new_time, enabled=True, last_sent_date=None)
             )
             await session.commit()
             if result.rowcount == 0:
                 return False
         self._add_job(reminder_id, new_time, MODE_SNOOZE)
         return True
+
+    async def snooze_slot(self, user_id: int, slot: str) -> bool:
+        """«Через 30 мин» слот-сообщения: строка — по `(users.id, type)` (§6.7, 0.5.4)."""
+        async with self._session_factory() as session:
+            reminder_id = (
+                await session.execute(
+                    select(Reminder.id).where(
+                        Reminder.user_id == user_id,
+                        Reminder.type == slot,
+                        Reminder.enabled.is_(True),
+                    )
+                )
+            ).scalar_one_or_none()
+        if reminder_id is None:
+            return False
+        return await self.snooze(user_id, reminder_id)
 
     async def cancel_remeasure(self, user_id: int, reminder_id: int) -> bool:
         """«Больше не напоминать»: удалить строку повтора и снять job."""
@@ -445,6 +475,9 @@ class RemindersService:
                 # Без действующего согласия напоминания не отправляются (§6.11):
                 # слот молча переносится на следующий день, расписание не меняется.
                 if reminder.type == TYPE_REMEASURE:
+                    # Недоставленный повтор не держим включённым без job'а (§6.7).
+                    await session.delete(reminder)
+                    await session.commit()
                     return False
                 next_time = await self._silently_reschedule(session, reminder, user, now)
                 await session.commit()
@@ -517,13 +550,45 @@ class RemindersService:
             reminder_type = reminder.type
             user_id = user.id
             telegram_id = user.telegram_id
+            previous_message_id = reminder.last_message_id
 
-        text, markup = await self._compose(reminder_id, reminder_type, user_id)
-        await self._sender(telegram_id, text, markup)
+        text, markup = await self._compose(reminder_id, reminder_type, user_id, local_today)
+        message_id = await self._sender(telegram_id, text, markup)
 
         if reminder_type != TYPE_REMEASURE:
             self._add_job(reminder.id, next_time, MODE_SLOT)
+            await self._remember_message(reminder_id, telegram_id, message_id, previous_message_id)
         return True
+
+    async def _remember_message(
+        self,
+        reminder_id: int,
+        telegram_id: int,
+        message_id: Optional[int],
+        previous_message_id: Optional[int],
+    ) -> None:
+        """Сохранить `message_id` слота и снять кнопки у прежнего сообщения (§6.7, 0.5.4).
+
+        Ошибки Telegram (сообщение удалено, старше 48 ч, уже без кнопок) — не сбой.
+        """
+        if message_id is not None:
+            async with self._session_factory() as session:
+                await session.execute(
+                    update(Reminder)
+                    .where(Reminder.id == reminder_id)
+                    .values(last_message_id=message_id)
+                )
+                await session.commit()
+        if (
+            previous_message_id is None
+            or previous_message_id == message_id
+            or self._clear_markup is None
+        ):
+            return
+        try:
+            await self._clear_markup(telegram_id, previous_message_id)
+        except Exception:  # noqa: BLE001 — снятие кнопок не должно ломать доставку
+            logger.info("Кнопки прежнего напоминания не сняты (reminder %s)", reminder_id)
 
     async def _silently_reschedule(
         self, session: AsyncSession, reminder: Reminder, user: User, now: datetime
@@ -544,12 +609,12 @@ class RemindersService:
         return next_time
 
     async def _compose(
-        self, reminder_id: int, reminder_type: str, user_id: int
+        self, reminder_id: int, reminder_type: str, user_id: int, day: date
     ) -> tuple[str, object]:
         """Собрать сообщение: слот с лекарствами или напоминание повторить измерение.
 
-        Клавиатуры несут id строки: «Через 30 мин» и «Больше не напоминать»
-        действуют именно по этой строке (§6.7).
+        Повтор замера несёт id строки («Через 30 мин», «Больше не напоминать»);
+        слот — слот и дату напоминания `day` (локальную, §6.7, 0.5.4).
         """
         async with self._session_factory() as session:
             if reminder_type == TYPE_REMEASURE:
@@ -561,7 +626,7 @@ class RemindersService:
             lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
             return (
                 texts.fmt_slot_message(reminder_type, lines),
-                keyboards.slot_message_kb(reminder_type, reminder_id, has_medications=bool(meds)),
+                keyboards.slot_message_kb(reminder_type, day, has_medications=bool(meds)),
             )
 
     # ─────────────────────────── Catch-up при старте ───────────────────────────
@@ -583,12 +648,49 @@ class RemindersService:
             )
         for reminder in reminders:
             if reminder.next_trigger_time <= now:
-                if await self._deliver(reminder.id, MODE_CATCHUP):
+                overdue = now - reminder.next_trigger_time > CATCHUP_WINDOW
+                if overdue and reminder.type != TYPE_REMEASURE:
+                    await self._reschedule_overdue_slot(reminder.id)
+                    continue
+                if not overdue and await self._deliver(reminder.id, MODE_CATCHUP):
                     sent += 1
+                elif reminder.type == TYPE_REMEASURE:
+                    await self._drop_undelivered_remeasure(reminder.id)
             else:
                 mode = MODE_REMEASURE if reminder.type == TYPE_REMEASURE else MODE_SLOT
                 self._add_job(reminder.id, reminder.next_trigger_time, mode)
         return sent
+
+    async def _reschedule_overdue_slot(self, reminder_id: int) -> None:
+        """Слот просрочен больше окна catch-up: молча — на следующее вхождение (§6.7)."""
+        now = datetime.now(timezone.utc)
+        async with self._session_factory() as session:
+            reminder = (
+                await session.execute(select(Reminder).where(Reminder.id == reminder_id))
+            ).scalar_one_or_none()
+            if reminder is None:
+                return
+            user = (
+                await session.execute(select(User).where(User.id == reminder.user_id))
+            ).scalar_one()
+            next_time = await self._silently_reschedule(session, reminder, user, now)
+            await session.commit()
+        self._add_job(reminder_id, next_time, MODE_SLOT)
+
+    async def _drop_undelivered_remeasure(self, reminder_id: int) -> None:
+        """Повтор замера не доставлен catch-up'ом — удалить включённую строку (§6.7).
+
+        Иначе строка без job'а блокировала бы новые повторы (`ensure_remeasure`).
+        """
+        async with self._session_factory() as session:
+            await session.execute(
+                delete(Reminder).where(
+                    Reminder.id == reminder_id,
+                    Reminder.type == TYPE_REMEASURE,
+                    Reminder.enabled.is_(True),
+                )
+            )
+            await session.commit()
 
 
 # ─────────────────── Точка входа job'а (module-level) ───────────────────

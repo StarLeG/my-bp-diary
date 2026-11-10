@@ -243,6 +243,71 @@ class QaDb:
         ).fetchone()
         return int(row["n"])
 
+    def ensure_patient_consents(self, telegram_id: int) -> None:
+        """Согласия пациента для сценария (§6.11): основное и на врачей активных связей.
+
+        Без них бот на любое действие показывает экран согласия (Б1) или
+        вопрос по врачу (Д4); предложение заполнить данные (П7) — «уже показано».
+        """
+        from bot.services.consent import CONSENT_VERSION
+
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        has = self._conn.execute(
+            "SELECT 1 FROM consents WHERE user_id = ? AND kind = 'processing' AND withdrawn_at IS NULL",
+            (user["id"],),
+        ).fetchone()
+        if has is None:
+            self._conn.execute(
+                "INSERT INTO consents (user_id, kind, version, channel, given_at)"
+                " VALUES (?, 'processing', ?, 'bot', ?)",
+                (user["id"], CONSENT_VERSION, now),
+            )
+        for row in self._conn.execute(
+            "SELECT doctor_id FROM doctor_patients WHERE user_id = ? AND status IN ('pending', 'active')",
+            (user["id"],),
+        ).fetchall():
+            self._conn.execute(
+                "INSERT INTO consents (user_id, kind, doctor_id, version, channel, given_at)"
+                " SELECT ?, 'doctor', ?, ?, 'bot', ? WHERE NOT EXISTS (SELECT 1 FROM consents"
+                " WHERE user_id = ? AND kind = 'doctor' AND doctor_id = ? AND withdrawn_at IS NULL)",
+                (user["id"], row["doctor_id"], CONSENT_VERSION, now, user["id"], row["doctor_id"]),
+            )
+        self._conn.execute(
+            "UPDATE users SET profile_prompted_at = COALESCE(profile_prompted_at, ?) WHERE id = ?",
+            (now, user["id"]),
+        )
+        self._conn.commit()
+
+    # ── лекарства и журнал приёмов (напоминания, §6.7) ──
+
+    def add_medication(self, telegram_id: int, name: str, dosage: str, slot: str) -> int:
+        """Добавить лекарство пользователю напрямую (подготовка сценария напоминаний)."""
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        cursor = self._conn.execute(
+            "INSERT INTO medications (user_id, name, dosage, slot, created_at)"
+            " VALUES (?, ?, ?, ?, ?)",
+            (user["id"], name, dosage, slot, time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def delete_medications(self, ids: list[int]) -> None:
+        """Удалить лекарства сценария (журнал приёмов уходит каскадом)."""
+        self._conn.executemany("DELETE FROM medications WHERE id = ?", [(i,) for i in ids])
+        self._conn.commit()
+
+    def intake_logs(self, medication_ids: list[int]) -> set[tuple[int, str, str]]:
+        """(id лекарства, слот, статус) журнала приёмов по лекарствам сценария."""
+        marks = ",".join("?" * len(medication_ids))
+        rows = self._conn.execute(
+            f"SELECT medication_id, slot, status FROM medication_logs WHERE medication_id IN ({marks})",
+            medication_ids,
+        ).fetchall()
+        return {(r["medication_id"], r["slot"], r["status"]) for r in rows}
+
 
 # ─────────────────────────── Онбординг (общий сценарий §22, п.1) ───────────────────────────
 
@@ -251,8 +316,12 @@ def run_onboarding(dialog: "BotDialog") -> None:
     """Полный сценарий онбординга: часовой пояс, цели, слот утреннего замера."""
     from bot import texts
 
-    dialog.send("/start")
-    dialog.wait_screen(texts.WELCOME)
+    first = dialog.send("/start")
+    if texts.CONSENT_FIRST_LINE_NEW in (first.text or ""):
+        # С 0.5.0 новый пользователь сначала даёт согласие (§6.11, Б1).
+        dialog.press("cons:yes", contains=texts.WELCOME)
+    else:
+        dialog.wait_screen(texts.WELCOME)
     dialog.press("onb:start", contains=texts.ONB_TZ_ASK)
     dialog.press("onb:tz:Europe/Minsk", contains=texts.ONB_TARGETS_ASK)
     dialog.press("onb:target:130-80", contains=texts.ONB_SLOTS_ASK)
@@ -309,13 +378,16 @@ class BotDialog:
             timeout=timeout,
         )
 
-    def press(self, data: str, *, contains=None, timeout: float = 25.0):
+    def press(self, data: str, *, contains=None, timeout: float = 25.0, message=None):
         """Нажать inline-кнопку с callback_data `data` в последнем сообщении.
 
         `contains` — маркер(ы) ожидаемого следующего экрана; без них дожидаемся
         смены текста или клавиатуры (экран может менять только кнопки).
+        `message` — нажать в этом сообщении, а не в последнем (несколько
+        открытых напоминаний, §6.7); с `contains` ожидание — по этому сообщению.
         """
-        message = self.last()
+        target = message
+        message = self.refresh(message) if message is not None else self.last()
         assert self._find_button(message, data) is not None, (
             f"нет кнопки {data!r} в сообщении {message.text!r}"
         )
@@ -323,6 +395,13 @@ class BotDialog:
         known = self._known_ids()
         self._pace()
         self._loop.run(message.click(data=data))
+        if contains and target is not None:
+            markers = self._markers(contains)
+            return self._poll(
+                lambda candidate: candidate.id == message.id
+                and all(marker in (candidate.text or "") for marker in markers),
+                timeout=timeout,
+            )
         if contains:
             return self.wait_screen(*self._markers(contains), timeout=timeout)
         return self._poll(
@@ -357,6 +436,12 @@ class BotDialog:
         messages = self._loop.run(self._client.get_messages(self._chat, limit=1))
         assert messages, "бот ещё не писал в этот диалог"
         return messages[0]
+
+    def refresh(self, message):
+        """Свежая версия сообщения (после правок бота)."""
+        fresh = self._loop.run(self._client.get_messages(self._chat, ids=message.id))
+        assert fresh is not None, f"сообщение #{message.id} удалено"
+        return fresh
 
     def _known_ids(self, limit: int = 10) -> set[int]:
         messages = self._loop.run(self._client.get_messages(self._chat, limit=limit))

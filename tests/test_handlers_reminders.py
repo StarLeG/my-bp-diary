@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import inspect
-from datetime import datetime, timezone
+from datetime import date, datetime, time, timedelta, timezone
+from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram.fsm.context import FSMContext
@@ -14,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, texts
 from bot.handlers import reminders
+from bot.services import medications as medications_service
 from bot.models import Medication, MedicationLog, User as UserModel
 
 TG_ID = 111_111
@@ -78,6 +80,7 @@ def reminders_svc(mocker):
         snooze=mocker.AsyncMock(),
         cancel_remeasure=mocker.AsyncMock(),
         skip_slot=mocker.AsyncMock(),
+        snooze_slot=mocker.AsyncMock(),
     )
 
 
@@ -186,252 +189,406 @@ class TestTakeAll:
         assert await logs_of(session, user.id) == []
 
 
+def today_of(user: UserModel) -> date:
+    return datetime.now(ZoneInfo(user.timezone)).date()
+
+
+def ymd(day: date) -> str:
+    return day.strftime("%Y%m%d")
+
+
+def local_moment(user: UserModel, day: date, hour: int = 9) -> datetime:
+    return datetime.combine(day, time(hour, 0), ZoneInfo(user.timezone)).astimezone(timezone.utc)
+
+
+def msg_with(markup, sent_at: datetime | None = None) -> Message:
+    """Сообщение бота с клавиатурой (отметки «Частично…» читаются из неё)."""
+    return Message(
+        message_id=5,
+        date=sent_at or datetime.now(timezone.utc),
+        chat=Chat(id=TG_ID, type="private"),
+        from_user=User(id=TG_ID, is_bot=True, first_name="Бот"),
+        text="…",
+        reply_markup=markup,
+    )
+
+
+def as_utc(value: datetime) -> datetime:
+    return value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+
+
+def partial_kb(slot: str, day: date, checked, meds) -> object:
+    return keyboards.partial_meds_kb(
+        slot, day, checked=checked, medications=[(m.id, m.name, m.dosage) for m in meds]
+    )
+
+
 class TestPartial:
-    async def test_start_marks_all(self, session, user, edit, cb_answer, reminders_svc) -> None:
+    """«Частично…» без FSM: состояние — в callback_data и клавиатуре (§6.7, 0.5.4)."""
+
+    async def test_start_marks_all(self, session, user, edit, cb_answer) -> None:
         med1 = await add_med(session, user, "Лозартан", "50 мг")
-        med2 = await add_med(session, user, "Амлодипин", "5 мг", slot="morning")
-        state = make_state()
+        med2 = await add_med(session, user, "Амлодипин", "5 мг")
+        day = today_of(user)
         await call(
             reminders.cb_partial_start,
-            callback=make_callback("rem:partial:morning", make_message()),
-            state=state,
+            callback=make_callback(f"rem:partial:morning:{ymd(day)}", make_message()),
             session=session,
         )
         assert edit.call_args.args[0] == texts.PARTIAL_PROMPT
-        # slot_medications сортирует по названию: Амлодипин, затем Лозартан.
-        medications = [(med2.id, "Амлодипин", "5 мг"), (med1.id, "Лозартан", "50 мг")]
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.partial_meds_kb(
-            checked={med1.id, med2.id}, medications=medications
-        )
-        data = await state.get_data()
-        assert data[reminders.P_PARTIAL_SLOT] == "morning"
+        ordered = await medications_service.slot_medications(session, user, "morning")
+        assert edit.call_args.kwargs["reply_markup"] == partial_kb("morning", day, {med1.id, med2.id}, ordered)
 
-    async def test_toggle_unchecks(self, session, user, edit, cb_answer, reminders_svc) -> None:
+    async def test_start_legacy_without_date(self, session, user, edit, cb_answer) -> None:
+        """Кнопка 0.5.3 без даты: день — день сообщения."""
         med = await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: [med.id]}
-        )
-        await call(
-            reminders.cb_partial_toggle,
-            callback=make_callback(f"rem:med:{med.id}", make_message()),
-            state=state,
-            session=session,
-        )
-        medications = [(med.id, "Лозартан", "50 мг")]
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.partial_meds_kb(
-            checked=set(), medications=medications
-        )
-        data = await state.get_data()
-        assert data[reminders.P_PARTIAL_CHECKED] == []
-
-    async def test_toggle_checks_back(self, session, user, edit, cb_answer, reminders_svc) -> None:
-        med = await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: []}
-        )
-        await call(
-            reminders.cb_partial_toggle,
-            callback=make_callback(f"rem:med:{med.id}", make_message()),
-            state=state,
-            session=session,
-        )
-        data = await state.get_data()
-        assert data[reminders.P_PARTIAL_CHECKED] == [med.id]
-
-    async def test_foreign_med_ignored(self, session, user, edit, cb_answer, reminders_svc) -> None:
-        await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: []}
-        )
-        await call(
-            reminders.cb_partial_toggle,
-            callback=make_callback("rem:med:999", make_message()),
-            state=state,
-            session=session,
-        )
-        edit.assert_not_called()
-        cb_answer.assert_awaited()
-
-    async def test_done_logs_taken_and_skipped(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        med1 = await add_med(session, user, "Лозартан", "50 мг")
-        med2 = await add_med(session, user, "Амлодипин", "5 мг")
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: [med1.id]}
-        )
-        await call(
-            reminders.cb_partial_done,
-            callback=make_callback("rem:partial:done", make_message()),
-            state=state,
-            session=session,
-            reminders=reminders_svc,
-        )
-        by_id = {row.medication_id: row.status for row in await logs_of(session, user.id)}
-        assert by_id == {med1.id: "taken", med2.id: "skipped"}
-        expected = texts.MEDS_LOGGED.format(
-            summary=texts.fmt_meds_summary(["Лозартан 50 мг"], ["Амлодипин 5 мг"])
-        )
-        assert edit.call_args.args[0] == expected
-        assert await state.get_state() is None
-
-    async def test_done_schedules_remeasure(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        user.med_remeasure_delay = 30
-        med = await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: [med.id]}
-        )
-        await call(
-            reminders.cb_partial_done,
-            callback=make_callback("rem:partial:done", make_message()),
-            state=state,
-            session=session,
-            reminders=reminders_svc,
-        )
-        reminders_svc.ensure_remeasure.assert_awaited_once_with(user.id, None, 30)
-
-    async def test_done_without_state_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        state = make_state()
-        await call(
-            reminders.cb_partial_done,
-            callback=make_callback("rem:partial:done", make_message()),
-            state=state,
-            session=session,
-            reminders=reminders_svc,
-        )
-        edit.assert_not_called()
-        cb_answer.assert_awaited()
-
-    async def test_cancel_returns_slot_screen(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        med = await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: [med.id]}
-        )
-        await call(
-            reminders.cb_partial_cancel,
-            callback=make_callback("rem:partial:cancel", make_message()),
-            state=state,
-            session=session,
-        )
-        assert edit.call_args.args[0] == texts.fmt_slot_message(
-            "morning", [texts.fmt_med_item("Лозартан", "50 мг")]
-        )
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.slot_message_kb(
-            "morning", 0, has_medications=True
-        )
-        assert await state.get_state() is None
-
-    async def test_cancel_without_state_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        state = make_state()
-        await call(
-            reminders.cb_partial_cancel,
-            callback=make_callback("rem:partial:cancel", make_message()),
-            state=state,
-            session=session,
-        )
-        edit.assert_not_called()
-        cb_answer.assert_awaited()
-
-    async def test_start_garbage_slot_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        await call(
-            reminders.cb_partial_start,
-            callback=make_callback("rem:partial:zzz", make_message()),
-            state=make_state(),
-            session=session,
-        )
-        edit.assert_not_called()
-
-    async def test_start_empty_slot_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
         await call(
             reminders.cb_partial_start,
             callback=make_callback("rem:partial:morning", make_message()),
-            state=make_state(),
             session=session,
         )
-        edit.assert_not_called()
-        cb_answer.assert_awaited()
+        assert edit.call_args.kwargs["reply_markup"] == partial_kb("morning", today_of(user), {med.id}, [med])
 
-    async def test_done_no_remeasure_when_disabled(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        user.med_remeasure_delay = None
-        med = await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: [med.id]}
-        )
-        await call(
-            reminders.cb_partial_done,
-            callback=make_callback("rem:partial:done", make_message()),
-            state=state,
-            session=session,
-            reminders=reminders_svc,
-        )
-        reminders_svc.ensure_remeasure.assert_not_awaited()
-        edit.assert_called()
-
-    async def test_toggle_without_state_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        med = await add_med(session, user)
+    async def test_toggle_unchecks_and_back(self, session, user, edit, cb_answer) -> None:
+        med1 = await add_med(session, user, "Лозартан", "50 мг")
+        med2 = await add_med(session, user, "Амлодипин", "5 мг")
+        day = today_of(user)
+        ordered = await medications_service.slot_medications(session, user, "morning")
+        message = msg_with(partial_kb("morning", day, {med1.id, med2.id}, ordered))
         await call(
             reminders.cb_partial_toggle,
-            callback=make_callback(f"rem:med:{med.id}", make_message()),
-            state=make_state(),
+            callback=make_callback(f"rem:pt:morning:{ymd(day)}:{med1.id}", message),
+            session=session,
+        )
+        unchecked = edit.call_args.kwargs["reply_markup"]
+        assert unchecked == partial_kb("morning", day, {med2.id}, ordered)
+        await call(
+            reminders.cb_partial_toggle,
+            callback=make_callback(f"rem:pt:morning:{ymd(day)}:{med1.id}", msg_with(unchecked)),
+            session=session,
+        )
+        assert edit.call_args.kwargs["reply_markup"] == partial_kb("morning", day, {med1.id, med2.id}, ordered)
+
+    async def test_no_fsm_in_handlers(self) -> None:
+        """Ни один обработчик напоминаний не зависит от FSM (перезапуск, запись давления)."""
+        for handler in (
+            reminders.cb_take_all, reminders.cb_partial_start, reminders.cb_partial_toggle,
+            reminders.cb_partial_done, reminders.cb_partial_cancel, reminders.cb_skip_slot,
+            reminders.cb_snooze, reminders.cb_remeasure_off,
+        ):
+            assert "state" not in inspect.signature(handler).parameters, handler.__name__
+
+    async def test_toggle_foreign_med_stale(self, session, user, edit, cb_answer) -> None:
+        other = UserModel(telegram_id=222_222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.commit()
+        foreign = await add_med(session, other)
+        med = await add_med(session, user)
+        day = today_of(user)
+        message = msg_with(partial_kb("morning", day, {med.id}, [med]))
+        await call(
+            reminders.cb_partial_toggle,
+            callback=make_callback(f"rem:pt:morning:{ymd(day)}:{foreign.id}", message),
             session=session,
         )
         edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
 
-    async def test_toggle_garbage_id_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
+    @pytest.mark.parametrize(
+        "suffix", ["x", "", "1:2", "zzz"],
+    )
+    async def test_toggle_garbage_stale(self, session, user, edit, cb_answer, suffix) -> None:
         await add_med(session, user)
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: []}
-        )
+        data = f"rem:pt:morning:{ymd(today_of(user))}:{suffix}" if suffix != "zzz" else "rem:pt:zzz:20261110:1"
+        await call(reminders.cb_partial_toggle, callback=make_callback(data, make_message()), session=session)
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_toggle_without_date_stale(self, session, user, edit, cb_answer) -> None:
+        med = await add_med(session, user)
         await call(
             reminders.cb_partial_toggle,
-            callback=make_callback("rem:med:abc", make_message()),
-            state=state,
+            callback=make_callback(f"rem:pt:morning:{med.id}", make_message()),
             session=session,
         )
-        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
 
-    async def test_done_empty_slot_ignored(
-        self, session, user, edit, cb_answer, reminders_svc
-    ) -> None:
-        state = make_state()
-        await state.update_data(
-            **{reminders.P_PARTIAL_SLOT: "morning", reminders.P_PARTIAL_CHECKED: []}
-        )
+    async def test_done_logs_from_markup(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        user.med_remeasure_delay = 60
+        med1 = await add_med(session, user, "Лозартан", "50 мг")
+        med2 = await add_med(session, user, "Амлодипин", "5 мг")
+        day = today_of(user)
+        message = msg_with(partial_kb("morning", day, {med1.id}, [med1, med2]))
         await call(
             reminders.cb_partial_done,
-            callback=make_callback("rem:partial:done", make_message()),
-            state=state,
+            callback=make_callback(f"rem:pd:morning:{ymd(day)}", message),
             session=session,
             reminders=reminders_svc,
         )
+        statuses = {row.medication_id: row.status for row in await logs_of(session, user.id)}
+        assert statuses == {med1.id: "taken", med2.id: "skipped"}
+        assert edit.call_args.args[0] == texts.fmt_intake_result(["Лозартан 50 мг"], ["Амлодипин 5 мг"], [])
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        reminders_svc.ensure_remeasure.assert_awaited_once_with(user.id, None, 60)
+
+    async def test_done_nothing_checked_no_remeasure(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        user.med_remeasure_delay = 60
+        med = await add_med(session, user)
+        day = today_of(user)
+        await call(
+            reminders.cb_partial_done,
+            callback=make_callback(f"rem:pd:morning:{ymd(day)}", msg_with(partial_kb("morning", day, set(), [med]))),
+            session=session,
+            reminders=reminders_svc,
+        )
+        assert [row.status for row in await logs_of(session, user.id)] == ["skipped"]
+        reminders_svc.ensure_remeasure.assert_not_awaited()
+
+    async def test_two_open_lists_each_logs_own_slot(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        """Регресс 0.5.3: «Готово» в утреннем списке отмечало вечерний слот."""
+        morning = await add_med(session, user, "Лозартан", "50 мг", slot="morning")
+        evening = await add_med(session, user, "Амлодипин", "5 мг", slot="evening")
+        day = today_of(user)
+        morning_msg = msg_with(partial_kb("morning", day, {morning.id}, [morning]))
+        evening_msg = msg_with(partial_kb("evening", day, set(), [evening]))
+        await call(
+            reminders.cb_partial_done,
+            callback=make_callback(f"rem:pd:morning:{ymd(day)}", morning_msg),
+            session=session, reminders=reminders_svc,
+        )
+        logs = {(row.medication_id, row.slot, row.status) for row in await logs_of(session, user.id)}
+        assert logs == {(morning.id, "morning", "taken")}
+        await call(
+            reminders.cb_partial_done,
+            callback=make_callback(f"rem:pd:evening:{ymd(day)}", evening_msg),
+            session=session, reminders=reminders_svc,
+        )
+        logs = {(row.medication_id, row.slot, row.status) for row in await logs_of(session, user.id)}
+        assert logs == {(morning.id, "morning", "taken"), (evening.id, "evening", "skipped")}
+
+    async def test_done_empty_slot_stale(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await call(
+            reminders.cb_partial_done,
+            callback=make_callback(f"rem:pd:morning:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
         edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
         assert await logs_of(session, user.id) == []
+
+    @pytest.mark.parametrize("data", ["rem:pd:morning", "rem:pc:morning", "rem:pd:zzz:20261110"])
+    async def test_done_cancel_garbage_stale(self, session, user, edit, cb_answer, reminders_svc, data) -> None:
+        handler = reminders.cb_partial_done if data.startswith("rem:pd") else reminders.cb_partial_cancel
+        await call(handler, callback=make_callback(data, make_message()), session=session, reminders=reminders_svc)
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_cancel_returns_slot_screen(self, session, user, edit, cb_answer) -> None:
+        med = await add_med(session, user)
+        day = today_of(user)
+        await call(
+            reminders.cb_partial_cancel,
+            callback=make_callback(f"rem:pc:morning:{ymd(day)}", make_message()),
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.fmt_slot_message("morning", ["Лозартан 50 мг"])
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.slot_message_kb("morning", day, True)
+        assert await logs_of(session, user.id) == []
+        assert med.id
+
+    async def test_cancel_then_snooze_works(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        """Регресс 0.5.3: после «Отмена» «Через 30 мин» несло id 0 и молчало."""
+        await add_med(session, user)
+        day = today_of(user)
+        await call(
+            reminders.cb_partial_cancel,
+            callback=make_callback(f"rem:pc:morning:{ymd(day)}", make_message()),
+            session=session,
+        )
+        snooze = next(
+            b.callback_data
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for b in row
+            if b.callback_data.startswith("rem:snooze:")
+        )
+        reminders_svc.snooze_slot.return_value = True
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(snooze, make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.snooze_slot.assert_awaited_once_with(user.id, "morning")
+        assert edit.call_args.args[0] == texts.SLOT_REMAINING
+
+    @pytest.mark.parametrize("data", ["rem:med:5", "rem:partial:done", "rem:partial:cancel"])
+    async def test_legacy_fsm_buttons_stale(self, session, user, edit, cb_answer, data) -> None:
+        handler = reminders.cb_legacy_partial if data.startswith("rem:med") else reminders.cb_partial_start
+        await call(handler, callback=make_callback(data, make_message()), session=session)
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+
+class TestReminderDates:
+    """Приём пишется за день напоминания; старше 2 суток — «устарело» (§6.7, 0.5.4)."""
+
+    async def test_same_day_now(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        day = today_of(user)
+        before = datetime.now(timezone.utc)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(day)}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        (log,) = await logs_of(session, user.id)
+        assert as_utc(log.timestamp) >= before.replace(microsecond=0)
+
+    async def test_yesterday_logged_at_message_moment(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        user.med_remeasure_delay = 60
+        await add_med(session, user)
+        yesterday = today_of(user) - timedelta(days=1)
+        sent = local_moment(user, yesterday, 9)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(yesterday)}", msg_with(None, sent)),
+            session=session, reminders=reminders_svc,
+        )
+        (log,) = await logs_of(session, user.id)
+        assert as_utc(log.timestamp) == sent
+        reminders_svc.ensure_remeasure.assert_not_awaited()  # повтор — только для сегодняшнего
+
+    async def test_legacy_yesterday_by_message_date(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        sent = local_moment(user, today_of(user) - timedelta(days=1), 20)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback("rem:all:morning", msg_with(None, sent)),
+            session=session, reminders=reminders_svc,
+        )
+        (log,) = await logs_of(session, user.id)
+        assert as_utc(log.timestamp) == sent
+
+    async def test_message_outside_day_noon_fallback(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        yesterday = today_of(user) - timedelta(days=1)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(yesterday)}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        (log,) = await logs_of(session, user.id)
+        assert as_utc(log.timestamp) == local_moment(user, yesterday, 12)
+
+    @pytest.mark.parametrize("days_ago", [3, -1])
+    async def test_too_old_or_future_stale(self, session, user, edit, cb_answer, reminders_svc, days_ago) -> None:
+        await add_med(session, user)
+        day = today_of(user) - timedelta(days=days_ago)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(day)}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+        assert await logs_of(session, user.id) == []
+
+    async def test_two_days_ago_still_ok(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        day = today_of(user) - timedelta(days=2)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(day)}", msg_with(None, local_moment(user, day))),
+            session=session, reminders=reminders_svc,
+        )
+        assert len(await logs_of(session, user.id)) == 1
+
+    async def test_bad_date_stale(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback("rem:all:morning:20261340", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_legacy_inaccessible_message_stale(self, session, user, cb_answer, reminders_svc) -> None:
+        from aiogram.types import InaccessibleMessage
+
+        await add_med(session, user)
+        message = InaccessibleMessage(chat=Chat(id=TG_ID, type="private"), message_id=5, date=0)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback("rem:all:morning", message),
+            session=session, reminders=reminders_svc,
+        )
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_snooze_yesterday_stale(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        yesterday = today_of(user) - timedelta(days=1)
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:morning:{ymd(yesterday)}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.snooze_slot.assert_not_awaited()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_skip_yesterday_logs_without_reschedule(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        yesterday = today_of(user) - timedelta(days=1)
+        sent = local_moment(user, yesterday, 8)
+        await call(
+            reminders.cb_skip_slot,
+            callback=make_callback(f"rem:skip:morning:{ymd(yesterday)}", msg_with(None, sent)),
+            session=session, reminders=reminders_svc,
+        )
+        (log,) = await logs_of(session, user.id)
+        assert log.status == "skipped" and as_utc(log.timestamp) == sent
+        reminders_svc.skip_slot.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.SLOT_SKIPPED
+
+    async def test_yesterday_and_today_both_logged(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        """Вчерашнее «Принял всё ✓» не съедает сегодняшний приём (E3)."""
+        await add_med(session, user)
+        yesterday = today_of(user) - timedelta(days=1)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(yesterday)}", msg_with(None, local_moment(user, yesterday))),
+            session=session, reminders=reminders_svc,
+        )
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        assert len(await logs_of(session, user.id)) == 2
+        assert edit.call_args.args[0].startswith("Отметил")
+
+
+class TestIntakeTexts:
+    """Итог отметки: «уже отмечены сегодня» вместо «нет данных» (§6.7, E4)."""
+
+    async def test_all_already(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        await add_med(session, user)
+        data = f"rem:all:morning:{ymd(today_of(user))}"
+        for _ in range(2):
+            await call(reminders.cb_take_all, callback=make_callback(data, make_message()),
+                       session=session, reminders=reminders_svc)
+        assert edit.call_args.args[0] == "Эти лекарства уже отмечены сегодня ✓: Лозартан 50 мг"
+        assert "нет данных" not in edit.call_args.args[0]
+
+    async def test_mixed(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        med1 = await add_med(session, user, "Лозартан", "50 мг")
+        day = today_of(user)
+        await call(reminders.cb_take_all, callback=make_callback(f"rem:all:morning:{ymd(day)}", make_message()),
+                   session=session, reminders=reminders_svc)
+        await add_med(session, user, "Амлодипин", "5 мг")
+        await call(reminders.cb_take_all, callback=make_callback(f"rem:all:morning:{ymd(day)}", make_message()),
+                   session=session, reminders=reminders_svc)
+        assert edit.call_args.args[0] == (
+            "Отметил: принято: Амлодипин 5 мг\nУже отмечено сегодня: Лозартан 50 мг"
+        )
+        assert med1.id
 
 
 class TestSkip:
@@ -560,3 +717,103 @@ class TestRemeasureOff:
         reminders_svc.cancel_remeasure.assert_not_awaited()
         edit.assert_not_called()
 
+
+
+class TestSnoozeSlotAndStale:
+    """«Через 30 мин» слота по `(users.id, slot)`; повтор старше 24 ч — «устарело» (§6.7, 0.5.4)."""
+
+    async def test_slot_snooze_today(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        reminders_svc.snooze_slot.return_value = True
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:noon:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.snooze_slot.assert_awaited_once_with(user.id, "noon")
+        reminders_svc.snooze.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.SLOT_REMAINING
+
+    async def test_slot_snooze_legacy_without_date(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        reminders_svc.snooze_slot.return_value = True
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback("rem:snooze:evening", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.snooze_slot.assert_awaited_once_with(user.id, "evening")
+
+    async def test_slot_snooze_disabled_stale(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        reminders_svc.snooze_slot.return_value = False
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback(f"rem:snooze:noon:{ymd(today_of(user))}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_legacy_zero_id_stale(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        """Кнопка 0.5.3 после «Отмена» (`rem:snooze:0`) — уведомление, а не молчание."""
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback("rem:snooze:0", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.snooze.assert_not_awaited()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_remeasure_snooze_expired(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        old = datetime.now(timezone.utc) - timedelta(hours=25)
+        await call(
+            reminders.cb_snooze,
+            callback=make_callback("rem:snooze:7", msg_with(None, old)),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.cancel_remeasure.assert_awaited_once_with(user.id, 7)
+        reminders_svc.snooze.assert_not_awaited()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+    async def test_remeasure_off_expired(self, session, user, edit, cb_answer, reminders_svc) -> None:
+        reminders_svc.cancel_remeasure.return_value = True
+        old = datetime.now(timezone.utc) - timedelta(hours=25)
+        await call(
+            reminders.cb_remeasure_off,
+            callback=make_callback("rem:off:7", msg_with(None, old)),
+            session=session, reminders=reminders_svc,
+        )
+        reminders_svc.cancel_remeasure.assert_awaited_once_with(user.id, 7)
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+
+
+class TestStaleBranches:
+    """Устаревшая дата во всех кнопках слота — «устарело», данные не меняются (§6.7)."""
+
+    @pytest.mark.parametrize("handler_name, prefix", [
+        ("cb_partial_done", "rem:pd"),
+        ("cb_partial_cancel", "rem:pc"),
+        ("cb_skip_slot", "rem:skip"),
+        ("cb_partial_start", "rem:partial"),
+    ])
+    async def test_old_day_stale(self, session, user, edit, cb_answer, reminders_svc, handler_name, prefix) -> None:
+        await add_med(session, user)
+        old = today_of(user) - timedelta(days=5)
+        await call(
+            getattr(reminders, handler_name),
+            callback=make_callback(f"{prefix}:morning:{ymd(old)}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        edit.assert_not_called()
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)
+        assert await logs_of(session, user.id) == []
+        reminders_svc.skip_slot.assert_not_awaited()
+
+    @pytest.mark.parametrize("raw", ["2026", "2026111", "abcdefgh"])
+    async def test_malformed_day_stale(self, session, user, edit, cb_answer, reminders_svc, raw) -> None:
+        await add_med(session, user)
+        await call(
+            reminders.cb_take_all,
+            callback=make_callback(f"rem:all:morning:{raw}", make_message()),
+            session=session, reminders=reminders_svc,
+        )
+        cb_answer.assert_awaited_once_with(texts.REMINDER_STALE)

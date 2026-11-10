@@ -77,6 +77,8 @@ class SlotIntakeResult:
     taken: list[str] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     already_logged: bool = False
+    #: Подписи лекарств, уже отмеченных за этот день в слоте (§6.7, 0.5.4).
+    already: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -365,7 +367,9 @@ async def log_slot_intake(
             medication = by_id.get(med_id)
             if medication is None:
                 continue  # чужое или удалённое лекарство — тихо игнорируем
+            label = texts.fmt_med_item(medication.name, medication.dosage)
             if med_id in logged_today:
+                result.already.append(label)
                 continue
             duplicate = exists(
                 select(literal(1)).where(
@@ -388,8 +392,8 @@ async def log_slot_intake(
             )
             inserted = await session.execute(stmt)
             if inserted.rowcount == 0:
+                result.already.append(label)
                 continue  # конкурентно уже отметили — дубль не создаём
-            label = texts.fmt_med_item(medication.name, medication.dosage)
             new_logs += 1
             if status == "taken":
                 result.taken.append(label)

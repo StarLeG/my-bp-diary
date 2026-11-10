@@ -439,6 +439,10 @@ SLOT_SKIPPED = "Хорошо, напоминание перенёс на зав�
 PARTIAL_PROMPT = "Что приняли? Отметьте и нажмите «Готово»."
 MEDS_LOGGED = "Отметил: {summary}"
 SLOT_REMAINING = "Осталось напомнить через 30 минут."
+#: Устаревшая или мусорная кнопка напоминания — уведомление (§6.7, 0.5.4).
+REMINDER_STALE = "Это напоминание устарело"
+MEDS_ALREADY = "Эти лекарства уже отмечены сегодня ✓: {meds}"
+MEDS_ALREADY_LINE = "Уже отмечено сегодня: {meds}"
 HIGH_REMEASURE_HINT = "Повторите измерение — так видно, помогло ли лекарство."
 
 
@@ -473,6 +477,22 @@ def fmt_meds_summary(taken: Sequence[str], skipped: Sequence[str]) -> str:
     if skipped:
         parts.append("пропущено: " + ", ".join(skipped))
     return "; ".join(parts) if parts else "нет данных"
+
+
+def fmt_intake_result(
+    taken: Sequence[str], skipped: Sequence[str], already: Sequence[str]
+) -> str:
+    """Итог отметки из напоминания (§6.7, 0.5.4).
+
+    Ничего нового — «Эти лекарства уже отмечены сегодня ✓: …»; иначе
+    «Отметил: …» и, если часть уже была отмечена, строка «Уже отмечено сегодня: …».
+    """
+    if not taken and not skipped:
+        return MEDS_ALREADY.format(meds=", ".join(already))
+    text = MEDS_LOGGED.format(summary=fmt_meds_summary(taken, skipped))
+    if already:
+        text += "\n" + MEDS_ALREADY_LINE.format(meds=", ".join(already))
+    return text
 
 # ─────────────────────────── О боте / Поддержать ───────────────────────────
 

@@ -99,9 +99,9 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("dosage_kb", keyboards.dosage_kb()),
         ("dosage_kb_keep", keyboards.dosage_kb(keep=True)),
         ("slots_multiselect_kb", keyboards.slots_multiselect_kb({"morning"})),
-        ("slot_message_kb", keyboards.slot_message_kb("morning", 5, True)),
-        ("slot_message_kb_no_meds", keyboards.slot_message_kb("morning", 5, False)),
-        ("partial_meds_kb", keyboards.partial_meds_kb({1}, [med])),
+        ("slot_message_kb", keyboards.slot_message_kb("morning", date(2026, 11, 10), True)),
+        ("slot_message_kb_no_meds", keyboards.slot_message_kb("morning", date(2026, 11, 10), False)),
+        ("partial_meds_kb", keyboards.partial_meds_kb("morning", date(2026, 11, 10), {1}, [med])),
         ("remeasure_kb", keyboards.remeasure_kb(5)),
         ("onboarding_start_kb", keyboards.onboarding_start_kb()),
         ("onboarding_skip_kb", keyboards.onboarding_skip_kb("tz")),
@@ -333,33 +333,56 @@ class TestMeasurementKeyboards:
 
 
 class TestSlotMessageKeyboard:
+    """Кнопки напоминания без FSM: слот и дата в callback'ах (§6.7, §8, 0.5.4)."""
+
+    DAY = date(2026, 11, 10)
+
     def test_with_medications_shows_all_five(self) -> None:
-        markup = keyboards.slot_message_kb("morning", 5, True)
-        data = {button.callback_data for button in callback_buttons(markup)}
-        assert data == {
+        markup = keyboards.slot_message_kb("morning", self.DAY, True)
+        data = [button.callback_data for button in callback_buttons(markup)]
+        assert data == [
             "rem:write",
-            "rem:all:morning",
-            "rem:partial:morning",
-            "rem:snooze:5",
-            "rem:skip:morning",
-        }
+            "rem:all:morning:20261110",
+            "rem:partial:morning:20261110",
+            "rem:snooze:morning:20261110",
+            "rem:skip:morning:20261110",
+        ]
 
     def test_without_medications_hides_med_buttons(self) -> None:
-        markup = keyboards.slot_message_kb("evening", 7, False)
-        data = {button.callback_data for button in callback_buttons(markup)}
-        assert data == {"rem:write", "rem:snooze:7", "rem:skip:evening"}
+        markup = keyboards.slot_message_kb("evening", self.DAY, False)
+        data = [button.callback_data for button in callback_buttons(markup)]
+        assert data == ["rem:write", "rem:snooze:evening:20261110", "rem:skip:evening:20261110"]
 
     def test_partial_checkboxes(self) -> None:
+        meds = [(1, "Лозартан", "50 мг"), (2, "Амлодипин", "5 мг"), (3, "Аспирин", "")]
+        markup = keyboards.partial_meds_kb("noon", self.DAY, checked={2}, medications=meds)
+        texts_by_data = {b.callback_data: b.text for b in callback_buttons(markup)}
+        assert texts_by_data["rem:pt:noon:20261110:1"] == "Лозартан 50 мг"
+        assert texts_by_data["rem:pt:noon:20261110:2"] == "✓ Амлодипин 5 мг"
+        assert texts_by_data["rem:pt:noon:20261110:3"] == "Аспирин"
+        assert texts_by_data["rem:pd:noon:20261110"] == texts.BTN_DONE
+        assert texts_by_data["rem:pc:noon:20261110"] == texts.BTN_CANCEL
+
+    def test_checked_ids_read_from_markup(self) -> None:
         meds = [(1, "Лозартан", "50 мг"), (2, "Амлодипин", "5 мг")]
-        markup = keyboards.partial_meds_kb(checked={2}, medications=meds)
-        texts_by_data = {
-            button.callback_data: button.text
-            for button in callback_buttons(markup)
-            if button.callback_data
-        }
-        assert texts_by_data["rem:med:1"] == "Лозартан 50 мг"
-        assert texts_by_data["rem:med:2"] == "✓ Амлодипин 5 мг"
-        assert "rem:partial:done" in texts_by_data
+        markup = keyboards.partial_meds_kb("noon", self.DAY, checked={1, 2}, medications=meds)
+        assert keyboards.partial_checked_ids(markup) == {1, 2}
+        markup = keyboards.partial_meds_kb("noon", self.DAY, checked=set(), medications=meds)
+        assert keyboards.partial_checked_ids(markup) == set()
+        assert keyboards.partial_checked_ids(None) == set()
+
+    def test_checked_ids_ignore_foreign_buttons(self) -> None:
+        markup = InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="✓ чужая", callback_data="rem:all:morning:20261110")],
+            [InlineKeyboardButton(text="✓ мусор", callback_data="rem:pt:noon:20261110:x")],
+            [InlineKeyboardButton(text="✓ ok", callback_data="rem:pt:noon:20261110:7")],
+        ])
+        assert keyboards.partial_checked_ids(markup) == {7}
+
+    def test_longest_callback_fits(self) -> None:
+        meds = [(123456, "Лозартан", "50 мг")]
+        markup = keyboards.partial_meds_kb("morning", self.DAY, checked=set(), medications=meds)
+        assert max(len(b.callback_data.encode()) for b in callback_buttons(markup)) <= 30
 
     def test_remeasure_kb_actions(self) -> None:
         markup = keyboards.remeasure_kb(42)
