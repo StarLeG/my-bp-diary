@@ -45,15 +45,22 @@ Pydantic для валидации, python-dotenv для конфига. Код 
   (measurement_id, medication_id; UNIQUE(measurement_id, medication_id) — отмеченные
   приёмы записи, перечень для «Истории записей» кабинета), `web_users` (user_id UNIQUE, email,
   password_hash — Argon2id), `web_sessions` (token PK, web_user_id FK, created_at,
-  expires_at — сессии кабинета на 7 дней). Расписание напоминаний живёт только в `reminders` (слоты
-  morning/noon/evening + med_remeasure; полей `users.reminder_*` нет).
+  expires_at — сессии кабинета на 7 дней), `appointments` (user_id, kind: doctor|lab|exam,
+  title, starts_on — локальная дата, starts_at — локальное HH:MM или NULL, note,
+  status: planned|done|moved|missed|cancelled, sent_eve_at, sent_soon_at, sent_morning_at,
+  sent_after_at, last_message_id, created_at — визиты и анализы, схема — поколение 8).
+  Расписание ежедневных напоминаний живёт только в `reminders` (слоты morning/noon/evening +
+  med_remeasure; полей `users.reminder_*` нет); уведомления о визитах — по строкам
+  `appointments`, без job'ов на событие.
 - Токен бота — только из переменных окружения / секрет-менеджера; в коде, конфигах и логах
   его быть не должно. Пароли кабинета — только хеш Argon2id.
 - Веб-части: `web/landing` (статический лендинг) и `web/cabinet` (FastAPI, Argon2id, CSRF,
   HTTPS) — создаются после бота, архитектурно закладываются сразу. Платёжных данных в
   личном кабинете тоже нет.
 - Планировщик напоминаний — APScheduler 3.x (AsyncIOScheduler + SQLAlchemyJobStore);
-  планировщик строго в UTC (DST-ловушка ZoneInfo в APScheduler 3.x).
+  планировщик строго в UTC (DST-ловушка ZoneInfo в APScheduler 3.x). Тик раз в минуту
+  (`reminders:tick`): сверка job'ов слотов с БД — кабинет пишет только строки (0.5.7), и
+  уведомления о визитах с захватом по флагам `sent_*_at` (0.5.8).
 - Версионирование (SemVer): MAJOR — ломающие изменения, MINOR — новые функции, PATCH —
   багфиксы. Номер версии — только в `pyproject.toml`.
 - Лицензия проекта — PolyForm-Noncommercial-1.0.0 (файл `LICENSE` в корне,
