@@ -136,7 +136,7 @@ class TestSummary:
             verdict=texts.STATS_GOAL_OK,
         ) in text
         assert texts.STATS_FOOTER_SUPPORT not in text  # записей < 3
-        assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb()
+        assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb("7")
 
     async def test_foreign_measurements_hidden(
         self, session, user, photo, delete, cb_answer
@@ -355,7 +355,7 @@ class TestHistogram:
         assert image.size == (1080, 720) and image.format == "PNG"
         caption = photo.call_args.kwargs["caption"]
         assert caption.startswith("📊 За 7 дней") and len(caption) <= 1024
-        assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb()
+        assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb("7")
 
     async def test_render_in_thread_with_day_values(self, session, user, photo, delete, cb_answer, mocker) -> None:
         """В поток уходят значения по дням (не ORM), транзакция закрыта (§7.2 п.7)."""
@@ -407,3 +407,273 @@ class TestHistogram:
         edit.assert_not_called()
         assert answer.call_args.args[0] == text
         assert answer.call_args.kwargs["reply_markup"] == markup
+
+
+# ─────────────────────── Свой период и «По дням» (§6.5, 0.5.3) ───────────────────────
+
+from aiogram.exceptions import TelegramBadRequest  # noqa: E402
+
+from bot.services import stats_chart  # noqa: E402
+
+
+def local_noon(user: UserModel, day) -> datetime:
+    """Полдень локального дня пользователя в UTC."""
+    return datetime(day.year, day.month, day.day, 12, tzinfo=ZoneInfo(user.timezone)).astimezone(timezone.utc)
+
+
+def ymd(day) -> str:
+    return day.strftime("%Y%m%d")
+
+
+class TestCalendar:
+    async def test_opens_current_month(self, session, user, edit, cb_answer) -> None:
+        today = today_of(user)
+        await stats.cb_stats_calendar(make_callback("stats:cal", make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_CAL_FIRST == "Выберите первый день периода:"
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_calendar_kb(
+            today.year, today.month, today
+        )
+        cb_answer.assert_awaited_once_with()
+
+    async def test_month_navigation(self, session, user, edit, cb_answer) -> None:
+        today = today_of(user)
+        await stats.cb_stats_calendar(make_callback("stats:cal:202501", make_message()), session)
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_calendar_kb(2025, 1, today)
+
+    async def test_month_navigation_step2(self, session, user, edit, cb_answer) -> None:
+        today = today_of(user)
+        await stats.cb_stats_calendar(
+            make_callback("stats:cal:202501:20250115", make_message()), session
+        )
+        assert edit.call_args.args[0] == "Период с 15.01. Выберите последний день:"
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_calendar_kb(
+            2025, 1, today, today.replace(year=2025, month=1, day=15)
+        )
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            "stats:cal:2025",
+            "stats:cal:202513",
+            "stats:cal:000001",
+            "stats:cal:abcdef",
+            "stats:cal:209912",  # будущий месяц
+            "stats:cal:202501:2025011",
+            "stats:cal:202501:20990101",  # будущий первый день
+            "stats:cal:202501:20250101:x",
+        ],
+    )
+    async def test_broken_returns_to_periods(self, session, user, edit, cb_answer, data) -> None:
+        await stats.cb_stats_calendar(make_callback(data, make_message()), session)
+        assert edit.call_args.args[0] == texts.BTN_STATS
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
+
+    async def test_from_photo_is_new_message(self, session, user, delete, answer, edit, cb_answer) -> None:
+        await stats.cb_stats_calendar(make_callback("stats:cal", photo_message()), session)
+        delete.assert_awaited_once()
+        edit.assert_not_called()
+        assert answer.call_args.args[0] == texts.STATS_CAL_FIRST
+
+    async def test_noop(self, cb_answer) -> None:
+        await stats.cb_stats_noop(make_callback("stats:noop", make_message()))
+        cb_answer.assert_awaited_once_with()
+
+    async def test_double_tap_same_screen(self, session, user, mocker, cb_answer) -> None:
+        """Повторное нажатие — тот же экран: «message is not modified» не ошибка."""
+        mocker.patch.object(
+            Message,
+            "edit_text",
+            new_callable=mocker.AsyncMock,
+            side_effect=TelegramBadRequest(method=mocker.Mock(), message="Bad Request: message is not modified"),
+        )
+        await stats.cb_stats_calendar(make_callback("stats:cal", make_message()), session)
+        cb_answer.assert_awaited()
+
+    async def test_other_bad_request_raises(self, session, user, mocker, cb_answer) -> None:
+        mocker.patch.object(
+            Message,
+            "edit_text",
+            new_callable=mocker.AsyncMock,
+            side_effect=TelegramBadRequest(method=mocker.Mock(), message="Bad Request: message to edit not found"),
+        )
+        with pytest.raises(TelegramBadRequest):
+            await stats.cb_stats_calendar(make_callback("stats:cal", make_message()), session)
+
+
+class TestDayPick:
+    async def test_first_day_opens_step2(self, session, user, edit, cb_answer) -> None:
+        today = today_of(user)
+        first = today - timedelta(days=40)
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(first)}", make_message()), session)
+        assert edit.call_args.args[0] == f"Период с {first:%d.%m}. Выберите последний день:"
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_calendar_kb(
+            first.year, first.month, today, first
+        )
+
+    async def test_future_first_day_toast(self, session, user, edit, cb_answer) -> None:
+        future = today_of(user) + timedelta(days=1)
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(future)}", make_message()), session)
+        cb_answer.assert_awaited_once_with(texts.STATS_CAL_FUTURE)
+        edit.assert_not_called()
+
+    async def test_future_last_day_toast(self, session, user, edit, photo, cb_answer) -> None:
+        today = today_of(user)
+        data = f"stats:day:{ymd(today)}:{ymd(today + timedelta(days=1))}"
+        await stats.cb_stats_day(make_callback(data, make_message()), session)
+        cb_answer.assert_awaited_once_with("Период не может заканчиваться в будущем")
+        edit.assert_not_called()
+        photo.assert_not_called()
+
+    async def test_too_long_toast(self, session, user, edit, photo, cb_answer) -> None:
+        today = today_of(user)
+        data = f"stats:day:{ymd(today - timedelta(days=31))}:{ymd(today)}"  # 32 дня
+        await stats.cb_stats_day(make_callback(data, make_message()), session)
+        cb_answer.assert_awaited_once_with("Период — не больше 31 дня")
+        photo.assert_not_called()
+
+    async def test_31_days_ok(self, session, user, photo, delete, cb_answer) -> None:
+        today = today_of(user)
+        start = today - timedelta(days=30)
+        await add_row(session, user, timestamp=local_noon(user, start))
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(start)}:{ymd(today)}", make_message()), session)
+        caption = photo.call_args.kwargs["caption"]
+        assert caption.startswith(f"📊 За период {start:%d.%m}–{today:%d.%m} (31 день)")
+        image = Image.open(io.BytesIO(photo.call_args.args[0].data))
+        assert image.size == (1080, 720)
+
+    async def test_summary_reversed_dates(self, session, user, photo, delete, cb_answer, mocker) -> None:
+        today = today_of(user)
+        start, end = today - timedelta(days=14), today - timedelta(days=10)
+        await add_row(session, user, systolic=150, diastolic=95, timestamp=local_noon(user, start))
+        await add_row(session, user, systolic=130, diastolic=85, timestamp=local_noon(user, end))
+        await add_row(session, user, systolic=200, diastolic=120, timestamp=local_noon(user, today))  # вне периода
+        render = mocker.spy(stats_chart, "render")
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(end)}:{ymd(start)}", make_message()), session)
+        caption = photo.call_args.kwargs["caption"]
+        assert caption.startswith(f"📊 За период {start:%d.%m}–{end:%d.%m} (5 дней)")
+        assert texts.STATS_COUNT.format(count=2) in caption
+        assert texts.STATS_SYSTOLIC.format(avg=140, min=130, max=150) in caption
+        assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb(f"{ymd(start)}:{ymd(end)}")
+        assert len(render.call_args.args[0]) == 5
+        document = photo.call_args.args[0]
+        assert document.filename == f"bp_stats_{ymd(start)}-{ymd(end)}.png"
+
+    async def test_single_day(self, session, user, photo, delete, cb_answer) -> None:
+        day = today_of(user) - timedelta(days=2)
+        await add_row(session, user, timestamp=local_noon(user, day))
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(day)}:{ymd(day)}", make_message()), session)
+        assert photo.call_args.kwargs["caption"].startswith(f"📊 За период {day:%d.%m}–{day:%d.%m} (1 день)")
+
+    async def test_empty_period(self, session, user, edit, photo, cb_answer) -> None:
+        day = today_of(user) - timedelta(days=2)
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(day)}:{ymd(day)}", make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_EMPTY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
+        photo.assert_not_called()
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            "stats:day:",
+            "stats:day:2026",
+            "stats:day:20261332",
+            "stats:day:20261101:x",
+            "stats:day:20261101:20261102:20261103",
+        ],
+    )
+    async def test_broken(self, session, user, edit, cb_answer, data) -> None:
+        await stats.cb_stats_day(make_callback(data, make_message()), session)
+        assert edit.call_args.args[0] == texts.BTN_STATS
+
+    async def test_other_users_data_not_shown(self, session, user, photo, delete, edit, cb_answer) -> None:
+        """Изоляция (§7.1): сводка — только по записям текущего пользователя."""
+        day = today_of(user) - timedelta(days=1)
+        other = UserModel(telegram_id=222_222, timezone=user.timezone)
+        session.add(other)
+        await session.commit()
+        await add_row(session, other, timestamp=local_noon(user, day))
+        await stats.cb_stats_day(make_callback(f"stats:day:{ymd(day)}:{ymd(day)}", make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_EMPTY
+        photo.assert_not_called()
+
+
+class TestCustomSummaryBack:
+    async def test_stats_c_shows_summary(self, session, user, photo, delete, cb_answer) -> None:
+        today = today_of(user)
+        start = today - timedelta(days=3)
+        await add_row(session, user, timestamp=local_noon(user, start))
+        await stats.cb_stats_show(make_callback(f"stats:c:{ymd(start)}:{ymd(today)}", make_message()), session)
+        assert photo.call_args.kwargs["caption"].startswith(f"📊 За период {start:%d.%m}–{today:%d.%m} (4 дня)")
+
+    @pytest.mark.parametrize("suffix", ["x", "20261101", "20261101:x"])
+    async def test_stats_c_broken(self, session, user, edit, photo, cb_answer, suffix) -> None:
+        await stats.cb_stats_show(make_callback(f"stats:c:{suffix}", make_message()), session)
+        assert edit.call_args.args[0] == texts.BTN_STATS
+        photo.assert_not_called()
+
+    async def test_stats_c_forged_too_long(self, session, user, edit, photo, cb_answer) -> None:
+        today = today_of(user)
+        data = f"stats:c:{ymd(today - timedelta(days=100))}:{ymd(today)}"
+        await stats.cb_stats_show(make_callback(data, make_message()), session)
+        assert edit.call_args.args[0] == texts.BTN_STATS
+        photo.assert_not_called()
+
+
+class TestByDays:
+    async def test_list_from_photo(self, session, user, delete, answer, edit, cb_answer) -> None:
+        today = today_of(user)
+        d1, d3 = today - timedelta(days=6), today - timedelta(days=4)
+        await add_row(session, user, systolic=130, diastolic=86, pulse=70, timestamp=local_noon(user, d1))
+        await add_row(
+            session, user, systolic=138, diastolic=86, pulse=72,
+            timestamp=local_noon(user, d1) + timedelta(hours=1),
+        )
+        await add_row(session, user, systolic=120, diastolic=80, pulse=None, timestamp=local_noon(user, d3))
+        await stats.cb_stats_days(make_callback("stats:days:7", photo_message()), session)
+        delete.assert_awaited_once()
+        edit.assert_not_called()
+        text = answer.call_args.args[0]
+        assert text == (
+            f"📅 Средние по дням · {d1:%d.%m}–{today:%d.%m}\n"
+            f"🟡 {d1:%d.%m} — 134/86, пульс 71\n"
+            f"🟢 {d3:%d.%m} — 120/80\n"
+            "Среднее за день: 127/83, пульс 71"
+        )
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.stats_days_kb("7")
+
+    async def test_list_30_days(self, session, user, edit, cb_answer) -> None:
+        today = today_of(user)
+        first = today - timedelta(days=29)
+        await add_row(session, user, systolic=150, diastolic=95, pulse=80, timestamp=local_noon(user, first))
+        await stats.cb_stats_days(make_callback("stats:days:30", make_message()), session)
+        lines = edit.call_args.args[0].splitlines()
+        assert lines[0] == f"📅 Средние по дням · {first:%d.%m}–{today:%d.%m}"
+        assert lines[1].startswith("🔴 ")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_days_kb("30")
+
+    async def test_list_custom(self, session, user, edit, cb_answer) -> None:
+        today = today_of(user)
+        start, end = today - timedelta(days=40), today - timedelta(days=10)
+        await add_row(session, user, timestamp=local_noon(user, start))
+        key = f"{ymd(start)}:{ymd(end)}"
+        await stats.cb_stats_days(make_callback(f"stats:days:{key}", make_message()), session)
+        assert edit.call_args.args[0].startswith(f"📅 Средние по дням · {start:%d.%m}–{end:%d.%m}")
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_days_kb(key)
+
+    async def test_no_records(self, session, user, edit, cb_answer) -> None:
+        await stats.cb_stats_days(make_callback("stats:days:7", make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_EMPTY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
+
+    @pytest.mark.parametrize("key", ["14", "x", "20261101", "20261101:20990101"])
+    async def test_broken(self, session, user, edit, cb_answer, key) -> None:
+        await stats.cb_stats_days(make_callback(f"stats:days:{key}", make_message()), session)
+        assert edit.call_args.args[0] == texts.BTN_STATS
+
+    async def test_back_to_photo(self, session, user, delete, photo, edit, cb_answer) -> None:
+        """«Назад» из списка: текст удаляется, приходит фото сводки того же периода."""
+        await add_row(session, user)
+        await stats.cb_stats_show(make_callback("stats:30", make_message()), session)
+        delete.assert_awaited_once()
+        assert photo.call_args.kwargs["caption"].startswith("📊 За 30 дней")
+        assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb("30")

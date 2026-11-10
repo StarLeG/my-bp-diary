@@ -1,11 +1,14 @@
 """Хендлеры статистики, экспорта CSV и PDF (SPEC.md, §6.5, §10 и §10.1).
 
-Период кнопками «7 дней» / «30 дней» → фото-гистограмма (`stats_chart`) с
+Период кнопками «7 дней» / «30 дней» / «📆 Свой период» (инлайн-календарь без
+FSM, ≤ 31 дня) → фото-гистограмма (`stats_chart`) с
 текстовой сводкой (`fmt_stats`) в подписи + футер «Поддержать» (≥ 3 записей и
 не чаще раза в сутки, при показе `users.last_support_shown_at` обновляется).
 Текстовое сообщение выбора периода в фото не превращается (ограничение
 Telegram) — оно удаляется и отправляется фото; кнопки под фото удаляют его
-и показывают свой экран новым текстовым сообщением (§6.5). «Экспорт CSV» → период
+и показывают свой экран новым текстовым сообщением (§6.5). «📅 По дням» — список
+средних по дням с измерениями и итог «Среднее за день» (`stats.daily_averages`).
+«Экспорт CSV» → период
 (7 / 30 / всё время) → два файла документами: измерения и приёмы лекарств
 (`csv_export`, лимит «всё время» — 5000 записей). Сообщение выбора периода
 редактируется, файлы отправляются новыми сообщениями.
@@ -63,7 +66,12 @@ async def _show(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup
         await _delete(callback)
         await message.answer(text, reply_markup=markup)  # type: ignore[union-attr]
     else:
-        await message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+        try:
+            await message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+        except TelegramBadRequest as error:
+            # Двойное нажатие той же кнопки календаря — тот же экран (§7.2).
+            if "message is not modified" not in str(error):
+                raise
 
 
 async def _delete(callback: CallbackQuery) -> None:
@@ -84,8 +92,13 @@ def _format_summary(
     end_day: date,
     user: User,
     summary: stats_service.StatsSummary,
+    *,
+    custom: bool = False,
 ) -> str:
-    """Сводка по числам сервиса; строка приверженности — только при лекарствах."""
+    """Сводка по числам сервиса; строка приверженности — только при лекарствах.
+
+    `custom` — свой период: заголовок «За период … (N дней)» (§6.5, 0.5.3).
+    """
     adherence = None
     if summary.adherence is not None:
         taken, planned = summary.adherence
@@ -106,6 +119,7 @@ def _format_summary(
         target=f"{user.target_systolic}/{user.target_diastolic}",
         goal_verdict=summary.goal_verdict or texts.STATS_GOAL_OK,
         adherence=adherence,
+        custom=custom,
     )
 
 
@@ -138,41 +152,243 @@ async def cb_stats_periods(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.in_({"stats:7", "stats:30"}))
+@router.callback_query(F.data.in_({"stats:7", "stats:30"}) | F.data.startswith("stats:c:"))
 async def cb_stats_show(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Сводка за 7/30 локальных суток: фото-гистограмма со сводкой в подписи (§6.5).
+    """Сводка за 7/30 суток или свой период: фото-гистограмма со сводкой (§6.5).
 
-    Нет записей — прежний текст без картинки. Картинка рисуется в потоке
-    (§7.2 п.7) по значениям дней; транзакция закрыта до генерации и отправки.
+    `stats:c:{с}:{по}` — свой период («Назад» из «По дням»); битые или
+    недопустимые даты — экран выбора периода.
     """
-    days = int(callback.data.split(":")[1])  # type: ignore[union-attr]
-    tg_id = callback.from_user.id
-    user = await measurements_service.get_or_create_user(session, tg_id)
-    today = datetime.now(ZoneInfo(user.timezone)).date()
-    start_day = today - timedelta(days=days - 1)
-    summary = await stats_service.summary(session, user, start_day, today)
+    data = callback.data or ""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    today = _today(user)
+    if data.startswith("stats:c:"):
+        period = _parse_period(data.removeprefix("stats:c:"), today)
+        if period is None:
+            await _broken(callback)
+            return
+        await _send_summary(callback, session, user, period[0], period[1], custom=True)
+        return
+    days = int(data.split(":")[1])
+    await _send_summary(
+        callback, session, user, today - timedelta(days=days - 1), today, custom=False
+    )
+
+
+async def _send_summary(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    start_day: date,
+    end_day: date,
+    *,
+    custom: bool,
+) -> None:
+    """Фото-гистограмма со сводкой в подписи; нет записей — текст (§6.5).
+
+    Картинка рисуется в потоке (§7.2 п.7) по значениям дней; транзакция
+    закрыта до генерации и отправки.
+    """
+    summary = await stats_service.summary(session, user, start_day, end_day)
     if summary.count == 0:
         await session.commit()
         await _show(callback, texts.STATS_EMPTY, keyboards.stats_period_kb())
         await callback.answer()
         return
-    text = _format_summary(days, start_day, today, user, summary)
+    days = (end_day - start_day).days + 1
+    text = _format_summary(days, start_day, end_day, user, summary, custom=custom)
     footer = await _support_footer(session, user)
     if footer is not None:
         text = f"{text}\n\n{footer}"
     measurements = await measurements_service.measurements_for_period(
-        session, user, start_day, today
+        session, user, start_day, end_day
     )
-    chart_days = stats_chart.daily_values(measurements, user.timezone, start_day, today)
+    chart_days = stats_chart.daily_values(measurements, user.timezone, start_day, end_day)
     await session.commit()  # фиксация last_support_shown_at (§7.2 — вне транзакций чтения)
     await callback.answer()
     png = await asyncio.to_thread(stats_chart.render, chart_days)
     await _delete(callback)
+    period = _period_key(start_day, end_day) if custom else str(days)
     await callback.message.answer_photo(  # type: ignore[union-attr]
-        BufferedInputFile(png, filename=f"bp_stats_{start_day:%Y%m%d}-{today:%Y%m%d}.png"),
+        BufferedInputFile(png, filename=f"bp_stats_{start_day:%Y%m%d}-{end_day:%Y%m%d}.png"),
         caption=text,
-        reply_markup=keyboards.stats_result_kb(),
+        reply_markup=keyboards.stats_result_kb(period),
     )
+
+
+# ─────────────────────────── Свой период (0.5.3) ───────────────────────────
+
+#: Наибольшая длина своего периода в боте, дней (§6.5).
+MAX_CUSTOM_DAYS = 31
+
+
+def _today(user: User) -> date:
+    return datetime.now(ZoneInfo(user.timezone)).date()
+
+
+def _parse_day(value: str) -> Optional[date]:
+    """`ГГГГММДД` → дата; иначе None."""
+    if len(value) != 8 or not value.isdigit():
+        return None
+    try:
+        return datetime.strptime(value, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
+def _parse_month(value: str) -> Optional[tuple[int, int]]:
+    """`ГГГГММ` → (год, месяц); иначе None."""
+    if len(value) != 6 or not value.isdigit():
+        return None
+    year, month = int(value[:4]), int(value[4:])
+    if year < 1 or not 1 <= month <= 12:
+        return None
+    return year, month
+
+
+def _check_period(
+    first: date, last: date, today: date
+) -> tuple[Optional[tuple[date, date]], Optional[str]]:
+    """Проверки своего периода (§6.5): (период, None) или (None, текст ошибки).
+
+    Обратный порядок дат — меняются местами; будущее и > 31 дня — ошибка.
+    """
+    if first > today or last > today:
+        return None, texts.STATS_CAL_FUTURE
+    start, end = min(first, last), max(first, last)
+    if (end - start).days + 1 > MAX_CUSTOM_DAYS:
+        return None, texts.STATS_CAL_TOO_LONG
+    return (start, end), None
+
+
+def _parse_period(value: str, today: date) -> Optional[tuple[date, date]]:
+    """`ГГГГММДД:ГГГГММДД` из callback_data → допустимый период или None."""
+    parts = value.split(":")
+    if len(parts) != 2:
+        return None
+    first, last = _parse_day(parts[0]), _parse_day(parts[1])
+    if first is None or last is None:
+        return None
+    period, _ = _check_period(first, last, today)
+    return period
+
+
+def _period_key(start_day: date, end_day: date) -> str:
+    return f"{start_day:%Y%m%d}:{end_day:%Y%m%d}"
+
+
+async def _broken(callback: CallbackQuery) -> None:
+    """Битая или устаревшая callback_data — экран выбора периода (§6.5)."""
+    text, markup = _periods_screen()
+    await _show(callback, text, markup)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+async def _show_calendar(
+    callback: CallbackQuery, year: int, month: int, today: date, start: Optional[date]
+) -> None:
+    text = (
+        texts.STATS_CAL_LAST.format(date=start.strftime("%d.%m"))
+        if start is not None
+        else texts.STATS_CAL_FIRST
+    )
+    await _show(callback, text, keyboards.stats_calendar_kb(year, month, today, start))
+    await callback.answer()
+
+
+@router.callback_query(F.data == "stats:noop")
+async def cb_stats_noop(callback: CallbackQuery) -> None:
+    """Заглушки календаря (месяц, дни недели, пустые клетки)."""
+    await callback.answer()
+
+
+@router.callback_query((F.data == "stats:cal") | F.data.startswith("stats:cal:"))
+async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> None:
+    """«📆 Свой период» и листание месяцев: `stats:cal[:{ГГГГММ}[:{с}]]` (§6.5, §8)."""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    today = _today(user)
+    parts = (callback.data or "").split(":")[2:]
+    if not parts:
+        await _show_calendar(callback, today.year, today.month, today, None)
+        return
+    month = _parse_month(parts[0]) if len(parts) <= 2 else None
+    start = _parse_day(parts[1]) if month is not None and len(parts) == 2 else None
+    if (
+        month is None
+        or month > (today.year, today.month)
+        or (len(parts) == 2 and (start is None or start > today))
+    ):
+        await _broken(callback)
+        return
+    await _show_calendar(callback, month[0], month[1], today, start)
+
+
+@router.callback_query(F.data.startswith("stats:day:"))
+async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выбор дня: `stats:day:{д}` — первый, `stats:day:{с}:{д}` — последний (§6.5).
+
+    Ошибки проверки — всплывающим уведомлением, календарь остаётся на месте.
+    """
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    today = _today(user)
+    parts = (callback.data or "").split(":")[2:]
+    picked = [_parse_day(part) for part in parts]
+    if not 1 <= len(picked) <= 2 or any(day is None for day in picked):
+        await _broken(callback)
+        return
+    if len(picked) == 1:
+        first = picked[0]
+        assert first is not None  # noqa: S101 — проверено выше
+        if first > today:
+            await callback.answer(texts.STATS_CAL_FUTURE)
+            return
+        await _show_calendar(callback, first.year, first.month, today, first)
+        return
+    first, last = picked
+    assert first is not None and last is not None  # noqa: S101 — проверено выше
+    period, error = _check_period(first, last, today)
+    if period is None:
+        await callback.answer(error)
+        return
+    await _send_summary(callback, session, user, period[0], period[1], custom=True)
+
+
+@router.callback_query(F.data.startswith("stats:days:"))
+async def cb_stats_days(callback: CallbackQuery, session: AsyncSession) -> None:
+    """«📅 По дням»: средние по дням с измерениями и итог «Среднее за день» (§6.5)."""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    today = _today(user)
+    key = (callback.data or "").removeprefix("stats:days:")
+    if key in ("7", "30"):
+        start_day, end_day = today - timedelta(days=int(key) - 1), today
+    else:
+        period = _parse_period(key, today)
+        if period is None:
+            await _broken(callback)
+            return
+        start_day, end_day = period
+    measurements = await measurements_service.measurements_for_period(
+        session, user, start_day, end_day
+    )
+    averages = stats_service.daily_averages(measurements, user.timezone, start_day, end_day)
+    await session.commit()  # сессия не держится во время отправки (§7.2)
+    measured = averages.measured_days
+    if not measured:
+        await _show(callback, texts.STATS_EMPTY, keyboards.stats_period_kb())
+        await callback.answer()
+        return
+    rows = [
+        (d.day.strftime("%d.%m"), d.zone, d.systolic, d.diastolic, d.pulse)
+        for d in measured
+    ]
+    text = texts.fmt_daily_averages(
+        start_day.strftime("%d.%m"),
+        end_day.strftime("%d.%m"),
+        rows,  # type: ignore[arg-type]
+        (averages.systolic, averages.diastolic, averages.pulse),  # type: ignore[arg-type]
+    )
+    await _show(callback, text, keyboards.stats_days_kb(key))
+    await callback.answer()
 
 
 # ─────────────────────────── Экспорт CSV ───────────────────────────

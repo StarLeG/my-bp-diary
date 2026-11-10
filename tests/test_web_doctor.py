@@ -808,7 +808,9 @@ class TestPatientCardZones:
         con.commit()
         con.close()
         _login_doctor(client, doctor_id)
-        html = client.get(f"/doctor/patient/{user_id}").text
+        page = client.get(f"/doctor/patient/{user_id}").text
+        # Строки «Истории записей»; у «Средних по дням» (0.5.3) — своя подсветка дня.
+        html = page[page.index('id="history"') : page.index('id="notes"')]
         assert html.count('class="zone-row zone-row-high"') == 1
         assert 'title="САД: 130–139, ДАД: ≥ 90"' in html
         assert "zone-row-elevated" not in html, "128/82 — норма, без подсветки"

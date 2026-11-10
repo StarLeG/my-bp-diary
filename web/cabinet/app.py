@@ -161,6 +161,19 @@ async def _pdf_report_response(
     )
 
 
+#: Наибольшая длина периода для таблицы «Средние по дням», дней (§16.2, 0.5.3).
+DAILY_AVERAGES_MAX_DAYS = 92
+
+
+def _daily_averages(
+    measurements: list[Measurement], tz_name: str, start_day: date, end_day: date
+) -> Optional[stats.DailyAverages]:
+    """«Средние по дням» за период фильтра; None — период длиннее 92 дней (§16.2)."""
+    if (end_day - start_day).days + 1 > DAILY_AVERAGES_MAX_DAYS:
+        return None
+    return stats.daily_averages(measurements, tz_name, start_day, end_day)
+
+
 def _chart_payload(measurements: list[Measurement], tz_name: str) -> list[dict]:
     """Точки графика Chart.js: подпись по локальному времени + значения."""
     tz = ZoneInfo(tz_name)
@@ -853,6 +866,7 @@ def create_app(
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
+        daily = _daily_averages(measurements, user.timezone, start_day, end_day)
         medication_cells = await medications_service.medication_cells(db, user, measurements)
         medications = await medications_service.list_medications(db, user)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
@@ -908,6 +922,8 @@ def create_app(
             "medication_cells": medication_cells,
             "measurements": measurements,
             "summary": summary,
+            "daily": daily,
+            "daily_max_days": DAILY_AVERAGES_MAX_DAYS,
             "medications": medications,
             "reminders": {r.type: r for r in reminders},
             "doctor_notes": doctor_notes,
@@ -1761,6 +1777,7 @@ def create_app(
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
+        daily = _daily_averages(measurements, user.timezone, start_day, end_day)
         medication_cells = await medications_service.medication_cells(db, user, measurements)
         notes = await doctor_service.notes_for_patient(db, user.id)
         csrf_token = csrf.issue()
@@ -1776,6 +1793,8 @@ def create_app(
                 "medication_cells": medication_cells,
                 "measurements": measurements,
                 "summary": summary,
+                "daily": daily,
+                "daily_max_days": DAILY_AVERAGES_MAX_DAYS,
                 "notes": notes,
                 "chart": _chart_payload(measurements, user.timezone),
                 "chart_zones": CHART_ZONES,

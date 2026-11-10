@@ -57,6 +57,8 @@ BTN_30_DAYS = "30 дней"
 BTN_ALL_TIME = "всё время"
 BTN_EXPORT_CSV = "Экспорт CSV"
 BTN_EXPORT_PDF = "Экспорт PDF"
+BTN_CUSTOM_PERIOD = "📆 Свой период"
+BTN_BY_DAYS = "📅 По дням"
 
 BTN_TARGETS = "Целевые значения"
 BTN_REMINDERS = "Напоминания"
@@ -276,6 +278,58 @@ STATS_ADHERENCE = "Лекарства: принято {taken} из {planned} п�
 STATS_FOOTER_SUPPORT = "Бот бесплатный. Поддержать → /support"
 STATS_EMPTY = "За выбранный период записей нет"
 
+# Свой период и средние по дням (§6.5, 0.5.3)
+STATS_HEADER_CUSTOM = "📊 За период {date_from}–{date_to} ({days})"
+STATS_CAL_FIRST = "Выберите первый день периода:"
+STATS_CAL_LAST = "Период с {date}. Выберите последний день:"
+STATS_CAL_FUTURE = "Период не может заканчиваться в будущем"
+STATS_CAL_TOO_LONG = "Период — не больше 31 дня"
+STATS_CAL_WEEKDAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+STATS_CAL_MONTHS = (
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+)
+STATS_DAYS_HEADER = "📅 Средние по дням · {date_from}–{date_to}"
+STATS_DAYS_LINE = "{icon} {date} — {sys}/{dia}"
+STATS_DAYS_PULSE = ", пульс {pulse}"
+STATS_DAYS_TOTAL = "Среднее за день: {sys}/{dia}"
+#: Кружок зоны дня: 0 — зелёная, 1 — жёлтая, 2 — красная (`chart_zones`).
+STATS_ZONE_ICONS = ("🟢", "🟡", "🔴")
+
+
+def plural_days(count: int) -> str:
+    """«1 день», «2 дня», «5 дней», «11 дней», «21 день»."""
+    if count % 10 == 1 and count % 100 != 11:
+        word = "день"
+    elif count % 10 in (2, 3, 4) and count % 100 not in (12, 13, 14):
+        word = "дня"
+    else:
+        word = "дней"
+    return f"{count} {word}"
+
+
+def fmt_daily_averages(
+    date_from: str,
+    date_to: str,
+    rows: Sequence[tuple[str, int, int, int, Optional[int]]],
+    total: tuple[int, int, Optional[int]],
+) -> str:
+    """Список «По дням» (§6.5): строки дней (дата, зона, САД, ДАД, пульс) и итог."""
+    lines = [STATS_DAYS_HEADER.format(date_from=date_from, date_to=date_to)]
+    for day, zone, systolic, diastolic, pulse in rows:
+        line = STATS_DAYS_LINE.format(
+            icon=STATS_ZONE_ICONS[zone], date=day, sys=systolic, dia=diastolic
+        )
+        if pulse is not None:
+            line += STATS_DAYS_PULSE.format(pulse=pulse)
+        lines.append(line)
+    sys_total, dia_total, pulse_total = total
+    line = STATS_DAYS_TOTAL.format(sys=sys_total, dia=dia_total)
+    if pulse_total is not None:
+        line += STATS_DAYS_PULSE.format(pulse=pulse_total)
+    lines.append(line)
+    return "\n".join(lines)
+
 
 def fmt_stats(
     days: int,
@@ -293,10 +347,20 @@ def fmt_stats(
     target: str,
     goal_verdict: str,
     adherence: Optional[str] = None,
+    custom: bool = False,
 ) -> str:
-    """Сводка статистики (SPEC.md, раздел 6.5) — блоками, каждый на своей строке."""
+    """Сводка статистики (SPEC.md, раздел 6.5) — блоками, каждый на своей строке.
+
+    `custom` — свой период: заголовок «📊 За период … (N дней)» (0.5.3).
+    """
+    if custom:
+        header = STATS_HEADER_CUSTOM.format(
+            date_from=date_from, date_to=date_to, days=plural_days(days)
+        )
+    else:
+        header = STATS_HEADER.format(days=days, date_from=date_from, date_to=date_to)
     lines = [
-        STATS_HEADER.format(days=days, date_from=date_from, date_to=date_to),
+        header,
         STATS_COUNT.format(count=count),
         STATS_SYSTOLIC.format(avg=sys_avg, min=sys_min, max=sys_max),
         STATS_DIASTOLIC.format(avg=dia_avg, min=dia_min, max=dia_max),

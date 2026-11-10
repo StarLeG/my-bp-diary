@@ -292,6 +292,21 @@ td.actions {
   margin: 0 0 8px;
 }
 
+/* «Средние по дням» в сводке (§16.2, 0.5.3): итог «Среднее за день» —
+   последней строкой, жирным, без подсветки. */
+.daily-averages {
+  margin: 16px 0;
+}
+
+.daily-averages h3 {
+  margin: 0 0 8px;
+}
+
+.daily-table tfoot td {
+  font-weight: 700;
+  border-top: 2px solid var(--color-border);
+}
+
 /* График */
 .chart-wrap {
   position: relative;
@@ -503,6 +518,19 @@ td.actions {
     font-size: 0.85rem;
     text-align: left;
     flex-shrink: 0;
+  }
+
+  /* Итог «Средних по дням» — такой же карточкой; пустая ячейка не нужна. */
+  .daily-table tfoot {
+    display: block;
+  }
+
+  .daily-table tfoot td {
+    border-top: none;
+  }
+
+  .daily-table tfoot td:empty {
+    display: none;
   }
 }
 

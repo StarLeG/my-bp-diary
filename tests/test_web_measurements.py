@@ -1089,7 +1089,9 @@ class TestHistoryZonesRender:
         client, user_id = app_client
         _register(client)
         self._insert(settings, user_id, (154, 84), (135, 80), (120, 70))
-        html = client.get("/?days=7#history").text
+        page = client.get("/?days=7#history").text
+        # Строки «Истории записей»; у «Средних по дням» (0.5.3) — своя подсветка дня.
+        html = page[page.index('id="history"') :]
         assert html.count('class="zone-row zone-row-high"') == 1
         assert html.count('class="zone-row zone-row-elevated"') == 1
         assert 'title="САД: ≥ 140"' in html

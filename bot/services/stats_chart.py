@@ -18,13 +18,13 @@ import io
 import math
 import re
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date
 from typing import Iterable, Optional, Sequence
-from zoneinfo import ZoneInfo
 
 from PIL import Image, ImageDraw, ImageFont
 
 from bot.models import Measurement
+from bot.services import stats as stats_service
 from bot.services.pdf_report import FONT_REGULAR_PATH
 from web.cabinet.chart_zones import CHART_ZONES, band_index
 
@@ -102,30 +102,16 @@ def thresholds(kind: str) -> list[int]:
 def daily_values(
     measurements: Iterable[Measurement], tz_name: str, start_day: date, end_day: date
 ) -> list[DayValues]:
-    """Записи → средние по каждому дню периода (дни без записей — пустые)."""
-    tz = ZoneInfo(tz_name)
-    buckets: dict[date, list[Measurement]] = {}
-    for m in measurements:
-        buckets.setdefault(m.timestamp.astimezone(tz).date(), []).append(m)
-    result: list[DayValues] = []
-    day = start_day
-    while day <= end_day:
-        rows = buckets.get(day, [])
-        pulses = [m.pulse for m in rows if m.pulse is not None]
-        result.append(
-            DayValues(
-                day=day,
-                systolic=_avg([m.systolic for m in rows]),
-                diastolic=_avg([m.diastolic for m in rows]),
-                pulse=_avg(pulses),
-            )
-        )
-        day += timedelta(days=1)
-    return result
+    """Записи → средние по каждому дню периода (дни без записей — пустые).
 
-
-def _avg(values: Sequence[int]) -> Optional[int]:
-    return round(sum(values) / len(values)) if values else None
+    Числа — из `stats.daily_averages`: столбики и «Средние по дням» (§6.5)
+    совпадают.
+    """
+    averages = stats_service.daily_averages(measurements, tz_name, start_day, end_day)
+    return [
+        DayValues(day=d.day, systolic=d.systolic, diastolic=d.diastolic, pulse=d.pulse)
+        for d in averages.days
+    ]
 
 
 def scale_limits(days: Sequence[DayValues]) -> tuple[int, int]:

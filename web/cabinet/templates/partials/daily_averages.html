@@ -1,0 +1,47 @@
+{# «Средние по дням» (SPEC.md, §16.2, §21, 0.5.3) — общий блок ЛК и кабинета врача.
+   `daily` — stats.DailyAverages за период фильтра; None — период длиннее
+   `daily_max_days` (таблица не строится). Все дни периода по возрастанию даты:
+   день без измерений — «—» и «0», без подсветки; подсветка — правило
+   «Истории записей» (`row_zone`). Последняя строка — итог «Среднее за день». #}
+<div class="daily-averages" id="daily-averages">
+  <h3>Средние по дням</h3>
+  {% if daily is none %}
+    <p class="muted">Выберите период до {{ daily_max_days }} дней, чтобы увидеть средние по дням</p>
+  {% else %}
+    {% include "partials/history_zone_legend.html" %}
+    <div class="table-scroll">
+      <table class="stacked-table daily-table">
+        <thead>
+          <tr>
+            <th>Дата</th>
+            <th>Сист.</th>
+            <th>Диаст.</th>
+            <th>Пульс</th>
+            <th>Измерений</th>
+          </tr>
+        </thead>
+        <tbody>
+          {% for d in daily.days %}
+            {% set zone = row_zone(d.systolic, d.diastolic) if d.count else none %}
+            <tr{% if zone %} class="zone-row {{ zone.css_class }}" style="--zone-fill: {{ zone.fill }}" title="{{ zone.title }}"{% endif %}>
+              <td data-label="Дата">{{ d.day.strftime("%d.%m.%Y") }}</td>
+              <td data-label="Сист.">{{ d.systolic if d.count else "—" }}</td>
+              <td data-label="Диаст.">{{ d.diastolic if d.count else "—" }}</td>
+              <td data-label="Пульс">{{ d.pulse if d.pulse is not none else "—" }}</td>
+              <td data-label="Измерений">{{ d.count }}</td>
+            </tr>
+          {% endfor %}
+        </tbody>
+        <tfoot>
+          <tr class="daily-total">
+            <td data-label="">Среднее за день</td>
+            <td data-label="Сист.">{{ daily.systolic }}</td>
+            <td data-label="Диаст.">{{ daily.diastolic }}</td>
+            <td data-label="Пульс">{{ daily.pulse if daily.pulse is not none else "—" }}</td>
+            <td data-label=""></td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>
+  {% endif %}
+</div>

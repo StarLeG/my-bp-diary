@@ -1,6 +1,8 @@
 """Тесты текстов (bot/texts.py): состав, шаблоны, терминология, целостность."""
 from __future__ import annotations
 
+import pytest
+
 import bot.texts as texts
 
 
@@ -344,3 +346,46 @@ class TestArchiveFormatting:
 
     def test_archive_future_error_canonical(self) -> None:
         assert texts.ARCHIVE_FUTURE_ERROR == "Время измерения не может быть в будущем"
+
+
+class TestDailyAveragesTexts:
+    """Свой период и «По дням» (§6.5, 0.5.3)."""
+
+    @pytest.mark.parametrize(
+        ("count", "expected"),
+        [
+            (1, "1 день"), (2, "2 дня"), (4, "4 дня"), (5, "5 дней"), (11, "11 дней"),
+            (12, "12 дней"), (14, "14 дней"), (15, "15 дней"), (21, "21 день"),
+            (22, "22 дня"), (25, "25 дней"), (31, "31 день"), (111, "111 дней"),
+        ],
+    )
+    def test_plural_days(self, count: int, expected: str) -> None:
+        assert texts.plural_days(count) == expected
+
+    def test_custom_header(self) -> None:
+        result = texts.fmt_stats(
+            days=15, date_from="01.11", date_to="15.11", count=3,
+            sys_avg=130, sys_min=120, sys_max=140, dia_avg=80, dia_min=70, dia_max=90,
+            pulse_avg=None, trend=texts.STATS_TREND_FEW, target="130/80",
+            goal_verdict=texts.STATS_GOAL_OK, custom=True,
+        )
+        assert result.splitlines()[0] == "📊 За период 01.11–15.11 (15 дней)"
+
+    def test_daily_list(self) -> None:
+        result = texts.fmt_daily_averages(
+            "04.11",
+            "10.11",
+            [("04.11", 1, 134, 86, 71), ("05.11", 0, 128, 81, None), ("07.11", 2, 146, 92, 75)],
+            (131, 84, 70),
+        )
+        assert result == (
+            "📅 Средние по дням · 04.11–10.11\n"
+            "🟡 04.11 — 134/86, пульс 71\n"
+            "🟢 05.11 — 128/81\n"
+            "🔴 07.11 — 146/92, пульс 75\n"
+            "Среднее за день: 131/84, пульс 70"
+        )
+
+    def test_daily_list_without_pulse(self) -> None:
+        result = texts.fmt_daily_averages("04.11", "04.11", [("04.11", 0, 120, 80, None)], (120, 80, None))
+        assert result.splitlines()[-1] == "Среднее за день: 120/80"

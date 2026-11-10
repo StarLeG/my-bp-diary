@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from datetime import date
 
 import pytest
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -57,7 +58,15 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("diary_kb", keyboards.diary_kb()),
         ("diary_kb_empty", keyboards.diary_kb(is_empty=True)),
         ("stats_period_kb", keyboards.stats_period_kb()),
-        ("stats_result_kb", keyboards.stats_result_kb()),
+        ("stats_result_kb", keyboards.stats_result_kb("7")),
+        ("stats_result_kb_custom", keyboards.stats_result_kb("20261101:20261115")),
+        ("stats_days_kb", keyboards.stats_days_kb("30")),
+        ("stats_days_kb_custom", keyboards.stats_days_kb("20261101:20261115")),
+        ("stats_calendar_kb", keyboards.stats_calendar_kb(2026, 11, date(2026, 11, 10))),
+        (
+            "stats_calendar_kb_step2",
+            keyboards.stats_calendar_kb(2026, 10, date(2026, 11, 10), date(2026, 10, 3)),
+        ),
         ("csv_period_kb", keyboards.csv_period_kb()),
         ("pdf_period_kb", keyboards.pdf_period_kb()),
         ("main_menu_doctor", keyboards.main_menu(is_doctor=True)),
@@ -137,7 +146,12 @@ class TestCallbackData:
     def test_no_duplicate_buttons(self, name: str, markup: InlineKeyboardMarkup) -> None:
         # Уникальность пар (текст, callback_data); одинаковый callback у разных
         # городов с одним IANA допустим (Москва/СПб/Казань — Europe/Moscow).
-        pairs = [(button.text, button.callback_data) for button in buttons(markup)]
+        # Пустые клетки календаря (`stats:noop`, §6.5) — заглушки, не кнопки выбора.
+        pairs = [
+            (button.text, button.callback_data)
+            for button in buttons(markup)
+            if button.callback_data != "stats:noop"
+        ]
         assert len(pairs) == len(set(pairs)), f"{name}: дубли кнопок в клавиатуре"
 
     @pytest.mark.parametrize(
@@ -375,7 +389,7 @@ class TestPdfKeyboards:
     """Экспорт PDF (§10.1): кнопка под сводкой и экран периода."""
 
     def test_stats_result_has_pdf(self) -> None:
-        buttons = {b.callback_data: b.text for b in callback_buttons(keyboards.stats_result_kb())}
+        buttons = {b.callback_data: b.text for b in callback_buttons(keyboards.stats_result_kb("7"))}
         assert buttons["stats:pdf"] == texts.BTN_EXPORT_PDF == "Экспорт PDF"
         assert "stats:csv" in buttons
 
@@ -768,3 +782,89 @@ class TestArchiveKeyboards:
             (button.text, button.callback_data) for button in callback_buttons(keyboards.settings_kb())
         }
         assert (texts.BTN_ARCHIVE, "set:archive") in pairs
+
+
+class TestStatsCustomPeriodKeyboards:
+    """Свой период и «По дням» (§6.5, §8, 0.5.3)."""
+
+    def test_period_has_custom_button(self) -> None:
+        data = [b.callback_data for b in callback_buttons(keyboards.stats_period_kb())]
+        assert data == ["stats:7", "stats:30", "stats:cal", "menu:back"]
+        texts_ = [b.text for b in buttons(keyboards.stats_period_kb())]
+        assert texts.BTN_CUSTOM_PERIOD == "📆 Свой период" in texts_
+
+    @pytest.mark.parametrize("period", ["7", "30", "20261101:20261115"])
+    def test_result_has_by_days(self, period: str) -> None:
+        data = [b.callback_data for b in callback_buttons(keyboards.stats_result_kb(period))]
+        assert data == [f"stats:days:{period}", "stats:csv", "stats:pdf", "stats:periods"]
+        assert buttons(keyboards.stats_result_kb(period))[0].text == "📅 По дням"
+
+    @pytest.mark.parametrize(
+        ("period", "expected"),
+        [("7", "stats:7"), ("30", "stats:30"), ("20261101:20261115", "stats:c:20261101:20261115")],
+    )
+    def test_days_back_to_summary(self, period: str, expected: str) -> None:
+        markup = keyboards.stats_days_kb(period)
+        assert [b.callback_data for b in buttons(markup)] == [expected]
+        assert buttons(markup)[0].text == texts.BTN_BACK
+
+
+class TestStatsCalendar:
+    TODAY = date(2026, 11, 10)
+
+    def rows(self, markup: InlineKeyboardMarkup) -> list[list[InlineKeyboardButton]]:
+        return markup.inline_keyboard
+
+    def test_layout_step1(self) -> None:
+        rows = self.rows(keyboards.stats_calendar_kb(2026, 11, self.TODAY))
+        assert rows[0][0].text == "Ноябрь 2026" and rows[0][0].callback_data == "stats:noop"
+        assert [b.text for b in rows[1]] == ["Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс"]
+        assert all(b.callback_data == "stats:noop" for b in rows[1])
+        # 1 ноября 2026 — воскресенье: шесть пустых клеток перед ним.
+        first_week = rows[2]
+        assert [b.callback_data for b in first_week[:6]] == ["stats:noop"] * 6
+        assert first_week[6].text == "1" and first_week[6].callback_data == "stats:day:20261101"
+        weeks = rows[2:-2]
+        assert all(len(week) == 7 for week in weeks)
+        days = [b.text for week in weeks for b in week if b.callback_data != "stats:noop"]
+        assert days == [str(d) for d in range(1, 31)]
+        # Будущие дни кликабельны (проверка — на сервере).
+        assert any(b.callback_data == "stats:day:20261130" for week in weeks for b in week)
+        # Текущий месяц: только «◀».
+        assert [(b.text, b.callback_data) for b in rows[-2]] == [("◀", "stats:cal:202610")]
+        assert rows[-1][0].callback_data == "stats:periods"
+
+    def test_past_month_has_next(self) -> None:
+        rows = self.rows(keyboards.stats_calendar_kb(2026, 1, self.TODAY))
+        assert [b.callback_data for b in rows[-2]] == ["stats:cal:202512", "stats:cal:202602"]
+        assert rows[0][0].text == "Январь 2026"
+
+    def test_december_next_is_january(self) -> None:
+        rows = self.rows(keyboards.stats_calendar_kb(2025, 12, self.TODAY))
+        assert [b.callback_data for b in rows[-2]] == ["stats:cal:202511", "stats:cal:202601"]
+
+    def test_step2_marks_start_and_keeps_it(self) -> None:
+        start = date(2026, 10, 3)
+        rows = self.rows(keyboards.stats_calendar_kb(2026, 10, self.TODAY, start))
+        days = {b.text: b.callback_data for week in rows[2:-2] for b in week}
+        assert days["[3]"] == "stats:day:20261003:20261003"
+        assert days["15"] == "stats:day:20261003:20261015"
+        assert "3" not in days
+        assert [b.callback_data for b in rows[-2]] == [
+            "stats:cal:202609:20261003",
+            "stats:cal:202611:20261003",
+        ]
+
+    def test_step2_other_month_no_mark(self) -> None:
+        start = date(2026, 10, 3)
+        rows = self.rows(keyboards.stats_calendar_kb(2026, 11, self.TODAY, start))
+        labels = [b.text for week in rows[2:-2] for b in week]
+        assert not any(label.startswith("[") for label in labels)
+
+    def test_min_year_has_no_prev(self) -> None:
+        rows = self.rows(keyboards.stats_calendar_kb(1, 1, self.TODAY))
+        assert [b.text for b in rows[-2]] == ["▶"]
+
+    def test_callback_data_fits_limit(self) -> None:
+        markup = keyboards.stats_calendar_kb(2026, 10, self.TODAY, date(2026, 10, 31))
+        assert max(len(b.callback_data.encode()) for b in callback_buttons(markup)) <= 64

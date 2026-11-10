@@ -171,3 +171,41 @@ class TestDailyValues:
     def test_no_rows(self) -> None:
         days = stats_chart.daily_values([], "UTC", D0, D0 + timedelta(days=6))
         assert len(days) == 7 and all(d.systolic is None for d in days)
+
+
+class TestCustomPeriodRender:
+    """Свой период (§6.5, 0.5.3): от 1 до 31 столбика."""
+
+    def test_single_day_with_values(self, mocker) -> None:
+        drawn: list[str] = []
+        original = stats_chart._text_center
+
+        def spy(draw, x, y, text, font, fill):
+            drawn.append(text)
+            return original(draw, x, y, text, font, fill)
+
+        mocker.patch.object(stats_chart, "_text_center", side_effect=spy)
+        image = Image.open(io.BytesIO(stats_chart.render(week((150, 95, 70)))))
+        assert image.size == (1080, 720)
+        assert {"150", "95", "70", "03.11"} <= set(drawn)
+
+    def test_31_days(self, mocker) -> None:
+        drawn: list[str] = []
+        original = stats_chart._text_center
+
+        def spy(draw, x, y, text, font, fill):
+            drawn.append(text)
+            return original(draw, x, y, text, font, fill)
+
+        mocker.patch.object(stats_chart, "_text_center", side_effect=spy)
+        days = [DayValues(D0 + timedelta(i), 151, 93, 66) for i in range(31)]
+        image = Image.open(io.BytesIO(stats_chart.render(days))).convert("RGB")
+        assert image.size == (1080, 720)
+        assert "151" not in drawn  # подписи значений — только при ≤ 7 днях
+        assert drawn.count("66") == 31
+        layout = layout_for(days)
+        assert pixel_above_mid(image, layout, column_x(30, 31)) == RED
+
+    @pytest.mark.parametrize(("total", "values"), [(8, False), (7, True), (2, True)])
+    def test_value_labels_threshold(self, total, values) -> None:
+        assert (total <= stats_chart.VALUE_LABELS_MAX_DAYS) is values

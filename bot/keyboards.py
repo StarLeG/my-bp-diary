@@ -7,6 +7,8 @@
 """
 from __future__ import annotations
 
+import calendar
+from datetime import MINYEAR, date
 from typing import Collection, Iterable, Mapping, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
@@ -400,21 +402,96 @@ def diary_kb(is_empty: bool = False) -> InlineKeyboardMarkup:
 
 
 def stats_period_kb() -> InlineKeyboardMarkup:
-    """Выбор периода статистики: 7 / 30 дней."""
+    """Выбор периода статистики: 7 / 30 дней / свой период (§6.5)."""
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(text=texts.BTN_7_DAYS, callback_data="stats:7"),
         InlineKeyboardButton(text=texts.BTN_30_DAYS, callback_data="stats:30"),
     )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CUSTOM_PERIOD, callback_data="stats:cal"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
 
 
-def stats_result_kb() -> InlineKeyboardMarkup:
-    """Под сводкой: экспорт CSV, экспорт PDF и «Назад»."""
+def stats_result_kb(period: str) -> InlineKeyboardMarkup:
+    """Под сводкой: «По дням», экспорт CSV, экспорт PDF и «Назад».
+
+    `period` — `7` / `30` или `ГГГГММДД:ГГГГММДД` (свой период, §8).
+    """
     builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_BY_DAYS, callback_data=f"stats:days:{period}")
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_CSV, callback_data="stats:csv"))
     builder.row(InlineKeyboardButton(text=texts.BTN_EXPORT_PDF, callback_data="stats:pdf"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="stats:periods"))
+    return builder.as_markup()
+
+
+def stats_summary_callback(period: str) -> str:
+    """Callback сводки периода: `stats:7` / `stats:30` / `stats:c:{с}:{по}`."""
+    return f"stats:{period}" if period in ("7", "30") else f"stats:c:{period}"
+
+
+def stats_days_kb(period: str) -> InlineKeyboardMarkup:
+    """Под списком «По дням»: «Назад» — к фото сводки того же периода."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_BACK, callback_data=stats_summary_callback(period)
+        )
+    )
+    return builder.as_markup()
+
+
+def _noop(text: str = " ") -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data="stats:noop")
+
+
+def stats_calendar_kb(
+    year: int, month: int, today: date, start: Optional[date] = None
+) -> InlineKeyboardMarkup:
+    """Календарь своего периода (§6.5): шаг 1 — `start` не задан, шаг 2 — задан.
+
+    Неделя — с понедельника; клетки вне месяца — пустые заглушки; будущие дни
+    кликабельны (проверка — на сервере); «▶» нет в текущем месяце; выбранный
+    первый день — «[N]».
+    """
+    suffix = f":{start:%Y%m%d}" if start is not None else ""
+    builder = InlineKeyboardBuilder()
+    builder.row(_noop(f"{texts.STATS_CAL_MONTHS[month - 1]} {year}"))
+    builder.row(*(_noop(name) for name in texts.STATS_CAL_WEEKDAYS))
+    for week in calendar.Calendar(firstweekday=0).monthdayscalendar(year, month):
+        row = []
+        for day in week:
+            if day == 0:
+                row.append(_noop())
+                continue
+            current = date(year, month, day)
+            label = f"[{day}]" if current == start else str(day)
+            data = (
+                f"stats:day:{start:%Y%m%d}:{current:%Y%m%d}"
+                if start is not None
+                else f"stats:day:{current:%Y%m%d}"
+            )
+            row.append(InlineKeyboardButton(text=label, callback_data=data))
+        builder.row(*row)
+    nav = []
+    if (year, month) > (MINYEAR, 1):
+        prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
+        nav.append(
+            InlineKeyboardButton(
+                text="◀", callback_data=f"stats:cal:{prev_year:04d}{prev_month:02d}{suffix}"
+            )
+        )
+    if (year, month) < (today.year, today.month):
+        next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
+        nav.append(
+            InlineKeyboardButton(
+                text="▶", callback_data=f"stats:cal:{next_year:04d}{next_month:02d}{suffix}"
+            )
+        )
+    builder.row(*nav)  # хотя бы одна стрелка есть всегда: «◀» или «▶»
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="stats:periods"))
     return builder.as_markup()
 
