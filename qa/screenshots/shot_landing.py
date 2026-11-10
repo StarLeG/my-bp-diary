@@ -105,6 +105,10 @@ def _clip(
     }
 
 
+#: Скрыть блок «Средние по дням» (§16.2, 0.5.3) в кадрах, где нужны сводка и графики.
+_HIDE_DAILY = "#daily-averages { display: none !important; }"
+
+
 def _wait_charts(page) -> None:
     """Дождаться, пока Chart.js нарисует три панели сводки."""
     page.wait_for_function(
@@ -166,6 +170,9 @@ def shoot_cabinet(url: str, db: Path, secret: str) -> None:
         print("Личный кабинет:")
         page.goto(f"{url}/?days=7")
         _wait_charts(page)
+        save(page.locator("#daily-averages").screenshot(), "cabinet-daily")
+        # Кадр графиков — без таблицы «Средние по дням» (у неё свой кадр, 0.5.3).
+        page.add_style_tag(content=_HIDE_DAILY)
         save(page.locator("#summary").screenshot(), "cabinet-charts")
 
         page.goto(f"{url}/?days=7#history")
@@ -216,6 +223,7 @@ def shoot_cabinet(url: str, db: Path, secret: str) -> None:
 
         mobile.goto(f"{url}/doctor/patient/{user_id}?days=7")
         _wait_charts(mobile)
+        mobile.add_style_tag(content=_HIDE_DAILY)  # сводка и графики — без таблицы по дням
         save(mobile.screenshot(full_page=True, clip=_clip(mobile, "#summary .facts", "#bp-chart")),
              "doctor-card-mobile", width=780)
 
@@ -287,6 +295,21 @@ _TG_SHOW_ALL = """
 """
 
 
+#: Номер inline-кнопки последнего сообщения с подписью `label` (-1 — нет).
+_TG_BUTTON_INDEX = """
+(label) => {
+  const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
+  const text = el => { const c = el.cloneNode(true);
+    c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
+    return strip(c.textContent); };
+  const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
+  if (!all.length) return -1;
+  const buttons = [...all[all.length - 1].querySelectorAll('.reply-markup-button')];
+  return buttons.findIndex(b => text(b) === strip(label));
+}
+"""
+
+
 class TelegramDialog:
     """Диалог с тестовым ботом в Telegram Web K: отправка, нажатия, ожидание, кадр."""
 
@@ -317,13 +340,18 @@ class TelegramDialog:
         Пауза перед нажатием — как у человека: антидребезг бота
         (`DebounceMiddleware`) отбрасывает слишком частые нажатия.
         """
-        import re
-
         self.page.wait_for_timeout(1300)
-        button = self.last().locator(".reply-markup-button").filter(
-            has_text=re.compile(rf"^\s*{re.escape(label)}\s*$")
-        )
-        button.first.click()
+        # Эмодзи («📅 По дням», «◀») Telegram Web рисует картинками: подпись
+        # кнопки сравнивается вместе с `alt` этих картинок, без U+FE0F.
+        index = -1
+        for _ in range(60):
+            index = self.page.evaluate(_TG_BUTTON_INDEX, label)
+            if index >= 0:
+                break
+            self.page.wait_for_timeout(500)
+        if index < 0:
+            raise AssertionError(f"нет кнопки {label!r} в последнем сообщении")
+        self.last().locator(".reply-markup-button").nth(index).click()
 
     def shot(self, name: str, keep: int, gap: int = 28) -> None:
         """Кадр: шапка чата + последние `keep` пузырей, без поля ввода.
@@ -355,8 +383,19 @@ class TelegramDialog:
         self.page.evaluate(_TG_SHOW_ALL)
 
 
-def shoot_bot(bot_username: str) -> None:
-    """Кадры бота в Telegram Web (P1 А): узкое окно — только диалог."""
+#: Длина своего периода в кадре календаря, дней (§6.5, 0.5.3).
+CUSTOM_PERIOD_DAYS = 14
+
+
+def shoot_bot(bot_username: str, stats_only: bool = False) -> None:
+    """Кадры бота в Telegram Web (P1 А): узкое окно — только диалог.
+
+    `stats_only` — только статистика: сводка, «По дням», календарь своего
+    периода (без ожидания напоминания и записи давления).
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
     from playwright.sync_api import sync_playwright
 
     from bot import texts
@@ -377,40 +416,41 @@ def shoot_bot(bot_username: str) -> None:
         dialog = TelegramDialog(page)
         print("Бот:")
 
-        # Напоминание — первым: после свежей записи давления бот слот не шлёт (§6.7).
-        print("  жду напоминание (до 10 мин)…", flush=True)
-        dialog.wait_text("Пора измерить давление", timeout=600_000)
-        dialog.shot("bot-reminder", keep=1)
+        if not stats_only:
+            # Напоминание — первым: после свежей записи давления бот слот не шлёт (§6.7).
+            print("  жду напоминание (до 10 мин)…", flush=True)
+            dialog.wait_text("Пора измерить давление", timeout=600_000)
+            dialog.shot("bot-reminder", keep=1)
 
-        dialog.send("/start")
-        dialog.wait_text(texts.BTN_MEASURE)
-        dialog.shot("bot-menu", keep=2)
+            dialog.send("/start")
+            dialog.wait_text(texts.BTN_MEASURE)
+            dialog.shot("bot-menu", keep=2)
 
-        dialog.tap(texts.BTN_MEASURE)
-        dialog.wait_text(texts.ASK_SYSTOLIC)
-        for digit in "135":
-            dialog.tap(digit)
-        dialog.wait_text(texts.KEYPAD_ENTERED.format(value=135))
-        dialog.shot("bot-keypad", keep=1)
-
-        dialog.tap(texts.BTN_DONE)
-        for value, nxt in (("85", None), ("72", None)):
-            dialog.page.wait_for_timeout(800)
-            for digit in value:
+            dialog.tap(texts.BTN_MEASURE)
+            dialog.wait_text(texts.ASK_SYSTOLIC)
+            for digit in "135":
                 dialog.tap(digit)
-            dialog.wait_text(texts.KEYPAD_ENTERED.format(value=value))
+            dialog.wait_text(texts.KEYPAD_ENTERED.format(value=135))
+            dialog.shot("bot-keypad", keep=1)
+
             dialog.tap(texts.BTN_DONE)
-        dialog.wait_text(texts.BTN_TOOK_MED)
-        dialog.shot("bot-saved", keep=1)
+            for value in ("85", "72"):
+                dialog.page.wait_for_timeout(800)
+                for digit in value:
+                    dialog.tap(digit)
+                dialog.wait_text(texts.KEYPAD_ENTERED.format(value=value))
+                dialog.tap(texts.BTN_DONE)
+            dialog.wait_text(texts.BTN_TOOK_MED)
+            dialog.shot("bot-saved", keep=1)
 
-        dialog.tap(texts.BTN_TOOK_MED)
-        dialog.wait_text(texts.BTN_MED_YES)
-        dialog.tap(texts.BTN_MED_YES)
-        dialog.wait_text(texts.MEDS_INTAKE_ASK)
-        dialog.shot("bot-meds", keep=2)
-        dialog.tap(texts.BTN_CANCEL)  # без отметок: журнал не трогаем
+            dialog.tap(texts.BTN_TOOK_MED)
+            dialog.wait_text(texts.BTN_MED_YES)
+            dialog.tap(texts.BTN_MED_YES)
+            dialog.wait_text(texts.MEDS_INTAKE_ASK)
+            dialog.shot("bot-meds", keep=2)
+            dialog.tap(texts.BTN_CANCEL)  # без отметок: журнал не трогаем
+            dialog.page.wait_for_timeout(1000)
 
-        dialog.page.wait_for_timeout(1000)
         dialog.send("/start")
         dialog.wait_text(texts.BTN_STATS)
         dialog.tap(texts.BTN_STATS)
@@ -418,6 +458,30 @@ def shoot_bot(bot_username: str) -> None:
         dialog.tap(texts.BTN_7_DAYS)
         dialog.wait_text("За 7 дней")
         dialog.shot("bot-stats", keep=1)
+
+        # «📅 По дням» и «📆 Свой период» (§6.5, 0.5.3).
+        dialog.tap(texts.BTN_BY_DAYS)
+        dialog.wait_text("Средние по дням")
+        dialog.shot("bot-daily", keep=1)
+        dialog.tap(texts.BTN_BACK)  # к фото сводки
+        dialog.wait_text("За 7 дней")
+        dialog.tap(texts.BTN_BACK)  # к выбору периода
+        dialog.wait_text("Свой период")  # эмодзи кнопки в Telegram Web — картинка
+        dialog.tap(texts.BTN_CUSTOM_PERIOD)
+        dialog.wait_text(texts.STATS_CAL_FIRST)
+        today = datetime.now(ZoneInfo("Europe/Minsk")).date()
+        start = today - timedelta(days=CUSTOM_PERIOD_DAYS - 1)
+        if (start.year, start.month) != (today.year, today.month):
+            dialog.tap("◀")
+            dialog.wait_text(f"{texts.STATS_CAL_MONTHS[start.month - 1]} {start.year}")
+        dialog.tap(str(start.day))
+        dialog.wait_text(texts.STATS_CAL_LAST.format(date=start.strftime("%d.%m")))
+        dialog.shot("bot-calendar", keep=1)
+        if (start.year, start.month) != (today.year, today.month):
+            dialog.tap("▶")
+            dialog.wait_text(f"{texts.STATS_CAL_MONTHS[today.month - 1]} {today.year}")
+        dialog.tap(str(today.day))
+        dialog.wait_text("За период")
 
         browser.close()
 
@@ -429,7 +493,11 @@ def main() -> None:
     cabinet.add_argument("--url", default="http://127.0.0.1:8000")
     cabinet.add_argument("--db", default="data/screens-test-stand.sqlite3")
     sub.add_parser("tg-login", help="разовый вход в Telegram Web по QR")
-    sub.add_parser("bot", help="кадры диалога с тестовым ботом (бот запущен на демо-БД)")
+    bot = sub.add_parser("bot", help="кадры диалога с тестовым ботом (бот запущен на демо-БД)")
+    bot.add_argument(
+        "--stats-only", action="store_true",
+        help="только статистика: сводка, «По дням», календарь (без напоминания и записи)",
+    )
     args = parser.parse_args()
     if args.cmd == "tg-login":
         tg_login()
@@ -437,7 +505,7 @@ def main() -> None:
         username = os.environ.get(BOT_USERNAME_ENV, "").strip().lstrip("@")
         if not username:
             raise SystemExit(f"{BOT_USERNAME_ENV} не задан: username тестового бота")
-        shoot_bot(username)
+        shoot_bot(username, stats_only=args.stats_only)
     elif args.cmd == "cabinet":
         secret = os.environ.get("WEB_SECRET_KEY", "")
         if not secret:
