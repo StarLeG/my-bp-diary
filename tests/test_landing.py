@@ -151,7 +151,8 @@ class TestManualSync:
 
 
 #: Кадры секции «Как это выглядит» и их заголовки — утверждены дословно
-#: (doc/LANDING-SCREENS-QUESTIONS.md, третий раунд).
+#: (doc/LANDING-SCREENS-QUESTIONS.md, третий раунд); средние по дням и свой
+#: период — 0.5.3.
 SCREENS = {
     "bot-menu": "Главное меню",
     "bot-keypad": "Ввод как на калькуляторе",
@@ -159,7 +160,10 @@ SCREENS = {
     "bot-reminder": "Напоминание по расписанию",
     "bot-meds": "Какие лекарства приняли",
     "bot-stats": "Статистика за 7 дней",
+    "bot-daily": "Средние по дням",
+    "bot-calendar": "Свой период",
     "cabinet-charts": "Графики с цветными зонами",
+    "cabinet-daily": "Средние по дням",
     "cabinet-history": "История записей",
     "cabinet-add-form": "Добавить измерение",
     "cabinet-medications": "Лекарства",
