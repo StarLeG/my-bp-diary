@@ -464,6 +464,267 @@ td.actions {
   margin: 2px 0;
 }
 
+/* ── 0.5.9: роли кнопок, карточки событий, аккордеоны (§16.2) ── */
+
+/* «Опасное вне строки»: призрачная, красный текст/рамка (UI-канон §16.2).
+   Служит триггером подтверждения, финал — залитая .btn-danger. */
+.btn-danger-ghost {
+  background: var(--color-surface);
+  color: var(--color-danger);
+  border: 1px solid var(--color-danger);
+}
+
+.btn-danger-ghost:hover,
+.btn-danger-ghost:focus {
+  background: #fdecea;
+}
+
+/* «Опасное в строке»: иконка «🗑», красная, без заливки. */
+.btn-del {
+  display: inline-block;
+  padding: 8px 12px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--color-danger);
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  text-decoration: none;
+}
+
+.btn-del:hover,
+.btn-del:focus {
+  background: #fdecea;
+}
+
+/* Карточки событий «Визитов и анализов» (§16.2): вид + дата, название,
+   заметка целиком (pre-wrap), действия и «⋯» без JS. */
+.event-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  padding: 12px 16px;
+  margin-bottom: 12px;
+}
+
+.event-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  align-items: baseline;
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+.event-kind {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.event-status {
+  color: var(--color-muted);
+}
+
+.event-title {
+  margin: 6px 0 0;
+  font-size: 1.05rem;
+}
+
+.event-note {
+  margin: 6px 0 0;
+  color: var(--color-muted);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.event-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+}
+
+.event-more {
+  position: relative;
+}
+
+.event-more > summary {
+  list-style: none;
+  cursor: pointer;
+  user-select: none;
+}
+
+.event-more > summary::-webkit-details-marker {
+  display: none;
+}
+
+.event-more > summary::after {
+  content: " ▸";
+}
+
+.event-more[open] > summary::after {
+  content: " ▾";
+}
+
+.event-menu {
+  position: absolute;
+  right: 0;
+  top: calc(100% + 4px);
+  z-index: 10;
+  min-width: 220px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  display: grid;
+  padding: 4px;
+}
+
+.event-menu a {
+  padding: 8px 12px;
+  border-radius: 6px;
+  color: var(--color-text);
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.event-menu a:hover,
+.event-menu a:focus {
+  background: #e6f0fa;
+}
+
+.event-menu-del {
+  color: var(--color-danger) !important;
+}
+
+.event-menu-del:hover,
+.event-menu-del:focus {
+  background: #fdecea !important;
+}
+
+/* «Перенесли на…» — строка формы под карточкой «Ждёт отметки». */
+.event-moved {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.event-moved-label {
+  color: var(--color-muted);
+}
+
+.event-edit-title {
+  margin: 16px 0 8px;
+}
+
+.event-edit-form {
+  margin-bottom: 16px;
+  padding: 16px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+/* «Прошедшие»: «Ждёт отметки» сверху вне групп, ниже — аккордеон месяцев. */
+.awaiting-head {
+  margin: 16px 0 8px;
+}
+
+.awaiting-block {
+  margin-bottom: 16px;
+}
+
+.month-group {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  margin-bottom: 12px;
+  padding: 0 16px 4px;
+}
+
+.month-group > summary {
+  cursor: pointer;
+  user-select: none;
+  font-weight: 600;
+  padding: 10px 0;
+  list-style: none;
+}
+
+.month-group > summary::-webkit-details-marker {
+  display: none;
+}
+
+.month-group > summary::before {
+  content: "▸ ";
+}
+
+.month-group[open] > summary::before {
+  content: "▾ ";
+}
+
+/* Аккордеон «Истории записей» по дням (§16.2): заголовок дня —
+   «Пт, 12.11 · 3 записи · в среднем 132/84 · 🟡». */
+.history-list {
+  margin: 8px 0;
+}
+
+.history-day {
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+  background: var(--color-surface);
+  margin-bottom: 8px;
+  padding: 0 16px 4px;
+}
+
+.history-day-flat {
+  padding-bottom: 8px;
+}
+
+.history-day-head {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 8px;
+  align-items: baseline;
+  padding: 10px 0;
+}
+
+details.history-day > summary {
+  cursor: pointer;
+  user-select: none;
+  list-style: none;
+}
+
+details.history-day > summary::-webkit-details-marker {
+  display: none;
+}
+
+details.history-day > summary .history-day-title::before {
+  content: "▸ ";
+}
+
+details.history-day[open] > summary .history-day-title::before {
+  content: "▾ ";
+}
+
+.history-day-title {
+  font-weight: 600;
+}
+
+.history-day-meta {
+  color: var(--color-muted);
+  font-size: 0.9rem;
+}
+
+.day-dot {
+  font-size: 0.95rem;
+}
+
 /* ── Адаптивность: 480 / 768 / 1024 / 1280 (mobile-first) ── */
 @media (max-width: 767px) {
   .card {

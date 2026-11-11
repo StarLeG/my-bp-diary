@@ -419,7 +419,8 @@ class TestDeleteMeasurement:
         measurement_id, _ = _ids(settings)[0]
         response = client.get(f"/?confirm_delete={measurement_id}#history")
         assert response.status_code == 200
-        assert "Удалить запись? Это действие нельзя отменить." in response.text
+        assert "Удалить запись от " in response.text
+        assert "? Это действие нельзя отменить." in response.text
         assert f'action="/measurements/{measurement_id}/delete"' in response.text
         assert "Отмена" in response.text
 

@@ -101,6 +101,30 @@ def row_zone(systolic: int, diastolic: int) -> dict | None:
     }
 
 
+#: Точка зоны дня в заголовке «Истории записей» (§16.2, 0.5.9): по худшей
+#: из зон округлённых средних САД/ДАД — как подсветка строки «Средних по дням».
+DAY_ZONE_DOTS = ("🟢", "🟡", "🔴")
+
+
+def day_zone(systolic: int, diastolic: int) -> dict:
+    """Точка и пояснение зоны дня по округлённым средним САД и ДАД (§16.2).
+
+    Уровень — худший из зон показателей (`band_index`): 0 — норма, 1 —
+    повышенное, 2 — высокое. `title` — те же подписи зон, что у строки
+    «Истории записей» («САД: 130–139, ДАД: < 85»).
+    """
+    levels = {
+        "САД": band_index(systolic, CHART_ZONES["systolic"]),
+        "ДАД": band_index(diastolic, CHART_ZONES["diastolic"]),
+    }
+    keys = {"САД": "systolic", "ДАД": "diastolic"}
+    title = ", ".join(
+        f"{name}: {CHART_ZONES[keys[name]][level]['label']}"
+        for name, level in levels.items()
+    )
+    return {"dot": DAY_ZONE_DOTS[max(levels.values())], "title": title}
+
+
 def table_legend() -> list[dict]:
     """Легенда над таблицей истории: две плашки — жёлтая и красная (§16.2)."""
     return [

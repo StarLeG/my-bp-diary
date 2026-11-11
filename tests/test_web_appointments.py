@@ -68,7 +68,10 @@ class TestAdd:
         ]
         page = client.get("/?saved=appointment").text
         assert "Визиты и анализы обновлены." in page
-        assert 'id="appointments"' in page and 'value="Кардиолог"' in page
+        # 0.5.9: «Скоро» — карточка события, не таблица с инпутами (§16.2)
+        assert 'id="appointments"' in page and 'class="event-card"' in page
+        assert '<h4 class="event-title">Кардиолог</h4>' in page
+        assert "каб. 212" in page
         assert '<option value="Липидный профиль">' in page
 
     def test_without_time(self, app_client, settings) -> None:  # noqa: F811

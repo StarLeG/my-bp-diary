@@ -1,0 +1,52 @@
+{# Форма лекарства (§16.2, 0.5.9): добавление и правка — один partial.
+   edit_medication задана — «Изменить лекарство» (один слот, кнопка
+   «Сохранить»); иначе — «Добавить лекарство» (по строке на каждый
+   выбранный слот, кнопка «Добавить»). #}
+{% if edit_medication %}
+  <h3>Изменить лекарство</h3>
+  <form method="post" action="/medications/{{ edit_medication.id }}" class="stack form-narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      Название
+      <input type="text" name="name" value="{{ edit_medication.name }}" maxlength="100" required>
+    </label>
+    <label>
+      Дозировка (необязательно)
+      <input type="text" name="dosage" value="{{ edit_medication.dosage }}" maxlength="50" placeholder="Без дозировки">
+    </label>
+    <label>
+      Когда принимать
+      <select name="slot">
+        {% for slot in med_slot_order %}
+          <option value="{{ slot }}" {% if edit_medication.slot == slot %}selected{% endif %}>{{ slot_labels[slot] }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="row">
+      <button type="submit" class="btn">Сохранить</button>
+      <a class="btn btn-ghost" href="/#medications">Отмена</a>
+    </div>
+  </form>
+{% else %}
+  <h3>Добавить лекарство</h3>
+  <form method="post" action="/medications" class="stack form-narrow">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      Название
+      <input type="text" name="name" maxlength="100" required placeholder="Например: Лозартан">
+    </label>
+    <label>
+      Дозировка (необязательно)
+      <input type="text" name="dosage" maxlength="50" placeholder="Например: 50 мг">
+    </label>
+    <fieldset class="checks">
+      <legend>Когда принимать</legend>
+      {% for slot in med_slot_order %}
+        <label class="check">
+          <input type="checkbox" name="slot_{{ slot }}" value="1"> {{ slot_labels[slot] }}
+        </label>
+      {% endfor %}
+    </fieldset>
+    <button type="submit" class="btn">Добавить</button>
+  </form>
+{% endif %}

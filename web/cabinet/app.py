@@ -55,7 +55,7 @@ from bot.services.measurements import (
 from bot.services.medications import MedicationNotFoundError
 from bot.services.reminders import DEFAULT_SLOT_TIMES, enable_slot_row, next_slot_occurrence
 from web.cabinet import auth, csv_import, doctor_auth
-from web.cabinet.chart_zones import CHART_ZONES, row_zone, table_legend
+from web.cabinet.chart_zones import CHART_ZONES, day_zone, row_zone, table_legend
 
 #: Имя сессионной cookie (SPEC.md, раздел 16.2: HTTP-only, 7 дней).
 SESSION_COOKIE = "cabinet_session"
@@ -173,6 +173,94 @@ def _daily_averages(
     if (end_day - start_day).days + 1 > DAILY_AVERAGES_MAX_DAYS:
         return None
     return stats.daily_averages(measurements, tz_name, start_day, end_day)
+
+
+#: «История записей» по дням (§16.2, 0.5.9): срез показа, шаг догрузки, окно
+#: развёртки дней (последние 7 дней от сегодня — развёрнуты).
+HISTORY_DAYS_DEFAULT = 92
+HISTORY_DAYS_STEP = 30
+HISTORY_EXPAND_DAYS = 7
+
+#: Короткие имена недели и месяцев для заголовков истории и «Прошедших».
+_WEEKDAYS_SHORT = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
+_MONTHS_NOMINATIVE = (
+    "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
+    "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
+)
+
+#: Подписи отмены события по типу (словарь «Единого UI-канона», §16.2, В7а).
+AP_CANCEL_LABELS = {
+    "doctor": "Отменить визит",
+    "lab": "Отменить сдачу",
+    "exam": "Отменить обследование",
+}
+
+
+def _plural(count: int, one: str, few: str, many: str) -> str:
+    """Русская форма множественного числа: 1 запись, 2 записи, 5 записей."""
+    if count % 100 in (11, 12, 13, 14):
+        return many
+    if count % 10 == 1:
+        return one
+    if count % 10 in (2, 3, 4):
+        return few
+    return many
+
+
+def _history_context(
+    measurements: list[Measurement],
+    tz_name: str,
+    today: date,
+    start_day: date,
+    end_day: date,
+    shown: str,
+) -> dict:
+    """Дни «Истории записей» аккордеоном (§16.2, 0.5.9) — общий для ЛК и врача.
+
+    Группы — по локальной дате, новые сверху; строки внутри дня — по времени.
+    Заголовок дня: дата, число записей, округлённые средние САД/ДАД и точка
+    зоны (`chart_zones.day_zone`, «худшая из зон»). Развёрнуты дни за последние
+    `HISTORY_EXPAND_DAYS` дней от сегодня; период короче недели — без свёртки
+    (`flat`). Период длиннее `HISTORY_DAYS_DEFAULT` дней — срез `shown`
+    последних дней периода («Показать ещё 30 дней», состояние — `?shown=N`);
+    экспорт всегда за полный период.
+    """
+    period_days = (end_day - start_day).days + 1
+    flat = period_days <= HISTORY_EXPAND_DAYS
+    visible = min(HISTORY_DAYS_DEFAULT, period_days)
+    if shown.isdigit() and int(shown) > visible:
+        visible = min(int(shown), period_days)
+    window_start = max(start_day, end_day - timedelta(days=visible - 1))
+    tz = ZoneInfo(tz_name)
+    by_day: dict[date, list[Measurement]] = {}
+    for m in measurements:
+        moment = m.timestamp.astimezone(tz)
+        if window_start <= moment.date() <= end_day:
+            by_day.setdefault(moment.date(), []).append(m)
+    days: list[dict] = []
+    for day in sorted(by_day, reverse=True):
+        rows = sorted(by_day[day], key=lambda m: m.timestamp)
+        sys_avg = round(sum(m.systolic for m in rows) / len(rows))
+        dia_avg = round(sum(m.diastolic for m in rows) / len(rows))
+        days.append(
+            {
+                "date": day,
+                "label": f"{_WEEKDAYS_SHORT[day.weekday()]}, {day:%d.%m}",
+                "count": len(rows),
+                "count_text": f"{len(rows)} {_plural(len(rows), 'запись', 'записи', 'записей')}",
+                "avg": f"{sys_avg}/{dia_avg}",
+                "zone": day_zone(sys_avg, dia_avg),
+                "open": (today - day).days < HISTORY_EXPAND_DAYS,
+                "rows": rows,
+            }
+        )
+    return {
+        "days": days,
+        "flat": flat,
+        "period_days": period_days,
+        "shown": visible,
+        "more_shown": min(visible + HISTORY_DAYS_STEP, period_days) if visible < period_days else None,
+    }
 
 
 def _chart_payload(measurements: list[Measurement], tz_name: str) -> list[dict]:
@@ -856,6 +944,7 @@ def create_app(
         extra: Optional[dict] = None,
         *,
         user: User,
+        shown: str = "",
     ) -> Response:
         """Собрать страницу дашборда; `extra` — контекст форм записи/импорта (§16.2).
 
@@ -871,7 +960,7 @@ def create_app(
         medication_cells = await medications_service.medication_cells(db, user, measurements)
         medications = await medications_service.list_medications(db, user)
         ap_upcoming = await appointments_service.list_upcoming(db, user, now_local.date())
-        ap_past = [
+        past_items = [
             (
                 appt,
                 appointments_service.status_label(appt, now_local.date()),
@@ -879,6 +968,24 @@ def create_app(
             )
             for appt in (await appointments_service.list_past(db, user, now_local.date(), limit=None))[0]
         ]
+        # «Прошедшие» (0.5.9): «Ждёт отметки» — сверху, вне групп; остальные —
+        # аккордеоном по месяцам, текущий месяц развёрнут (§16.2).
+        ap_awaiting = [item for item in past_items if item[2]]
+        ap_months: list[dict] = []
+        for item in past_items:
+            if item[2]:
+                continue
+            key = (item[0].starts_on.year, item[0].starts_on.month)
+            if not ap_months or ap_months[-1]["key"] != key:
+                ap_months.append({"key": key, "items": []})
+            ap_months[-1]["items"].append(item)
+        current_month = (now_local.date().year, now_local.date().month)
+        for month in ap_months:
+            count = len(month["items"])
+            month["label"] = f"{_MONTHS_NOMINATIVE[month['key'][1] - 1]} {month['key'][0]}"
+            month["count_text"] = f"{count} {_plural(count, 'событие', 'события', 'событий')}"
+            month["current"] = month["key"] == current_month
+            del month["key"]
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         consent = await consent_service.current_processing(db, user.id)
         personal_messages = {
@@ -946,12 +1053,13 @@ def create_app(
             ),
             "doctor_notes": doctor_notes,
             "ap_upcoming": ap_upcoming,
-            "ap_past": ap_past,
+            "ap_awaiting": ap_awaiting,
+            "ap_months": ap_months,
             "ap_kinds": texts.AP_KIND_BUTTONS,
-            "ap_icons": texts.AP_ICONS,
             "ap_suggestions": [t for kind in texts.AP_KINDS for t in texts.AP_SUGGESTIONS[kind]],
             "ap_max_day": appointments_service.max_day(now_local.date()),
             "ap_after_buttons": texts.AP_AFTER_BUTTONS,
+            "ap_cancel_labels": AP_CANCEL_LABELS,
             "chart": _chart_payload(measurements, user.timezone),
             "chart_zones": CHART_ZONES,
             "days": days,
@@ -968,9 +1076,20 @@ def create_app(
             "show_add_form": False,
             "edit_measurement": None,
             "confirm_delete_id": None,
+            "confirm_delete_when": "",
             "show_import_form": False,
             "import_report": None,
             "import_error": "",
+            # «История записей» по дням и формы/подтверждения 0.5.9 (§16.2)
+            "history": _history_context(
+                measurements, user.timezone, now_local.date(), start_day, end_day, shown
+            ),
+            "history_can_edit": True,
+            "edit_medication": None,
+            "confirm_delete_med": None,
+            "edit_ap_id": None,
+            "confirm_delete_ap": None,
+            "confirm_cancel_ap": None,
         }
         if extra:
             context.update(extra)
@@ -1015,15 +1134,24 @@ def create_app(
         edit: str = Query(""),
         confirm_delete: str = Query(""),
         import_form: str = Query("", alias="import"),
+        edit_med: str = Query(""),
+        edit_ap: str = Query(""),
+        confirm_delete_med: str = Query(""),
+        confirm_delete_ap: str = Query(""),
+        confirm_cancel_ap: str = Query(""),
+        shown: str = Query(""),
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
         """Личная карточка, история, сводка, лекарства и напоминания.
 
-        Параметры `add` / `edit` / `confirm_delete` / `import` управляют
-        формами (§16.2): `?add=1` — форма добавления, `?edit={id}` — правка
-        записи, `?confirm_delete={id}` — подтверждение удаления, `?import=1` —
-        форма импорта CSV.
+        Параметры управляют формами (§16.2): `?add=1` — форма добавления,
+        `?edit={id}` — правка записи, `?confirm_delete={id}` — подтверждение
+        удаления записи, `?import=1` — форма импорта CSV. С 0.5.9: `?edit_med={id}`
+        — форма «Изменить лекарство», `?edit_ap={id}` — форма правки события,
+        `?confirm_delete_med` / `?confirm_delete_ap` / `?confirm_cancel_ap` —
+        блоки подтверждения (не `js confirm()`), `?shown=N` — глубина истории
+        по дням («Показать ещё 30 дней»).
         """
         user = await load_user(db, web_user)
         extra: dict = {}
@@ -1038,11 +1166,32 @@ def create_app(
             victim = await get_measurement(db, user, int(confirm_delete))
             if victim is not None:
                 extra["confirm_delete_id"] = victim.id
+                extra["confirm_delete_when"] = victim.timestamp.astimezone(
+                    ZoneInfo(user.timezone)
+                ).strftime("%d.%m.%Y %H:%M")
         if import_form:
             extra["show_import_form"] = True
+        medications = await medications_service.list_medications(db, user)
+        if edit_med.isdigit():
+            extra["edit_medication"] = next(
+                (m for m in medications if m.id == int(edit_med)), None
+            )
+        if confirm_delete_med.isdigit():
+            extra["confirm_delete_med"] = next(
+                (m for m in medications if m.id == int(confirm_delete_med)), None
+            )
+        for raw, key in (
+            (edit_ap, "edit_ap_id"),
+            (confirm_delete_ap, "confirm_delete_ap"),
+            (confirm_cancel_ap, "confirm_cancel_ap"),
+        ):
+            if raw.isdigit():
+                appt = await appointments_service.get_owned(db, user, int(raw))
+                if appt is not None:
+                    extra[key] = appt.id if key == "edit_ap_id" else appt
         return await _dashboard_response(
             request, db, web_user, days, date_from, date_to, error, saved, extra,
-            user=user,
+            user=user, shown=shown,
         )
 
     # ───────────────────── Профиль ─────────────────────
@@ -1268,17 +1417,22 @@ def create_app(
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
-        """Изменить событие «Скоро»: название, дату, время, заметку (смена даты/времени — флаги заново)."""
+        """Изменить событие «Скоро»: вид, название, дату, время, заметку.
+
+        Вид в ЛК меняется (в отличие от бота, Н4, §6.13); смена даты/времени
+        пересчитывает флаги уведомлений (§6.13).
+        """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
         appt = await _owned_appointment(db, user, appointment_id)
-        fields = _appointment_form(form, user, kind_required=False)
+        fields = _appointment_form(form, user, kind_required=True)
         if fields is None or not appointments_service.is_upcoming(appt, appointments_service.today(user)):
             return _ap_redirect("appointment")
-        _, title, day, hhmm, note = fields
+        kind, title, day, hhmm, note = fields
         if (day, hhmm) != (appt.starts_on, appt.starts_at):
             await appointments_service.reschedule(db, user, appt, day, hhmm)
+        await appointments_service.set_kind(db, appt, kind)
         await appointments_service.set_title(db, appt, title)
         await appointments_service.set_note(db, appt, note)
         return _ap_redirect("saved")
@@ -1977,13 +2131,16 @@ def create_app(
         days: str = Query("7"),
         date_from: str = Query(""),
         date_to: str = Query(""),
+        shown: str = Query(""),
         db: AsyncSession = Depends(get_db),
         doctor: Doctor = Depends(require_doctor),
     ) -> Response:
         """Карточка пациента: график, таблица, сводка и заметки врача (§21).
 
         Только чтение: врач не редактирует записи пациента, добавляет лишь
-        заметки (§21, «Логика для врача»).
+        заметки (§21, «Логика для врача»). История — тем же компонентом по
+        дням, что в ЛК (§16.2, 0.5.9), без колонки действий; `?shown=N` —
+        глубина показа как в ЛК.
         """
         user = await require_patient_link(db, doctor, user_id)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
@@ -2015,6 +2172,15 @@ def create_app(
                 "date_to": date_to,
                 "start_day": start_day,
                 "end_day": end_day,
+                "history": _history_context(
+                    measurements,
+                    user.timezone,
+                    datetime.now(ZoneInfo(user.timezone)).date(),
+                    start_day,
+                    end_day,
+                    shown,
+                ),
+                "history_can_edit": False,
                 "error": request.query_params.get("error", ""),
                 "saved": request.query_params.get("saved", ""),
                 "csrf_token": csrf_token,

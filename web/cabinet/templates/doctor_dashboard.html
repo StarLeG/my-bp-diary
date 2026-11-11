@@ -201,37 +201,41 @@
           <p>За этот период записей нет.</p>
         {% else %}
           {% include "partials/history_zone_legend.html" %}
-          <div class="table-scroll">
-            <table class="stacked-table">
-              <thead>
-                <tr>
-                  <th>Дата</th>
-                  <th>Время</th>
-                  <th>Сист.</th>
-                  <th>Диаст.</th>
-                  <th>Пульс</th>
-                  <th>Лекарство</th>
-                  <th>Самочувствие</th>
-                  <th>Заметка</th>
-                </tr>
-              </thead>
-              <tbody>
-                {% for m in measurements %}
-                  {% set zone = row_zone(m.systolic, m.diastolic) %}
-                  <tr{% if zone %} class="zone-row {{ zone.css_class }}" style="--zone-fill: {{ zone.fill }}" title="{{ zone.title }}"{% endif %}>
-                    <td data-label="Дата">{{ m.timestamp.astimezone(user_zone).strftime("%d.%m.%Y") }}</td>
-                    <td data-label="Время">{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
-                    <td data-label="Сист.">{{ m.systolic }}</td>
-                    <td data-label="Диаст.">{{ m.diastolic }}</td>
-                    <td data-label="Пульс">{{ m.pulse if m.pulse is not none else "—" }}</td>
-                    <td data-label="Лекарство">{{ medication_cells[m.id] }}</td>
-                    <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
-                    <td data-label="Заметка" class="note">{{ m.note or "" }}</td>
-                  </tr>
-                {% endfor %}
-              </tbody>
-            </table>
+          {% if not history.flat %}
+            <div class="row history-toolbar">
+              <button type="button" class="btn btn-ghost" data-days-toggle="open">Развернуть все</button>
+              <button type="button" class="btn btn-ghost" data-days-toggle="close">Свернуть все</button>
+            </div>
+          {% endif %}
+          <div class="history-list">
+            {% for day in history.days %}
+              {% include "partials/history_day.html" %}
+            {% endfor %}
           </div>
+          {% if history.more_shown %}
+            <div class="row">
+              <a class="btn btn-ghost" href="/doctor/patient/{{ user.id }}?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}&shown={{ history.more_shown }}#history">
+                Показать ещё 30 дней
+              </a>
+            </div>
+          {% endif %}
+          {% if not history.flat %}
+            <script>
+              /* Свернуть/развернуть все дни истории (§16.2, 0.5.9):
+                 состояние аккордеона — только на время просмотра. */
+              (function () {
+                var bar = document.querySelector(".history-toolbar");
+                if (!bar) { return; }
+                bar.addEventListener("click", function (event) {
+                  var action = event.target.getAttribute("data-days-toggle");
+                  if (!action) { return; }
+                  document.querySelectorAll(".history-list details.history-day").forEach(function (item) {
+                    item.open = action === "open";
+                  });
+                });
+              })();
+            </script>
+          {% endif %}
         {% endif %}
       </section>
 

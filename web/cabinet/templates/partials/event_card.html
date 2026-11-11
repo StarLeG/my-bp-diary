@@ -1,0 +1,90 @@
+{# Карточка события «Визитов и анализов» (§16.2, 0.5.9).
+   mode: "upcoming" — «Скоро»: «✏️ Изменить» раскрывает форму под карточкой,
+         «⋯» — отмена по типу (В7а, только у planned) и «🗑 Удалить…»;
+         "awaiting" — «Ждёт отметки»: отметка, «Перенесли на…», «🗑 Удалить…»;
+         "past" — «Прошедшие»: статус и «🗑 Удалить…». #}
+<article class="event-card">
+  <div class="event-head">
+    <span class="event-kind">{{ ap_kinds[ap.kind] }}</span>
+    <span class="event-when">{{ ap.starts_on.strftime("%d.%m.%Y") }}, {{ ap.starts_at or "—" }}</span>
+    {% if mode != "upcoming" %}<span class="event-status">{{ ap_status }}</span>{% endif %}
+  </div>
+  <h4 class="event-title">{{ ap.title }}</h4>
+  {% if ap.note %}<p class="event-note">{{ ap.note }}</p>{% endif %}
+
+  {% if mode == "awaiting" %}
+    <div class="event-actions">
+      <form method="post" action="/appointments/{{ ap.id }}/status" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" name="status" value="done" class="btn">{{ ap_after_buttons[ap.kind][0] }}</button>
+        <button type="submit" name="status" value="missed" class="btn btn-ghost">{{ ap_after_buttons[ap.kind][2] }}</button>
+      </form>
+      <details class="event-more">
+        <summary class="btn btn-ghost">⋯</summary>
+        <div class="event-menu">
+          <a class="event-menu-del" href="/?confirm_delete_ap={{ ap.id }}#appointments">🗑 Удалить…</a>
+        </div>
+      </details>
+    </div>
+    <form method="post" action="/appointments/{{ ap.id }}/moved" class="event-moved">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <span class="event-moved-label">Перенесли на…</span>
+      <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
+      <input type="time" name="time">
+      <button type="submit" class="btn btn-ghost">Перенести</button>
+    </form>
+  {% else %}
+    <div class="event-actions">
+      {% if mode == "upcoming" %}
+        <a class="btn btn-ghost" href="/?edit_ap={{ ap.id }}#appointments">✏️ Изменить</a>
+      {% endif %}
+      <details class="event-more">
+        <summary class="btn btn-ghost">⋯</summary>
+        <div class="event-menu">
+          {% if mode == "upcoming" and ap.status == "planned" %}
+            <a href="/?confirm_cancel_ap={{ ap.id }}#appointments">{{ ap_cancel_labels[ap.kind] }}</a>
+          {% endif %}
+          <a class="event-menu-del" href="/?confirm_delete_ap={{ ap.id }}#appointments">🗑 Удалить…</a>
+        </div>
+      </details>
+    </div>
+  {% endif %}
+</article>
+
+{% if mode == "upcoming" and edit_ap_id == ap.id %}
+  {# Правка события (§16.2): та же форма, что «➕ Добавить», предзаполненная.
+     Вид изменяем — в отличие от бота (Н4, §6.13). #}
+  <h4 class="event-edit-title">Изменить событие</h4>
+  <form method="post" action="/appointments/{{ ap.id }}" class="stack form-narrow event-edit-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      Вид
+      <select name="kind">
+        {% for kind, label in ap_kinds.items() %}
+          <option value="{{ kind }}" {% if ap.kind == kind %}selected{% endif %}>{{ label }}</option>
+        {% endfor %}
+      </select>
+    </label>
+    <label>
+      Название
+      <input type="text" name="title" value="{{ ap.title }}" maxlength="60" list="ap-suggestions" required>
+    </label>
+    <label>
+      Дата
+      <input type="date" name="date" value="{{ ap.starts_on.isoformat() }}" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
+    </label>
+    <label>
+      Время (необязательно)
+      <input type="time" name="time" value="{{ ap.starts_at or '' }}">
+    </label>
+    <label>
+      Заметка (необязательно)
+      <input type="text" name="note" value="{{ ap.note }}" maxlength="200" placeholder="Адрес, кабинет, что взять с собой">
+    </label>
+    <div class="row">
+      <button type="submit" class="btn">Сохранить</button>
+      <a class="btn btn-ghost" href="/#appointments">Отмена</a>
+      <a class="btn btn-danger-ghost" href="/?confirm_delete_ap={{ ap.id }}#appointments">🗑 Удалить</a>
+    </div>
+  </form>
+{% endif %}

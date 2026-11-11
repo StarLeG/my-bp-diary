@@ -1,0 +1,57 @@
+{# Один день «Истории записей» (§16.2, 0.5.9): общий partial ЛК и врача (§21).
+   У врача history_can_edit = false — без колонки действий (только чтение).
+   Период ≤ 7 дней — без свёртки (history.flat), иначе — <details>. #}
+{% set day_table %}
+  <div class="table-scroll">
+    <table class="stacked-table">
+      <thead>
+        <tr>
+          <th>Время</th>
+          <th>Сист.</th>
+          <th>Диаст.</th>
+          <th>Пульс</th>
+          <th>Лекарство</th>
+          <th>Самочувствие</th>
+          <th>Заметка</th>
+          {% if history_can_edit %}<th>Действия</th>{% endif %}
+        </tr>
+      </thead>
+      <tbody>
+        {% for m in day.rows %}
+          {% set zone = row_zone(m.systolic, m.diastolic) %}
+          <tr{% if zone %} class="zone-row {{ zone.css_class }}" style="--zone-fill: {{ zone.fill }}" title="{{ zone.title }}"{% endif %}>
+            <td data-label="Время">{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
+            <td data-label="Сист.">{{ m.systolic }}</td>
+            <td data-label="Диаст.">{{ m.diastolic }}</td>
+            <td data-label="Пульс">{{ m.pulse if m.pulse is not none else "—" }}</td>
+            <td data-label="Лекарство">{{ medication_cells[m.id] }}</td>
+            <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
+            <td data-label="Заметка" class="note">{{ m.note or "" }}</td>
+            {% if history_can_edit %}
+              <td data-label="Действия" class="actions">
+                <a class="btn btn-ghost" href="/?edit={{ m.id }}#history" title="Изменить">✏️</a>
+                <a class="btn-del" href="/?confirm_delete={{ m.id }}#history" title="Удалить">🗑</a>
+              </td>
+            {% endif %}
+          </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+{% endset %}
+{% set day_head %}
+  <span class="history-day-title">{{ day.label }}</span>
+  <span class="history-day-meta">· {{ day.count_text }} · в среднем {{ day.avg }} ·</span>
+  <span class="day-dot" title="{{ day.zone.title }}">{{ day.zone.dot }}</span>
+{% endset %}
+{% if history.flat %}
+  <section class="history-day history-day-flat">
+    <h3 class="history-day-head">{{ day_head }}</h3>
+    {{ day_table }}
+  </section>
+{% else %}
+  <details class="history-day"{% if day.open %} open{% endif %}>
+    <summary class="history-day-head">{{ day_head }}</summary>
+    {{ day_table }}
+  </details>
+{% endif %}

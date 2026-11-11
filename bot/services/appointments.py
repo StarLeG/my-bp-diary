@@ -565,6 +565,12 @@ async def set_status(session: AsyncSession, appt: Appointment, status: str) -> b
     return bool(result.rowcount)
 
 
+async def set_kind(session: AsyncSession, appt: Appointment, kind: str) -> None:
+    """Сменить вид события: в ЛК можно (§16.2, 0.5.9), в боте — нет (Н4)."""
+    appt.kind = kind
+    await session.flush()
+
+
 async def set_title(session: AsyncSession, appt: Appointment, title: str) -> None:
     appt.title = title
     await session.flush()
