@@ -9,7 +9,8 @@
 - `tg-login` — разовый вход в Telegram Web по QR (окно браузера), сессия —
   Playwright `storage_state` в `qa/reports/screens/tg_state.json` (не в git);
 - `bot` — кадры диалога с тестовым ботом в Telegram Web по сохранённой сессии:
-  узкое окно, в кадр — только область диалога (без списка чатов и профиля).
+  узкое окно, в кадр — только область диалога (без списка чатов и профиля);
+  `--visits-only` — только «Визиты и анализы» (0.5.8, демо-БД с `--visits`).
 
 Сырые PNG — `qa/reports/screens/raw/`, WebP для лендинга —
 `qa/reports/screens/webp/` (на лендинг копируются после проверки кадров).
@@ -294,6 +295,55 @@ _TG_SHOW_ALL = """
         document.querySelectorAll('[data-keep]').forEach(el => el.removeAttribute('data-keep')); }
 """
 
+#: Прокрутить диалог до последнего сообщения: после прихода напоминания Telegram
+#: Web может оставить прокрутку чуть выше низа, и низ последней кнопки уходит
+#: под поле ввода — кадр обрезает его. Плавную прокрутку (`scroll-behavior:
+#: smooth`) на время прыжка выключаем: кадр снимался посреди анимации.
+_TG_SCROLL_BOTTOM = """
+() => { const inner = document.querySelector('#column-center .bubbles-inner');
+        if (!inner) return;
+        for (let n = inner.parentElement; n; n = n.parentElement) {
+          if (n.scrollHeight > n.clientHeight + 5) {
+            const behavior = n.style.scrollBehavior;
+            n.style.scrollBehavior = 'auto';
+            n.scrollTop = n.scrollHeight;
+            n.style.scrollBehavior = behavior;
+          }
+        } }
+"""
+
+#: Проверка, что все прокручиваемые предки диалога упёрлись в низ (см.
+#: `_TG_SCROLL_BOTTOM`). Только контейнеры со скроллом (`overflow-y: auto|scroll`):
+#: у предков с `overflow: visible` scrollHeight больше clientHeight, но
+#: прокрутки у них нет.
+_TG_AT_BOTTOM = """
+() => { const inner = document.querySelector('#column-center .bubbles-inner');
+        if (!inner) return false;
+        for (let n = inner.parentElement; n; n = n.parentElement) {
+          const oy = getComputedStyle(n).overflowY;
+          if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+              && n.scrollHeight - n.scrollTop - n.clientHeight > 2) return false;
+        }
+        return true; }
+"""
+
+#: Скрыть/показать поле ввода на время кадра: оно перекрывает низ последней
+#: кнопки, и кадр «Напоминание о визите» обрезал «Перенести | Отменить визит».
+_TG_HIDE_COMPOSER = """
+(hide) => { const el = document.querySelector('#column-center .chat-input');
+            if (el) el.style.display = hide ? 'none' : ''; }
+"""
+
+#: Низ видимой части последнего оставленного пузыря (его последней кнопки),
+#: viewport px; -1 — пузыря нет.
+_TG_KEPT_BOTTOM = """
+() => { const kept = [...document.querySelectorAll('#column-center .bubble[data-keep]')].pop();
+        if (!kept) return -1;
+        const buttons = kept.querySelectorAll('.reply-markup-button');
+        const last = buttons.length ? buttons[buttons.length - 1] : kept;
+        return last.getBoundingClientRect().bottom; }
+"""
+
 
 #: Номер inline-кнопки последнего сообщения с подписью `label` (-1 — нет).
 _TG_BUTTON_INDEX = """
@@ -360,19 +410,44 @@ class TelegramDialog:
         """Кадр: шапка чата + последние `keep` пузырей, без поля ввода.
 
         Пустой фон между шапкой и сообщениями вырезается: шапка и полоса
-        сообщений склеиваются с отступом `gap` CSS-пикселей.
+        сообщений склеиваются с отступом `gap` CSS-пикселей. Низ кадра — на 15 px
+        ниже последней кнопки (полоса обоев под ней, как в кадрах, снятых сразу
+        после ответа бота): поле ввода на время кадра скрывается, иначе оно
+        перекрывает низ кнопки и кадр обрезает её («Напоминание о визите»).
         """
-        self.page.evaluate(_TG_KEEP_LAST, keep)
-        self.page.wait_for_timeout(600)
+        self.page.evaluate(_TG_HIDE_COMPOSER, True)
+        self.page.wait_for_timeout(300)  # пересчёт раскладки Telegram Web
         column = self.page.locator("#column-center").bounding_box()
+        limit = column["y"] + column["height"] - 15
+        last_bottom = -1.0
+        for _ in range(6):
+            # Web перерисовывает список сообщений — пометки повторяем каждый раз.
+            self.page.evaluate(_TG_KEEP_LAST, keep)
+            self.page.evaluate(_TG_SCROLL_BOTTOM)
+            # Штатная кнопка «вниз» — тот же путь, которым Web подматывает
+            # свежие сообщения; прыжок scrollTop'ом — запасной вариант.
+            go_down = self.page.locator("#column-center .bubbles-go-down")
+            if go_down.count() and go_down.first.is_visible():
+                go_down.first.click()
+            self.page.wait_for_timeout(700)
+            last_bottom = float(self.page.evaluate(_TG_KEPT_BOTTOM))
+            if 0 < last_bottom <= limit:
+                break
+        else:
+            self.page.evaluate(_TG_HIDE_COMPOSER, False)
+            self.page.evaluate(_TG_SHOW_ALL)
+            raise AssertionError(
+                f"{name}: низ кнопок не помещается в кадр ({last_bottom=:.0f} > {limit=:.0f})"
+            )
+        self.page.wait_for_timeout(200)
         top_bar = self.page.locator("#column-center .chat .topbar").first.bounding_box()
-        composer = self.page.locator("#column-center .chat-input").first.bounding_box()
         first_kept = self.page.locator("#column-center .bubble[data-keep]").first.bounding_box()
         header_bottom = top_bar["y"] + top_bar["height"]
         content_top = max(header_bottom, first_kept["y"] - gap)
+        crop_bottom = min(column["y"] + column["height"], last_bottom + 15)
         full = Image.open(io.BytesIO(self.page.screenshot(clip={
             "x": column["x"], "y": column["y"], "width": column["width"],
-            "height": composer["y"] - column["y"],
+            "height": crop_bottom - column["y"],
         })))
         scale = full.width / column["width"]
         cut_top, cut_bottom = round((header_bottom - column["y"]) * scale), round((content_top - column["y"]) * scale)
@@ -383,6 +458,7 @@ class TelegramDialog:
         buffer = io.BytesIO()
         frame.save(buffer, "PNG")
         save(buffer.getvalue(), name, width=780)
+        self.page.evaluate(_TG_HIDE_COMPOSER, False)
         self.page.evaluate(_TG_SHOW_ALL)
 
 
@@ -390,11 +466,14 @@ class TelegramDialog:
 CUSTOM_PERIOD_DAYS = 14
 
 
-def shoot_bot(bot_username: str, stats_only: bool = False) -> None:
+def shoot_bot(bot_username: str, stats_only: bool = False, visits_only: bool = False) -> None:
     """Кадры бота в Telegram Web (P1 А): узкое окно — только диалог.
 
     `stats_only` — только статистика: сводка, «По дням», календарь своего
     периода (без ожидания напоминания и записи давления).
+    `visits_only` — только «Визиты и анализы» (0.5.8): напоминание накануне и
+    список (демо-БД собрана с `demo_data --visits`, eve-напоминание приходит
+    ближайшим тиком бота после запуска).
     """
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -422,8 +501,28 @@ def shoot_bot(bot_username: str, stats_only: bool = False) -> None:
         if go_down.count() and go_down.first.is_visible():
             go_down.first.click()
             page.wait_for_timeout(3000)
+        # Прокрутка вниз принудительно: при позиции в середине переписки хвост
+        # истории в DOM не подгружен и wait_text не видит уже пришедшее сообщение.
+        page.evaluate(_TG_SCROLL_BOTTOM)
+        page.wait_for_timeout(2000)
         dialog = TelegramDialog(page)
         print("Бот:")
+
+        if visits_only:
+            # Напоминание накануне — первым: тик бота шлёт его в любую минуту
+            # после старта, а после нажатий в меню его пузырь перестаёт быть
+            # последним и wait_text его не увидит.
+            print("  жду напоминание о визите (до 10 мин)…", flush=True)
+            dialog.wait_text("Завтра визит", timeout=600_000)
+            dialog.shot("bot-visit-reminder", keep=1)
+
+            dialog.send("/start")
+            dialog.wait_text(texts.BTN_MEASURE)  # главное меню
+            dialog.tap(texts.BTN_APPOINTMENTS)
+            dialog.wait_text(texts.AP_SOON)  # эмодзи заголовка в Telegram Web — картинка
+            dialog.shot("bot-visits", keep=1)
+            browser.close()
+            return
 
         if not stats_only:
             # Напоминание — первым: после свежей записи давления бот слот не шлёт (§6.7).
@@ -523,6 +622,11 @@ def main() -> None:
         "--stats-only", action="store_true",
         help="только статистика: сводка, «По дням», календарь (без напоминания и записи)",
     )
+    bot.add_argument(
+        "--visits-only", action="store_true",
+        help="только «Визиты и анализы» (0.5.8): напоминание накануне и список "
+             "(демо-БД собрана с `demo_data --visits`)",
+    )
     args = parser.parse_args()
     if args.cmd == "tg-login":
         tg_login()
@@ -530,7 +634,7 @@ def main() -> None:
         username = os.environ.get(BOT_USERNAME_ENV, "").strip().lstrip("@")
         if not username:
             raise SystemExit(f"{BOT_USERNAME_ENV} не задан: username тестового бота")
-        shoot_bot(username, stats_only=args.stats_only)
+        shoot_bot(username, stats_only=args.stats_only, visits_only=args.visits_only)
     elif args.cmd == "cabinet":
         secret = os.environ.get("WEB_SECRET_KEY", "")
         if not secret:

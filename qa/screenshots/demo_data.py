@@ -13,7 +13,8 @@
   всем четырём и заметкой для демо-пациента;
 - пользователь бота с `--bot-tg-id` (аккаунт, под которым снимается Telegram
   Web) — та же вымышленная история, чтобы статистика и «· сегодня ✓» в кадрах
-  бота были осмысленными.
+  бота были осмысленными; с `--visits` ему же сеются визиты и анализы
+  (кадры 0.5.8), eve-напоминание приходит ближайшим тиком бота.
 
 Пароли не хранятся: учётным записям ставится хеш случайного одноразового
 секрета, а съёмка входит сессионной cookie (`shot_landing.py`).
@@ -35,6 +36,7 @@ from zoneinfo import ZoneInfo
 
 from bot.db import create_engine, create_session_factory, init_db
 from bot.models import (
+    Appointment,
     Doctor,
     DoctorNote,
     DoctorPatient,
@@ -79,6 +81,16 @@ MEDICATIONS = (
 )
 SLOT_TIMES = {"morning": "08:00", "evening": "20:00"}
 
+#: Визиты и анализы бот-пользователя (кадры 0.5.8):
+#: (тип, название, смещение дней от «сегодня», время или None, заметка).
+APPOINTMENTS = (
+    ("doctor", "Кардиолог", 1, "10:00", "поликлиника № 5, каб. 212"),
+    ("lab", "Общий анализ крови", 3, None, "натощак"),
+    ("exam", "ЭКГ", 8, "09:30", None),
+)
+#: Прошедшее событие — кнопка «🗂 Прошедшие» в списке (статус «done», без тика).
+APPOINTMENT_PAST = ("lab", "Биохимия", -6, "08:30", "холестерин и глюкоза")
+
 DOCTOR_NOTE = (
     "Давление снижается — продолжайте Лозартан утром и Амлодипин вечером. "
     "Утренний замер — до приёма таблетки. Контроль через месяц."
@@ -98,6 +110,53 @@ def _pressure(rng: random.Random, progress: float, evening: bool) -> tuple[int, 
     systolic = max(112, min(178, round(systolic)))
     diastolic = max(68, min(108, round(diastolic)))
     return systolic, min(diastolic, systolic - 25), max(54, min(96, round(pulse)))
+
+
+def _tz_for_eve(now: datetime) -> str:
+    """Часовой пояс, где сейчас только что наступили 20:00 (локальное время).
+
+    Eve-напоминание «Завтра визит» — в 20:00 накануне (§6.13): подбор пояса
+    делает его «только что прошедшим» в момент съёмки, тик бота шлёт его
+    ближайшей минутой (окно catch-up 6 часов). В кадре пояс не виден.
+    """
+    utc_hour = now.astimezone(timezone.utc).hour
+    offset = (20 - utc_hour) % 24
+    if offset > 14:  # сдвиги Etc/GMT — от −12 до +14; ночь UTC — прошлый день
+        offset -= 24
+    if offset == 0:
+        return "UTC"
+    # Знак в имени Etc/GMT обратный: Etc/GMT-6 — это UTC+6.
+    return f"Etc/GMT{'-' if offset > 0 else '+'}{abs(offset)}"
+
+
+async def _visits(session, user: User, now: datetime) -> None:
+    """Визиты и анализы бот-пользователя (кадры «Визиты и анализы», 0.5.8).
+
+    Часовой пояс пользователя подбирается так, чтобы локальные 20:00 только что
+    наступили: eve-напоминание «Завтра визит» срабатывает ближайшим тиком бота —
+    кадр «Напоминание о визите» снимается сразу, а не дожидаясь вечера. Бота
+    нужно запустить в течение 6 часов после сборки БД (окно catch-up).
+    """
+    tz_name = _tz_for_eve(now)
+    user.timezone = tz_name
+    today = now.astimezone(ZoneInfo(tz_name)).date()
+    for kind, title, offset, hhmm, note in APPOINTMENTS:
+        session.add(
+            Appointment(
+                user_id=user.id, kind=kind, title=title,
+                starts_on=today + timedelta(days=offset), starts_at=hhmm,
+                note=note, status="planned", created_at=now,
+            )
+        )
+    kind, title, offset, hhmm, note = APPOINTMENT_PAST
+    session.add(
+        Appointment(
+            user_id=user.id, kind=kind, title=title,
+            starts_on=today + timedelta(days=offset), starts_at=hhmm,
+            note=note, status="done", created_at=now,
+        )
+    )
+    await session.flush()
 
 
 async def _patient(
@@ -221,9 +280,15 @@ async def _patient(
 
 
 async def build(
-    db_path: Path, bot_tg_id: int, seed: int = 20261108, remind_in_min: int = 6
+    db_path: Path, bot_tg_id: int, seed: int = 20261108, remind_in_min: int = 6,
+    visits: bool = False,
 ) -> None:
-    """Пересоздать демо-БД стенда (файл и его WAL/SHM удаляются)."""
+    """Пересоздать демо-БД стенда (файл и его WAL/SHM удаляются).
+
+    `visits` (кадры 0.5.8): бот-пользователю сеются визиты и анализы, а его
+    часовой пояс подбирается так, чтобы eve-напоминание «Завтра визит»
+    сработало ближайшим тиком бота (`_visits`).
+    """
     ensure_stand_db(db_path)
     for suffix in ("", "-wal", "-shm"):
         Path(f"{db_path}{suffix}").unlink(missing_ok=True)
@@ -246,10 +311,12 @@ async def build(
             )
             session.add(WebUser(user_id=other.id, email=email, password_hash=unused_secret))
             patients.append(other)
-        await _patient(
+        bot_user = await _patient(
             session, bot_tg_id, days=DAYS, rng=random.Random(seed), now=now, with_meds=True,
             remind_in_min=remind_in_min,
         )
+        if visits:
+            await _visits(session, bot_user, now)
         doctor = Doctor(
             email=DOCTOR[0], name=DOCTOR[1], clinic=DOCTOR[2], password_hash=unused_secret
         )
@@ -286,8 +353,19 @@ def main() -> None:
         "--remind-in", type=int, default=6,
         help="через сколько минут после сборки сработает вечернее напоминание бота",
     )
+    parser.add_argument(
+        "--visits", action="store_true",
+        help="кадры «Визиты и анализы» (0.5.8): eve-напоминание «Завтра визит» сработает "
+             "ближайшим тиком бота; слотовое напоминание отодвигается на 600 минут, чтобы не мешать",
+    )
     args = parser.parse_args()
-    asyncio.run(build(Path(args.db), args.bot_tg_id, remind_in_min=args.remind_in))
+    asyncio.run(
+        build(
+            Path(args.db), args.bot_tg_id,
+            remind_in_min=600 if args.visits else args.remind_in,
+            visits=args.visits,
+        )
+    )
     print(f"Демо-БД готова: {args.db}")
 
 
