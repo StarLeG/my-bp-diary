@@ -71,14 +71,20 @@ class TestWebE2E:
         if db.measurement_count(tg_me.id) == 0:
             db.add_measurement(tg_me.id, 130, 85, 70)
         db.reset_doctor(tg_me.id)  # чистый сценарий добавления врача
+        db.ensure_profile(tg_me.id)  # §6.12: без данных пациента ввод — до приглашения
 
-        # Добавление врача: FSM e-mail → ссылка-приглашение (§21, пп. 2–3).
+        # Добавление врача: Б7 → выбор способа → FSM e-mail (§21, пп. 2–3).
         dialog.send("/start")
         dialog.wait_screen(texts.MAIN_MENU)
         dialog.press("menu:settings")
-        dialog.press("set:doctor", contains=texts.DOCTOR_NO_LINK)
+        dialog.press("set:doctor", contains=texts.DOCTOR_CONSENT_ASK)  # Б7 (§6.11)
+        dialog.press("set:doctor:agree", contains=texts.DOCTOR_NO_LINK)
+        # Шаг e-mail — общий текст SMTP-исходов («отправлю приглашение» / «подготовлю ссылку»).
+        dialog.press("set:doctor:email", contains="Отправьте e-mail врача сообщением")
         dialog.send(f"qa-doctor-{int(time.time())}@example.org")
-        dialog.wait_screen(texts.DOCTOR_INVITE_CREATED.format(name=tg_me.first_name, url=""))
+        # Приглашение: фрагмент «Пациент … предоставил вам доступ» — общий для
+        # всех исходов (ссылка или письмо, §21, п. 3).
+        dialog.wait_screen(f"Пациент {tg_me.first_name} предоставил вам доступ")
 
         # «Отправить отчет» → ссылка для врача (§21, п. 5 — текст дословно).
         dialog.send("/start")
@@ -86,12 +92,26 @@ class TestWebE2E:
         dialog.press("menu:report", contains=texts.DOCTOR_REPORT_LINK.format(url=""))
         report_link = _extract_url(dialog.last())
 
-        # Вход по ссылке: активация доступа и карточка пациента (§21).
+        # Вход по ссылке (§21): GET показывает подтверждение (почтовые сканеры
+        # не сжигают одноразовую ссылку), активация — кнопкой (POST /doctor/open).
         page.goto(report_link)
+        assert "Открыть дневник" in page.content(), "страница подтверждения врача не открылась"
+        shot("doctor_confirm")
+        page.click("form[action='/doctor/open'] button[type='submit']")
+        # К2 (§6.11): первый вход врача — экран согласия (одна страница для всех
+        # путей входа, `/doctor/consent?next=…`); без отметки кабинет не пускает.
+        # В URL карточки — внутренний PK пациента (`users.id`), не telegram id.
+        patient_id = db.user(tg_me.id)["id"]
+        page.wait_for_url(re.compile(rf"/doctor/(patient/{patient_id}|consent)"), timeout=15_000)
+        if "/doctor/consent" in page.url:
+            shot("doctor_consent")
+            page.check("#consent-agree")  # «Продолжить» включается отметкой
+            page.click("#consent-continue")
+        page.wait_for_url(re.compile(rf"/doctor/patient/{patient_id}"), timeout=15_000)
         shot("doctor_patient_card")
         content = page.content()
-        assert "Кабинет врача" in content, "кабинет врача не открылся по ссылке"
-        assert f"Пациент {tg_me.id}" in content, "пациент не виден врачу"
+        # Заголовок карточки — ФИО из профиля (§6.12; ensure_profile: «Тестов Пётр»).
+        assert "Тестов Пётр" in content, "пациент не виден врачу"
         assert "130" in content, "измерения пациента не видны врачу"
 
         # Заметка врача сохраняется и видна на странице (§21, §22, п. 5).

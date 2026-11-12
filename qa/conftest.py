@@ -26,6 +26,7 @@ import copy
 import json
 import logging
 import os
+import re
 import sqlite3
 import statistics
 import threading
@@ -148,7 +149,12 @@ class QaDb:
         self._conn.commit()
 
     def reset_doctor(self, telegram_id: int) -> None:
-        """Удалить связи с врачами и их заметки (чистый прогон сценария §21)."""
+        """Удалить связи с врачами, их заметки и согласия (чистый прогон §21).
+
+        Согласия на врача (`consents.kind='doctor'`, включая запись без врача
+        после «Согласен, пригласить») сбрасываются тоже: иначе экран Б7 (§6.11)
+        уже не покажется и сценарий добавления сломается на повторном прогоне.
+        """
         user_id_row = self._conn.execute(
             "SELECT id FROM users WHERE telegram_id = ?", (telegram_id,)
         ).fetchone()
@@ -157,6 +163,9 @@ class QaDb:
         user_id = user_id_row["id"]
         self._conn.execute("DELETE FROM doctor_notes WHERE user_id = ?", (user_id,))
         self._conn.execute("DELETE FROM doctor_patients WHERE user_id = ?", (user_id,))
+        self._conn.execute(
+            "DELETE FROM consents WHERE user_id = ? AND kind = 'doctor'", (user_id,)
+        )
         self._conn.commit()
 
     def _reset_for_user(self, user_id: int) -> None:
@@ -319,6 +328,17 @@ class QaDb:
         )
         self._conn.commit()
 
+    def ensure_profile(self, telegram_id: int) -> None:
+        """Данные пациента (§6.12): без них приглашение врача требует ввод (P2-Б)."""
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        self._conn.execute(
+            "UPDATE users SET last_name = 'Тестов', first_name = 'Пётр',"
+            " middle_name = NULL, birth_date = '1980-01-01', sex = 'm' WHERE id = ?",
+            (user["id"],),
+        )
+        self._conn.commit()
+
     # ── лекарства и журнал приёмов (напоминания, §6.7) ──
 
     def add_medication(self, telegram_id: int, name: str, dosage: str, slot: str) -> int:
@@ -352,7 +372,7 @@ class QaDb:
 
 
 def run_onboarding(dialog: "BotDialog") -> None:
-    """Полный сценарий онбординга: часовой пояс, цели, слот утреннего замера."""
+    """Полный сценарий онбординга: режим отображения, часовой пояс, цели, слот."""
     from bot import texts
 
     first = dialog.send("/start")
@@ -361,7 +381,9 @@ def run_onboarding(dialog: "BotDialog") -> None:
         dialog.press("cons:yes", contains=texts.WELCOME)
     else:
         dialog.wait_screen(texts.WELCOME)
-    dialog.press("onb:start", contains=texts.ONB_TZ_ASK)
+    dialog.press("onb:start", contains=texts.ONB_UI_ASK)
+    # С 0.5.10 шаг 2 — режим отображения (UI7): обычный режим, сразу шаг 3.
+    dialog.press("onb:ui:0", contains=texts.ONB_TZ_ASK)
     dialog.press("onb:tz:Europe/Minsk", contains=texts.ONB_TARGETS_ASK)
     dialog.press("onb:target:130-80", contains=texts.ONB_SLOTS_ASK)
     dialog.press("onb:slot:morning")
@@ -387,6 +409,13 @@ class BotDialog:
     #: Минимальный интервал между нажатиями (§7.2: debounce 1.5 с + запас на
     #: дисперсию сети: разница задержек сжимает клиентский интервал на стороне бота).
     MIN_CLICK_INTERVAL = 2.0
+
+    #: Разметка сообщения: HTML-теги канона §11 и markdown, в который Telethon
+    #: превращает entities в `.text` (`**…**`, `__…__`, `` `…` ``, `~~…~~`).
+    #: При сверке экрана разметка снимается: E2E проверяет содержание, а
+    #: оформление шапок (`<b>`) сверяет `tests/test_texts.py` — иначе канонические
+    #: маркеры вида `<b>☀️ Напоминания</b>` не находились в `**☀️ Напоминания**`.
+    _MARKUP_RE = re.compile(r"</?(?:b|i|code|pre|s|u|a)(?:\s+[^>]*)?>|\*\*|__|~~|`")
 
     #: Момент последнего нажатия — ОБЩИЙ для всех экземпляров: §7.2 действует на
     #: аккаунт, а `dialog` создаётся заново на каждый тест. Без глобального интервала
@@ -424,48 +453,81 @@ class BotDialog:
         смены текста или клавиатуры (экран может менять только кнопки).
         `message` — нажать в этом сообщении, а не в последнем (несколько
         открытых напоминаний, §6.7); с `contains` ожидание — по этому сообщению.
+
+        Кнопки в последнем сообщении нет (навигацию перебило напоминанием) —
+        ищем её среди последних сообщений и жмём там (гонка `last()`).
+
+        Повтор нажатия (гонка обработки): экран мог не смениться — нажатие
+        пришло с устаревшим состоянием FSM и бот ответил «Это сообщение
+        устарело». Если экран не менялся — повторяем (до 3 раз); экран другой —
+        ошибка сценария, повтор не поможет.
         """
         target = message
-        message = self.refresh(message) if message is not None else self.last()
+        if message is not None:
+            message = self.refresh(message)
+        else:
+            message = self.last()
+            if self._find_button(message, data) is None:
+                for candidate in self._loop.run(self._client.get_messages(self._chat, limit=5)):
+                    if not candidate.out and self._find_button(candidate, data) is not None:
+                        message = candidate
+                        break
         assert self._find_button(message, data) is not None, (
             f"нет кнопки {data!r} в сообщении {message.text!r}"
         )
         old_signature = self._signature(message)
         known = self._known_ids()
-        self._pace()
-        self._loop.run(message.click(data=data))
-        if contains and target is not None:
-            markers = self._markers(contains)
-            return self._poll(
-                lambda candidate: candidate.id == message.id
-                and all(marker in (candidate.text or "") for marker in markers),
-                timeout=timeout,
-            )
-        if contains:
-            return self.wait_screen(*self._markers(contains), timeout=timeout)
-        return self._poll(
-            lambda candidate: (candidate.id not in known and not candidate.out)
-            or (candidate.id == message.id and self._signature(candidate) != old_signature),
-            timeout=timeout,
-        )
+        last_error: AssertionError | None = None
+        for _attempt in range(3):
+            self._pace()
+            self._loop.run(message.click(data=data))
+            if contains:
+                markers = self._markers(contains)
+                if target is not None:
+                    predicate = (
+                        lambda candidate: candidate.id == message.id
+                        and self._shows(candidate, *markers)
+                    )
+                else:
+                    predicate = lambda candidate: not candidate.out and self._shows(candidate, *markers)
+                try:
+                    return self._poll(predicate, timeout=timeout)
+                except AssertionError as error:
+                    last_error = error
+            else:
+                try:
+                    return self._poll(
+                        lambda candidate: (candidate.id not in known and not candidate.out)
+                        or (candidate.id == message.id and self._signature(candidate) != old_signature),
+                        timeout=timeout,
+                    )
+                except AssertionError as error:
+                    last_error = error
+            if self._signature(self.refresh(message)) != old_signature:
+                break
+        raise last_error  # type: ignore[misc]
 
     # ── ожидание ──
 
     def wait_screen(self, *markers: str, timeout: float = 25.0):
         """Дождаться, что экран бота (последнее сообщение) содержит все маркеры."""
         return self._poll(
-            lambda message: not message.out
-            and all(marker in (message.text or "") for marker in markers),
+            lambda message: not message.out and self._shows(message, *markers),
             timeout=timeout,
         )
 
-    def wait_new(self, *markers: str, timeout: float = 150.0):
-        """Дождаться нового сообщения бота с маркерами (напоминание, ответ на ввод)."""
-        known = self._known_ids()
+    def wait_new(self, *markers: str, timeout: float = 150.0, since: set[int] | None = None):
+        """Дождаться нового сообщения бота с маркерами (напоминание, ответ на ввод).
+
+        `since` — снапшот `known_ids()`, снятый ДО действия: слот, включённый
+        с дефолтным временем, присылает напоминание до конца навигации, и без
+        снапшота оно успевает попасть в «известные» (гонка `known_ids`).
+        """
+        known = self._known_ids() if since is None else since
         return self._poll(
             lambda message: message.id not in known
             and not message.out
-            and all(marker in (message.text or "") for marker in markers),
+            and self._shows(message, *markers),
             timeout=timeout,
         )
 
@@ -482,6 +544,10 @@ class BotDialog:
         assert fresh is not None, f"сообщение #{message.id} удалено"
         return fresh
 
+    def known_ids(self, limit: int = 10) -> set[int]:
+        """Снапшот id последних сообщений — для `wait_new(since=...)` до действия."""
+        return self._known_ids(limit)
+
     def _known_ids(self, limit: int = 10) -> set[int]:
         messages = self._loop.run(self._client.get_messages(self._chat, limit=limit))
         return {m.id for m in messages}
@@ -491,6 +557,17 @@ class BotDialog:
         if isinstance(contains, str):
             return (contains,)
         return tuple(contains)
+
+    @staticmethod
+    def _plain(text: str) -> str:
+        """Текст без разметки (HTML-теги §11, markdown-конверсия Telethon)."""
+        return BotDialog._MARKUP_RE.sub("", text)
+
+    @classmethod
+    def _shows(cls, message, *markers: str) -> bool:
+        """Экран содержит все маркеры — сверка по plain-виду текста."""
+        shown = cls._plain(message.text or "")
+        return all(cls._plain(marker) in shown for marker in markers)
 
     @staticmethod
     def _signature(message) -> tuple:
@@ -1059,6 +1136,8 @@ async def bot_app(load_db: str, tmp_path, virtual_clock: VirtualClock):
         db_path=load_db,
         backup_dir=str(tmp_path / "backups"),
         backup_encryption_key="load-test-key",
+        # §19: при BACKUP_ENCRYPTION_KEY ключ HMAC журнала удалений обязателен.
+        deletion_log_key="load-test-key",
     )
     scheduler = build_scheduler(load_db)
     app = build_app(settings, scheduler=scheduler)

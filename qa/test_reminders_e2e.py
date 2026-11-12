@@ -47,7 +47,14 @@ def _today_key(db, tg_me) -> tuple[str, str]:
 
 
 def _set_slot(dialog, slot: str, tz_name: str, minutes: int = 1) -> None:
-    """Время слота — «через `minutes` минут» через настройки (§6.6)."""
+    """Время слота — «через `minutes` минут» через настройки (§6.6).
+
+    Момент округляется вверх до минуты с запасом: `strftime("%H:%M")`
+    отбрасывает секунды, и «минута слота» могла попасть в прошлое к моменту
+    сохранения ботом — слот уходил на завтра, напоминание не приходило
+    (гонка стенда, не бота). Порядок слотов сохраняется: следующий слот
+    всегда строго позже предыдущего.
+    """
     label = texts.SLOT_LABELS[slot]
     dialog.send("/start")
     dialog.wait_screen(texts.MAIN_MENU)
@@ -57,7 +64,9 @@ def _set_slot(dialog, slot: str, tz_name: str, minutes: int = 1) -> None:
         dialog.press(f"set:slot:{slot}")  # слот выключен — включить (время по умолчанию)
     dialog.press(f"set:time:{slot}:show", contains=texts.SLOT_TIME_ASK.format(slot=label))
     dialog.press(f"set:time:{slot}:other", contains=texts.SLOT_TIME_ASK.format(slot=label))
-    moment = datetime.now(ZoneInfo(tz_name)) + timedelta(minutes=minutes)
+    moment = (
+        datetime.now(ZoneInfo(tz_name)) + timedelta(minutes=minutes)
+    ).replace(second=0, microsecond=0) + timedelta(minutes=1)
     dialog.send(moment.strftime("%H:%M"))
     dialog.wait_screen(texts.REMINDERS_MENU)
 
@@ -66,8 +75,11 @@ class TestReminderButtons:
     def test_cancel_then_snooze(self, dialog, db, tg_me, meds) -> None:
         """«Частично…» → снять отметку → «Отмена» → «Через 30 мин» работает (E1)."""
         tz_name, day = _today_key(db, tg_me)
+        known = dialog.known_ids()  # до навигации: включённый слот может сработать сразу
         _set_slot(dialog, "morning", tz_name)
-        reminder = dialog.wait_new("Пора измерить давление", "QA-Лозартан", timeout=REMINDER_TIMEOUT)
+        reminder = dialog.wait_new(
+            "Пора измерить давление", "QA-Лозартан", timeout=REMINDER_TIMEOUT, since=known
+        )
         dialog.press(f"rem:partial:morning:{day}", contains=texts.PARTIAL_PROMPT, message=reminder)
         dialog.press(f"rem:pt:morning:{day}:{meds['morning'][1]}", message=reminder)
         dialog.press(f"rem:pc:morning:{day}", contains="Пора измерить давление", message=reminder)
@@ -77,11 +89,16 @@ class TestReminderButtons:
     def test_two_open_lists_each_logs_own_slot(self, dialog, db, tg_me, meds) -> None:
         """Два открытых списка: «Готово» в каждом отмечает свой слот (E2)."""
         tz_name, day = _today_key(db, tg_me)
+        known = dialog.known_ids()  # до навигации: утреннее напоминание перебивает `last()`
         _set_slot(dialog, "morning", tz_name, minutes=1)
         # Вечер — на минуту позже: оба сообщения в одну минуту `wait_new` не различит.
         _set_slot(dialog, "evening", tz_name, minutes=2)
-        morning = dialog.wait_new("Пора измерить давление", "QA-Лозартан", timeout=REMINDER_TIMEOUT)
-        evening = dialog.wait_new("Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT)
+        morning = dialog.wait_new(
+            "Пора измерить давление", "QA-Лозартан", timeout=REMINDER_TIMEOUT, since=known
+        )
+        evening = dialog.wait_new(
+            "Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT, since=known
+        )
 
         dialog.press(f"rem:partial:morning:{day}", contains=texts.PARTIAL_PROMPT, message=morning)
         dialog.press(f"rem:partial:evening:{day}", contains=texts.PARTIAL_PROMPT, message=evening)
@@ -99,10 +116,14 @@ class TestReminderButtons:
         """Повторное «Принял всё ✓» за день — «уже отмечены сегодня», не «нет данных» (E4)."""
         tz_name, day = _today_key(db, tg_me)
         for _ in range(2):
+            known = dialog.known_ids()  # до навигации: включённый слот может сработать сразу
             _set_slot(dialog, "evening", tz_name)
-            reminder = dialog.wait_new("Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT)
+            reminder = dialog.wait_new(
+                "Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT, since=known
+            )
             screen = dialog.press(f"rem:all:evening:{day}", contains=("Индапамид",), message=reminder)
-        assert (screen.text or "").startswith("Эти лекарства уже отмечены сегодня ✓")
+        # Текст ответа — со шапкой слота («🌙 Вечер»), ключевая строка — внутри.
+        assert "Эти лекарства уже отмечены сегодня ✓" in (screen.text or "")
         assert "нет данных" not in (screen.text or "")
 
 
@@ -116,8 +137,11 @@ class TestRemindersPart2:
 
     def test_followup_planned_and_answer_cancels(self, dialog, db, tg_me, meds) -> None:
         tz_name, day = _today_key(db, tg_me)
+        known = dialog.known_ids()  # до навигации: включённый слот может сработать сразу
         _set_slot(dialog, "evening", tz_name)
-        reminder = dialog.wait_new("Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT)
+        reminder = dialog.wait_new(
+            "Пора измерить давление", "QA-Индапамид", timeout=REMINDER_TIMEOUT, since=known
+        )
         assert db.slot_row(tg_me.id, "evening")["followup_at"] is not None, "повтор запланирован"
         dialog.press(f"rem:snooze:evening:{day}", contains=texts.SLOT_REMAINING, message=reminder)
         assert db.slot_row(tg_me.id, "evening")["followup_at"] is None, "ответ снял повтор"

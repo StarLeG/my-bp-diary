@@ -15,8 +15,8 @@
 Критерии: ровно столько сообщений, сколько напоминаний; каждое напоминание —
 ровно одно сообщение (по `rem:snooze:{id}` в клавиатуре); `last_sent_date`
 слотов — сегодня, `next_trigger_time` — завтра; `med_remeasure` после
-доставки снят; двойной тик (повторный `fire_reminder` по всем) ничего не
-отправляет. Итог — `qa/reports/load/test_load_reminders.json`.
+доставки неактивен (строка помечена `enabled=False`, §6.7); двойной тик
+(повторный `fire_reminder` по всем) ничего не отправляет. Итог — `qa/reports/load/test_load_reminders.json`.
 """
 from __future__ import annotations
 
@@ -43,6 +43,7 @@ DELIVERY_TIMEOUT_S = 60.0
 SETTLE_S = 2.0
 
 _REMINDER_ID = re.compile(r"^rem:snooze:(\d+)$")
+_REMINDER_SLOT = re.compile(r"^rem:snooze:([a-z_]+):(\d{8})$")
 
 
 @pytest_asyncio.fixture
@@ -52,27 +53,37 @@ async def session_factory(load_db: str):
     await engine.dispose()
 
 
-def reminder_id_of(markup) -> int:
-    """Id строки напоминания из клавиатуры сообщения (`rem:snooze:{id}`)."""
+def reminder_id_of(markup, telegram_id: int, by_user_slot: dict[tuple[int, str], int]) -> int:
+    """Id строки напоминания из клавиатуры сообщения.
+
+    Повтор замера несёт `rem:snooze:{id}`; слот-сообщение — `rem:snooze:{slot}:{д}`
+    (§6.7), его строка опознаётся парой (пользователь, слот).
+    """
     for row in markup.inline_keyboard:
         for button in row:
-            match = _REMINDER_ID.match(button.callback_data or "")
+            data = button.callback_data or ""
+            match = _REMINDER_ID.match(data)
             if match:
                 return int(match.group(1))
-    raise AssertionError("в клавиатуре напоминания нет rem:snooze:{id}")
+            slot_match = _REMINDER_SLOT.match(data)
+            if slot_match:
+                slot = slot_match.group(1)
+                if (telegram_id, slot) in by_user_slot:
+                    return by_user_slot[(telegram_id, slot)]
+    raise AssertionError("в клавиатуре напоминания нет rem:snooze:{id} или rem:snooze:{слот}:{д}")
 
 
-async def prepare(session_factory, trigger: datetime) -> dict[int, tuple[str, int, str]]:
-    """Все активные напоминания — на `trigger`; вернуть {id: (type, user_id, tz)}."""
+async def prepare(session_factory, trigger: datetime) -> dict[int, tuple[str, int, int, str]]:
+    """Все активные напоминания — на `trigger`; вернуть {id: (type, user_id, telegram_id, tz)}."""
     async with session_factory() as session:
         rows = (
             await session.execute(
-                select(Reminder, User.timezone)
+                select(Reminder, User.timezone, User.telegram_id)
                 .join(User, User.id == Reminder.user_id)
                 .where(Reminder.enabled.is_(True))
             )
         ).all()
-        for reminder, tz_name in rows:
+        for reminder, tz_name, _telegram_id in rows:
             reminder.next_trigger_time = trigger
             reminder.last_sent_date = None
             if reminder.type != "med_remeasure":
@@ -85,19 +96,30 @@ async def prepare(session_factory, trigger: datetime) -> dict[int, tuple[str, in
         for measurement in recent:
             measurement.timestamp = measurement.timestamp - timedelta(days=1)
         await session.commit()
-        return {reminder.id: (reminder.type, reminder.user_id, tz) for reminder, tz in rows}
+        return {
+            reminder.id: (reminder.type, reminder.user_id, telegram_id, tz)
+            for reminder, tz, telegram_id in rows
+        }
 
 
 async def test_reminders_burst(session_factory, load_db, load_scale, load_log, load_report) -> None:
     trigger = datetime.now(timezone.utc).replace(microsecond=0) + timedelta(seconds=1)
     planned = await prepare(session_factory, trigger)
     assert len(planned) == load_scale.reminders, "в шаблоне не то число активных напоминаний"
+    by_user_slot = {
+        (telegram_id, kind): rid
+        for rid, (kind, _user_id, telegram_id, _tz) in planned.items()
+        if kind != "med_remeasure"
+    }
 
     sends: list[tuple[int, int, float]] = []  # (telegram_id, reminder_id, момент)
     all_sent = asyncio.Event()
 
-    async def sender(telegram_id: int, text: str, markup) -> None:
-        sends.append((telegram_id, reminder_id_of(markup), time.perf_counter()))
+    async def sender(telegram_id: int, text: str, markup, html: bool = False) -> None:
+        # `html` — прод-сигнатура доставки (слоты — HTML, повтор замера — plain).
+        sends.append(
+            (telegram_id, reminder_id_of(markup, telegram_id, by_user_slot), time.perf_counter())
+        )
         if len(sends) >= len(planned):
             all_sent.set()
 
@@ -120,7 +142,7 @@ async def test_reminders_burst(session_factory, load_db, load_scale, load_log, l
         await asyncio.gather(
             *(
                 fire_reminder(rid, MODE_REMEASURE if kind == "med_remeasure" else MODE_SLOT)
-                for rid, (kind, _, _) in planned.items()
+                for rid, (kind, _, _, _) in planned.items()
             )
         )
         double_tick_sends = len(sends) - before_double
@@ -138,10 +160,12 @@ async def test_reminders_burst(session_factory, load_db, load_scale, load_log, l
         }
     wrong_slots: list[dict] = []
     remeasure_left: list[int] = []
-    for rid, (kind, _, tz_name) in planned.items():
+    for rid, (kind, _, _, tz_name) in planned.items():
         row = rows.get(rid)
         if kind == "med_remeasure":
-            if row is not None:
+            # Повтор замера после доставки не удаляется, а помечается
+            # доставленным (`enabled=False`, §6.7) — кнопки живут по его id.
+            if row is not None and row.enabled:
                 remeasure_left.append(rid)
             continue
         today = trigger.astimezone(ZoneInfo(tz_name)).date()
@@ -183,5 +207,5 @@ async def test_reminders_burst(session_factory, load_db, load_scale, load_log, l
     assert not duplicates, f"напоминания отправлены больше одного раза: {duplicates}"
     assert not missing, f"не доставлены: {missing}"
     assert not wrong_slots, f"слоты не перепланированы на завтра: {wrong_slots[:5]}"
-    assert not remeasure_left, f"повторы замера не сняты после доставки: {remeasure_left}"
+    assert not remeasure_left, f"повторы замера остались активными после доставки: {remeasure_left}"
     assert double_tick_sends == 0, f"двойной тик отправил ещё {double_tick_sends}"
