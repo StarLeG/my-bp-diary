@@ -74,8 +74,8 @@ STATUSES = ("planned", "done", "moved", "missed", "cancelled")
 Sender = Callable[..., Awaitable[Optional[int]]]
 #: Снять кнопки сообщения: (telegram_id, message_id).
 MarkupClearer = Callable[[int, int], Awaitable[None]]
-#: Клавиатура уведомления: (событие, уведомление, есть ли врач с доступом) → разметка.
-NoticeMarkup = Callable[[Appointment, str, bool], object]
+#: Клавиатура уведомления: (событие, уведомление, есть ли врач с доступом, large) → разметка.
+NoticeMarkup = Callable[..., object]
 
 
 class LimitReached(Exception):
@@ -383,14 +383,23 @@ DIARY_LINE_MAX = 80
 
 
 def diary_line(key: Optional[str], events: Sequence[Appointment]) -> Optional[str]:
-    """«📅 Сегодня: Анализы 08:00, Кардиолог 15:00» / «📅 Завтра: Кардиолог, 10:30» (§6.4)."""
+    """«📅 Сегодня: Анализы 08:00, Кардиолог 15:00» / «📅 Завтра: Кардиолог, 10:30» (§6.4).
+
+    Названия экранируются (HTML): строка входит в экран дневника с `<b>`-шапкой.
+    """
     if key is None or not events:
         return None
     prefix = texts.DIARY_AP_DAY[key]
     if len(events) == 1:
         event = events[0]
-        return prefix + event.title + (f", {event.starts_at}" if event.starts_at else "")
-    parts = [e.title + (f" {e.starts_at}" if e.starts_at else "") for e in events]
+        return (
+            prefix
+            + texts.esc(event.title)
+            + (f", {event.starts_at}" if event.starts_at else "")
+        )
+    parts = [
+        texts.esc(e.title) + (f" {e.starts_at}" if e.starts_at else "") for e in events
+    ]
     line = prefix + ", ".join(parts)
     if len(line) > DIARY_LINE_MAX:
         line = prefix + parts[0] + ", …"
@@ -699,7 +708,7 @@ async def collect_due(
                         telegram_id=user.telegram_id,
                         previous_message_id=appt.last_message_id,
                         text=notice_text(appt, notice),
-                        markup=markup_for(appt, notice, with_doctor),
+                        markup=markup_for(appt, notice, with_doctor, user.ui_large),
                     )
                 )
         await session.commit()

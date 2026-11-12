@@ -6,6 +6,7 @@
 """
 from __future__ import annotations
 
+import html
 from typing import Optional, Sequence
 
 # ─────────────────────────── Общие ───────────────────────────
@@ -16,6 +17,62 @@ DUPLICATE_MEASUREMENT = "Это давление уже записано"
 MENU_HINT = "Выберите пункт меню"
 CSV_TOO_MANY = "Слишком много записей, выберите 7 или 30 дней"
 NOT_YOUR_RECORD = "Такой записи нет"
+
+# ─────────────────── Визуальный канон (§11, 0.5.10) ───────────────────
+# Шаблон экрана: шапка «[эмодзи] Заголовок» первой строкой (<b> — всегда),
+# тело, кнопки (сначала действия, потом «Назад»/«В меню»). Parse mode — HTML:
+# значения в <b> — только в крупном режиме; пользовательский текст — esc().
+
+BTN_SHOW_MORE = "Показать ещё {count}"
+CAL_WEEK_LABEL = "Неделя {date_from}–{date_to}"
+BTN_CAL_PREV = "◀"
+BTN_CAL_NEXT = "▶"
+
+
+def esc(text: object) -> str:
+    """Экранировать пользовательский текст для HTML-сообщений (§11, UI5)."""
+    return html.escape(str(text))
+
+
+def header(emoji: str, title: str) -> str:
+    """Шапка экрана: «<b>{эмодзи} Заголовок</b>» — всегда, оба режима (§11)."""
+    return f"<b>{emoji} {title}</b>"
+
+
+#: Канонические шапки экранов (§11) — сверяются в `test_texts.py`.
+SCREEN_HEADERS: dict[str, str] = {
+    "stats": "📊 Статистика",
+    "settings": "⚙️ Настройки",
+    "reminders": "☀️ Напоминания",
+    "diary": "📖 Дневник за сегодня",
+    "appointments": "📅 Визиты и анализы",
+    "profile": "👤 Мои данные",
+    "stats_days": "📅 Средние по дням",
+    "stats_custom": "📆 Свой период",
+    "report": "📄 Отчёт для врача",
+    "meds": "💊 Мои лекарства",
+    "archive": "🗂 Архивные записи",
+    "about": "📣 О боте",
+    "support": "📣 Поддержать",
+    "doctor_patients": "👥 Мои пациенты",
+    "doctor_panel": "🩺 Меню врача",
+    "admin_stats": "📊 Статистика БД",
+    "admin_backups": "💾 Бэкапы",
+    "admin_health": "🩺 Здоровье системы",
+    "admin_broadcast": "📢 Рассылка",
+    "admin_search": "👤 Поиск пользователя",
+}
+
+
+def screen_header(key: str) -> str:
+    """Шапка экрана по ключу словаря: «<b>📊 Статистика</b>» (§11)."""
+    return f"<b>{SCREEN_HEADERS[key]}</b>"
+
+
+def _fmt_value(value: object, large: bool) -> str:
+    """Значение поля: в крупном режиме — `<b>` (§11, UI4/UI5), иначе plain."""
+    text = str(value)
+    return f"<b>{text}</b>" if large else text
 
 # ─────────────────────────── Кнопки ───────────────────────────
 
@@ -106,6 +163,23 @@ ONB_TIMES_ASK = "Во сколько напоминать? ({slot})"
 ONB_TIME_OTHER_PROMPT = "Введите время в формате ЧЧ:ММ, например 08:30."
 ONB_REMEASURE_NOTE = "Повтор измерения после лекарства включён (через 60 минут) — меняется в настройках."
 
+ONB_UI_ASK = "Как вам удобнее смотреть?"
+BTN_UI_REGULAR = "Обычный"
+BTN_UI_LARGE = "Крупный"
+
+
+def fmt_onb_tz_confirm(tz_name: str, offset: str, *, large: bool = False) -> str:
+    """Подтверждение выбора пояса; в крупном — значения жирным (§11, шаг 3)."""
+    return ONB_TZ_CONFIRM.format(
+        tz=_fmt_value(esc(tz_name), large),
+        offset=_fmt_value(esc(offset), large),
+    )
+
+
+def fmt_onb_target_confirm(target: str, *, large: bool = False) -> str:
+    """Подтверждение цели; в крупном — значение жирным (§11, шаг 4)."""
+    return ONB_TARGETS_CONFIRM.format(target=_fmt_value(esc(target), large))
+
 ONB_DONE = "Готово! Всё настроено."
 ONB_RESTARTED = "Начнём сначала."
 
@@ -156,7 +230,9 @@ MED_REMEASURE_CANCELLED = "Хорошо, повторно напоминать �
 
 BTN_ARCHIVE = "Архивные записи"
 ARCHIVE_MENU = (
-    "Перенесите прошлые измерения — например, из блокнота.\n"
+    screen_header("archive")
+    + "\n\n"
+    + "Перенесите прошлые измерения — например, из блокнота.\n"
     "Можно добавить по одной записи или быстро — одной строкой."
 )
 BTN_ARCHIVE_ADD = "Добавить запись"
@@ -216,37 +292,59 @@ def fmt_measurement_short(systolic: int, diastolic: int, pulse: Optional[int] = 
     return result
 
 
-def _fmt_summary(header: str, systolic: int, diastolic: int, pulse: Optional[int]) -> str:
-    """Сводка введённых данных: значения — каждый на своей строке (§6.3)."""
+def _fmt_summary(
+    header_text: str,
+    systolic: int,
+    diastolic: int,
+    pulse: Optional[int],
+    *,
+    large: bool = False,
+) -> str:
+    """Сводка введённых данных: значения — каждый на своей строке (§6.3).
+
+    В крупном режиме — пустая строка после шапки и значения жирным (UI4, мокап 2.3).
+    """
     pulse_str = str(pulse) if pulse is not None else KEYPAD_ENTERED_EMPTY
-    return "\n".join(
-        [
-            header,
-            SUMMARY_SYSTOLIC.format(value=systolic),
-            SUMMARY_DIASTOLIC.format(value=diastolic),
-            SUMMARY_PULSE.format(value=pulse_str),
-        ]
-    )
+    lines = [
+        header_text,
+        SUMMARY_SYSTOLIC.format(value=_fmt_value(systolic, large)),
+        SUMMARY_DIASTOLIC.format(value=_fmt_value(diastolic, large)),
+        SUMMARY_PULSE.format(value=_fmt_value(pulse_str, large)),
+    ]
+    if large:
+        lines.insert(1, "")
+    return "\n".join(lines)
 
 
-def fmt_saved(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
+def fmt_saved(
+    systolic: int, diastolic: int, pulse: Optional[int] = None, *, large: bool = False
+) -> str:
     """Сводка после сохранения измерения (SPEC.md, раздел 6.3)."""
-    return _fmt_summary(MEASUREMENT_SAVED, systolic, diastolic, pulse)
+    return _fmt_summary(MEASUREMENT_SAVED, systolic, diastolic, pulse, large=large)
 
 
-def fmt_updated(systolic: int, diastolic: int, pulse: Optional[int] = None) -> str:
+def fmt_updated(
+    systolic: int, diastolic: int, pulse: Optional[int] = None, *, large: bool = False
+) -> str:
     """Сводка после обновления записи правки (SPEC.md, раздел 6.3)."""
-    return _fmt_summary(MEASUREMENT_UPDATED, systolic, diastolic, pulse)
+    return _fmt_summary(MEASUREMENT_UPDATED, systolic, diastolic, pulse, large=large)
 
 
 def fmt_archive_saved(
-    moment: str, systolic: int, diastolic: int, pulse: Optional[int] = None
+    moment: str,
+    systolic: int,
+    diastolic: int,
+    pulse: Optional[int] = None,
+    *,
+    large: bool = False,
 ) -> str:
     """Сводка архивной записи: «✅ Записано за 12.03.2025, 08:00» (SPEC.md, §6.10).
 
     `moment` — уже отформатированный момент измерения («ДД.ММ.ГГГГ, ЧЧ:ММ»).
     """
-    return _fmt_summary(ARCHIVE_SAVED.format(moment=moment), systolic, diastolic, pulse)
+    return _fmt_summary(
+        ARCHIVE_SAVED.format(moment=esc(moment)), systolic, diastolic, pulse, large=large
+    )
 
 
 def fmt_keypad_prompt(question: str, buffer: str) -> str:
@@ -262,14 +360,31 @@ def fmt_diary_line(
     pulse: Optional[int],
     medication_taken: Optional[bool],
     feeling: Optional[str],
+    *,
+    large: bool = False,
 ) -> str:
-    """Строка дневника: «08:15 — 135/85, пульс 72 · лекарство: да · норма»."""
-    parts = [f"{time_str} — {fmt_measurement_short(systolic, diastolic, pulse)}"]
+    """Строка дневника (§6.4).
+
+    Обычный режим: «08:15 — 135/85, пульс 72 · лекарство: да · норма».
+    Крупный — блоком: время строкой, «135/85 · пульс 72» жирным,
+    статусы третьей строкой (мокап 2.4); блоки разделяются пустой строкой.
+    """
+    statuses = []
     if medication_taken is not None:
-        parts.append(f"лекарство: {MED_FLAG_LABELS[medication_taken]}")
+        statuses.append(f"лекарство: {MED_FLAG_LABELS[medication_taken]}")
     if feeling is not None:
-        parts.append(FEELING_LABELS.get(feeling, feeling))
-    return " · ".join(parts)
+        statuses.append(FEELING_LABELS.get(feeling, feeling))
+    if not large:
+        parts = [f"{time_str} — {fmt_measurement_short(systolic, diastolic, pulse)}"]
+        parts.extend(statuses)
+        return " · ".join(parts)
+    values = f"{systolic}/{diastolic}"
+    if pulse is not None:
+        values += f" · пульс {pulse}"
+    lines = [time_str, f"<b>{values}</b>"]
+    if statuses:
+        lines.append(" · ".join(statuses))
+    return "\n".join(lines)
 
 # ─────────────────────────── Статистика ───────────────────────────
 
@@ -302,10 +417,13 @@ STATS_CAL_MONTHS = (
     "Январь", "Февраль", "Март", "Апрель", "Май", "Июнь",
     "Июль", "Август", "Сентябрь", "Октябрь", "Ноябрь", "Декабрь",
 )
-STATS_DAYS_HEADER = "📅 Средние по дням · {date_from}–{date_to}"
+STATS_DAYS_HEADER = screen_header("stats_days") + " · {date_from}–{date_to}"
 STATS_DAYS_LINE = "{icon} {date} — {sys}/{dia}"
 STATS_DAYS_PULSE = ", пульс {pulse}"
 STATS_DAYS_TOTAL = "Среднее за день: {sys}/{dia}"
+#: Крупный режим (UI4/UI6): значения жирным, блоки разделяются пустой строкой.
+STATS_DAYS_LINE_LARGE = "{icon} {date} — <b>{sys}/{dia}</b>"
+STATS_DAYS_TOTAL_LARGE = "Среднее за день: <b>{sys}/{dia}</b>"
 #: Кружок зоны дня: 0 — зелёная, 1 — жёлтая, 2 — красная (`chart_zones`).
 STATS_ZONE_ICONS = ("🟢", "🟡", "🔴")
 
@@ -326,20 +444,35 @@ def fmt_daily_averages(
     date_to: str,
     rows: Sequence[tuple[str, int, int, int, Optional[int]]],
     total: tuple[int, int, Optional[int]],
+    *,
+    large: bool = False,
 ) -> str:
-    """Список «По дням» (§6.5): строки дней (дата, зона, САД, ДАД, пульс) и итог."""
+    """Список «По дням» (§6.5): строки дней (дата, зона, САД, ДАД, пульс) и итог.
+
+    В крупном режиме значения жирным, пустая строка после шапки (UI4, UI6).
+    """
     lines = [STATS_DAYS_HEADER.format(date_from=date_from, date_to=date_to)]
+    if large:
+        lines.append("")
     for day, zone, systolic, diastolic, pulse in rows:
-        line = STATS_DAYS_LINE.format(
-            icon=STATS_ZONE_ICONS[zone], date=day, sys=systolic, dia=diastolic
-        )
+        if large:
+            line = STATS_DAYS_LINE_LARGE.format(
+                icon=STATS_ZONE_ICONS[zone], date=day, sys=systolic, dia=diastolic
+            )
+        else:
+            line = STATS_DAYS_LINE.format(
+                icon=STATS_ZONE_ICONS[zone], date=day, sys=systolic, dia=diastolic
+            )
         if pulse is not None:
-            line += STATS_DAYS_PULSE.format(pulse=pulse)
+            line += STATS_DAYS_PULSE.format(pulse=_fmt_value(pulse, large))
         lines.append(line)
     sys_total, dia_total, pulse_total = total
-    line = STATS_DAYS_TOTAL.format(sys=sys_total, dia=dia_total)
+    if large:
+        line = STATS_DAYS_TOTAL_LARGE.format(sys=sys_total, dia=dia_total)
+    else:
+        line = STATS_DAYS_TOTAL.format(sys=sys_total, dia=dia_total)
     if pulse_total is not None:
-        line += STATS_DAYS_PULSE.format(pulse=pulse_total)
+        line += STATS_DAYS_PULSE.format(pulse=_fmt_value(pulse_total, large))
     lines.append(line)
     return "\n".join(lines)
 
@@ -361,39 +494,54 @@ def fmt_stats(
     goal_verdict: str,
     adherence: Optional[str] = None,
     custom: bool = False,
+    large: bool = False,
 ) -> str:
     """Сводка статистики (SPEC.md, раздел 6.5) — блоками, каждый на своей строке.
 
     `custom` — свой период: заголовок «📊 За период … (N дней)» (0.5.3).
+    В крупном режиме значения жирным, пустая строка после шапки (UI4, UI6).
     """
     if custom:
-        header = STATS_HEADER_CUSTOM.format(
+        header_text = STATS_HEADER_CUSTOM.format(
             date_from=date_from, date_to=date_to, days=plural_days(days)
         )
     else:
-        header = STATS_HEADER.format(days=days, date_from=date_from, date_to=date_to)
+        header_text = STATS_HEADER.format(days=days, date_from=date_from, date_to=date_to)
     lines = [
-        header,
-        STATS_COUNT.format(count=count),
-        STATS_SYSTOLIC.format(avg=sys_avg, min=sys_min, max=sys_max),
-        STATS_DIASTOLIC.format(avg=dia_avg, min=dia_min, max=dia_max),
+        header_text,
+        STATS_COUNT.format(count=_fmt_value(count, large)),
+        STATS_SYSTOLIC.format(
+            avg=_fmt_value(sys_avg, large),
+            min=_fmt_value(sys_min, large),
+            max=_fmt_value(sys_max, large),
+        ),
+        STATS_DIASTOLIC.format(
+            avg=_fmt_value(dia_avg, large),
+            min=_fmt_value(dia_min, large),
+            max=_fmt_value(dia_max, large),
+        ),
     ]
+    if large:
+        lines.insert(1, "")
     if pulse_avg is not None:
-        lines.append(STATS_PULSE.format(avg=pulse_avg))
+        lines.append(STATS_PULSE.format(avg=_fmt_value(pulse_avg, large)))
     lines.append(STATS_TREND.format(trend=trend))
-    lines.append(STATS_GOAL.format(target=target, verdict=goal_verdict))
+    lines.append(STATS_GOAL.format(target=_fmt_value(target, large), verdict=goal_verdict))
     if adherence is not None:
         lines.append(adherence)
     return "\n".join(lines)
 
 # ─────────────────────────── Настройки ───────────────────────────
 
-SETTINGS_MENU = "Настройки"
+SETTINGS_MENU = screen_header("settings")
+BTN_UI_MODE = "👁 Крупный режим: {state}"  # первая строка настроек (§6.6)
+UI_MODE_ON = "вкл"
+UI_MODE_OFF = "выкл"
 TARGETS_ASK = "Какие значения считать целью?"
 TARGETS_OTHER_PROMPT = "Введите целевое систолическое (верхнее) число, например 130."
 TARGETS_OTHER_PROMPT_DIA = "Теперь целевое диастолическое (нижнее) число, например 80."
 TARGETS_SAVED = "Цель: {target}"
-REMINDERS_MENU = "Напоминания"
+REMINDERS_MENU = screen_header("reminders")
 SLOT_TIME_ASK = "Во сколько напоминать? ({slot})"
 REMEASURE_ASK = "Через сколько минут повторить измерение после лекарства?"
 REMEASURE_SAVED = "Повтор измерения: {value}"
@@ -414,8 +562,12 @@ PDF_FILE_CAPTION = "Отчёт по давлению за {date_from}–{date_to
 
 # ─────────────────────────── Лекарства ───────────────────────────
 
-MEDS_LIST_HEADER = "Мои лекарства"
-MEDS_LIST_EMPTY = "Лекарств пока нет. Добавьте — и бот напомнит, какие принимать."
+MEDS_LIST_HEADER = screen_header("meds")
+MEDS_LIST_EMPTY = (
+    screen_header("meds")
+    + "\n\n"
+    + "Лекарств пока нет. Добавьте — и бот напомнит, какие принимать."
+)
 MEDS_ITEM = "• {med} — {slots}"
 MEDS_ADD_NAME_PROMPT = "Название лекарства (до 100 символов).\nНапример: Лозартан, Амлодипин"
 MEDS_ADD_DOSAGE_PROMPT = "Дозировка?"
@@ -495,6 +647,7 @@ def fmt_slot_message(
     mode: str = "both",
     followup: bool = False,
     resumed: bool = False,
+    large: bool = False,
 ) -> str:
     """Сообщение слота по режиму (§6.7): обычное или повтор «если не ответил».
 
@@ -502,8 +655,11 @@ def fmt_slot_message(
     принять лекарства 💊» + перечень; `pressure` — без перечня. Повтор (0.5.6):
     «Не забыли измерить давление? 🩺» / «Не забыли про лекарства? 💊 …».
     `resumed` — первой строкой «Напоминания снова включены ▶️» (конец паузы).
+    Названия лекарств экранируются (HTML), в крупном режиме перечень жирным (§11).
     """
-    listed = ", ".join(medications)
+    listed = ", ".join(esc(med) for med in medications)
+    if large and medications:
+        listed = f"<b>{listed}</b>"
     if mode == "meds" and not medications:
         mode = "both"  # «Только лекарства» без лекарств ведёт себя как both (§6.7)
     lines = [REMINDERS_RESUMED] if resumed else []
@@ -533,18 +689,24 @@ def fmt_intake_item(name: str, dosage: str, slot: str) -> str:
     return f"{fmt_med_item(name, dosage)} · {SLOT_LABELS.get(slot, slot).lower()}"
 
 
-def fmt_meds_intake(taken: Sequence[str]) -> str:
-    """Итог мультивыбора приёмов: «💊 Принято: Лозартан 50 мг, Амлодипин 5 мг» (§6.3)."""
-    return MEDS_INTAKE_DONE.format(items=", ".join(taken))
+def fmt_meds_intake(taken: Sequence[str], *, large: bool = False) -> str:
+    """Итог мультивыбора приёмов: «💊 Принято: Лозартан 50 мг, Амлодипин 5 мг» (§6.3).
+
+    Названия экранируются (HTML), в крупном режиме перечень жирным (§11).
+    """
+    items = ", ".join(esc(item) for item in taken)
+    if large:
+        items = f"<b>{items}</b>"
+    return MEDS_INTAKE_DONE.format(items=items)
 
 
 def fmt_meds_summary(taken: Sequence[str], skipped: Sequence[str]) -> str:
     """Итог отметки приёма: что принято и что пропущено."""
     parts = []
     if taken:
-        parts.append("принято: " + ", ".join(taken))
+        parts.append("принято: " + ", ".join(esc(item) for item in taken))
     if skipped:
-        parts.append("пропущено: " + ", ".join(skipped))
+        parts.append("пропущено: " + ", ".join(esc(item) for item in skipped))
     return "; ".join(parts) if parts else "нет данных"
 
 
@@ -557,16 +719,18 @@ def fmt_intake_result(
     «Отметил: …» и, если часть уже была отмечена, строка «Уже отмечено сегодня: …».
     """
     if not taken and not skipped:
-        return MEDS_ALREADY.format(meds=", ".join(already))
+        return MEDS_ALREADY.format(meds=", ".join(esc(item) for item in already))
     text = MEDS_LOGGED.format(summary=fmt_meds_summary(taken, skipped))
     if already:
-        text += "\n" + MEDS_ALREADY_LINE.format(meds=", ".join(already))
+        text += "\n" + MEDS_ALREADY_LINE.format(meds=", ".join(esc(item) for item in already))
     return text
 
 # ─────────────────────────── О боте / Поддержать ───────────────────────────
 
 ABOUT_TEXT = (
-    "Бота пишет один разработчик в свободное время. Он бесплатный и без рекламы: "
+    screen_header("about")
+    + "\n\n"
+    + "Бота пишет один разработчик в свободное время. Он бесплатный и без рекламы: "
     "все функции доступны всегда.\n\n"
     "Я сделал его, потому что мне самому нужен был простой дневник давления — "
     "записать показание за пару секунд и показать врачу понятную сводку, без лишних экранов.\n\n"
@@ -575,7 +739,9 @@ ABOUT_TEXT = (
 )
 
 SUPPORT_TEXT = (
-    "Поддержка добровольная, функции за оплатой не закрыты.\n"
+    screen_header("support")
+    + "\n\n"
+    + "Поддержка добровольная, функции за оплатой не закрыты.\n"
     "Деньги идут на хостинг, развитие бота и тестирование на реальных тонометрах "
     "с разными протоколами."
 )
@@ -665,16 +831,18 @@ DOCTOR_INVITE_FOR_DOCTOR = (
 DOCTOR_INVITE_INVALID = "Приглашение устарело или уже использовано. Попросите пациента прислать новое."
 DOCTOR_INVITE_ACCEPTED = "Доступ открыт. Пациент появится в «Мои пациенты»."
 DOCTOR_INVITE_DECLINED = "Приглашение отклонено."
-DOCTOR_PANEL = "Меню врача"
+DOCTOR_PANEL = screen_header("doctor_panel")
 BTN_DOCTOR_CABINET = "🩺 Открыть кабинет врача"
 BTN_DOCTOR_PATIENTS = "👥 Мои пациенты"
 BTN_DOCTOR_DIARY = "Вести свой дневник давления"
 #: Кнопка главного меню пациента, который ещё и врач (§21, N5).
 BTN_DOCTOR_PANEL = "🩺 Кабинет врача"
 DOCTOR_SIGNIN_LINK = "Ссылка для входа в кабинет врача (действует 15 минут): {url}"
-DOCTOR_PATIENTS = "Мои пациенты:"
+DOCTOR_PATIENTS = screen_header("doctor_patients")
 DOCTOR_PATIENT_ITEM = "Пациент {telegram_id}"
-DOCTOR_PATIENTS_EMPTY = "Пока нет пациентов с открытым доступом."
+DOCTOR_PATIENTS_EMPTY = (
+    screen_header("doctor_patients") + "\n\n" + "Пока нет пациентов с открытым доступом."
+)
 DOCTOR_REPORT_FOR_DOCTOR = "Пациент {name} отправил вам отчёт."
 BTN_OPEN_IN_CABINET = "Открыть в кабинете"
 DOCTOR_ACCESS_REVOKED_FOR_DOCTOR = "Пациент {name} закрыл вам доступ к своему дневнику."
@@ -705,7 +873,7 @@ BTN_BCAST_CONFIRM = "Подтвердить отправку"
 BTN_SEND_TEST = "Отправить тестовое сообщение"
 
 # Статистика БД (§18.2) — только агрегаты, без личных данных.
-ADMIN_STATS_HEADER = "📊 Статистика БД"
+ADMIN_STATS_HEADER = screen_header("admin_stats")
 ADMIN_STATS_USERS = "Всего пользователей: {count}"
 ADMIN_STATS_DAU = "Активных за 24 часа (DAU): {count}"
 ADMIN_STATS_WAU = "Активных за 7 дней (WAU): {count}"
@@ -717,7 +885,7 @@ ADMIN_STATS_CONSENTED = "Дали согласие: {count}"
 ADMIN_STATS_CACHE_NOTE = "Данные кэшируются на 5 минут."
 
 # Здоровье системы (§18.4).
-ADMIN_HEALTH_HEADER = "🩺 Здоровье системы"
+ADMIN_HEALTH_HEADER = screen_header("admin_health")
 ADMIN_HEALTH_UPTIME = "Аптайм: {uptime}"
 ADMIN_HEALTH_VERSION = "Версия: {version} (Python {python})"
 ADMIN_HEALTH_SCHEDULER_RUNNING = "Running"
@@ -730,7 +898,9 @@ ADMIN_BCAST_PROMPT = "Введите текст рассылки (с подде�
 ADMIN_BCAST_EMPTY = "Пустой текст — отправлять нечего."
 ADMIN_BCAST_NO_USERS = "Пользователей пока нет."
 ADMIN_BCAST_PREVIEW = "Превью сообщения:\n\n{text}"
-ADMIN_BCAST_PROGRESS = "Отправлено {done} из {total}..."
+#: Прогресс рассылки (§18.5, UI17, дословно): «📢 Рассылка\nОтправлено {N}
+#: из {M} ▰▰▰▱▱ {P}%» — полоса {bar} из 10 символов подставляется хендлером.
+ADMIN_BCAST_PROGRESS = "📢 Рассылка\nОтправлено {done} из {total} {bar} {percent}%"
 ADMIN_BCAST_REPORT = "Рассылка завершена.\nДоставлено: {delivered}, Заблокировали: {blocked}"
 ADMIN_BCAST_CANCELLED = "Рассылка отменена."
 
@@ -761,7 +931,7 @@ ADMIN_SEARCH_TEST_FAILED = "Не удалось отправить сообще�
 ADMIN_SEARCH_TEST_MESSAGE = "Тестовое сообщение: проверка доставки уведомлений."
 
 # Бэкапы (§18.3).
-ADMIN_BACKUP_HEADER = "💾 Бэкапы"
+ADMIN_BACKUP_HEADER = screen_header("admin_backups")
 ADMIN_BACKUP_NONE = "Резервных копий ещё нет."
 ADMIN_BACKUP_INTEGRITY_OK = "integrity_check: OK"
 ADMIN_BACKUP_INTEGRITY_FAIL = "integrity_check: FAIL"
@@ -928,14 +1098,21 @@ def consent_paragraphs() -> list[list[str]]:
 # ─────────────── Данные пациента для врача (SPEC.md, §6.12, П1–П7) ───────────────
 
 BTN_PROFILE = "👤 Мои данные"
-PROFILE_EMPTY = (
-    "Мои данные не заполнены.\n\n"
+#: Пояснение приватности (тело экрана и hint веб-кабинета, §6.12).
+PROFILE_HINT = (
     "ФИО, дату рождения и пол увидит только врач, которого вы пригласите, — так он "
     "узнает вас и правильно поймёт показатели."
 )
+PROFILE_EMPTY = (
+    screen_header("profile")
+    + "\n\n"
+    + "Мои данные не заполнены.\n\n"
+    + PROFILE_HINT
+)
 PROFILE_FILLED = (
-    "Мои данные\n\n"
-    "ФИО: {name}\n"
+    screen_header("profile")
+    + "\n\n"
+    + "ФИО: {name}\n"
     "Дата рождения: {birth} ({age})\n"
     "Пол: {sex}\n\n"
     "Эти данные видит только врач, которого вы пригласили."
@@ -988,7 +1165,7 @@ AP_SUGGESTIONS = {
 AP_WEEKDAYS = ("пн", "вт", "ср", "чт", "пт", "сб", "вс")
 AP_NO_TIME = "без времени"
 
-AP_HEADER = "📅 Визиты и анализы"
+AP_HEADER = screen_header("appointments")
 AP_SOON = "Скоро:"
 AP_EMPTY = (
     "Пока ничего не запланировано.\n"

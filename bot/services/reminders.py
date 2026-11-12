@@ -102,7 +102,8 @@ TICK_GRACE = timedelta(minutes=2)
 #: Допуск сравнения времени job'а и строки (job store хранит время float'ом).
 TICK_TOLERANCE = timedelta(seconds=1)
 
-#: Отправка готового сообщения: (telegram_id, текст, клавиатура[, silent=…]) → message_id или None.
+#: Отправка готового сообщения: (telegram_id, текст, клавиатура[, silent=…][, html=…])
+#: → message_id или None. `html=True` — parse_mode="HTML" (тексты с `esc`/`<b>`, §11).
 Sender = Callable[..., Awaitable[Optional[int]]]
 
 #: Снять кнопки у отправленного сообщения: (telegram_id, message_id).
@@ -640,7 +641,10 @@ class RemindersService:
         text, markup = await self._compose(
             reminder_id, reminder_type, user_id, local_today, resumed=resumed
         )
-        message_id = await self._sender(telegram_id, text, markup)
+        # Слот-сообщение экранирует названия (HTML); повтор замера — plain (§6.7).
+        message_id = await self._sender(
+            telegram_id, text, markup, html=reminder_type != TYPE_REMEASURE
+        )
 
         if reminder_type != TYPE_REMEASURE:
             self._add_job(reminder.id, next_time, MODE_SLOT)
@@ -744,11 +748,14 @@ class RemindersService:
             day = sent_at.astimezone(tz).date()
             lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
 
-        text = texts.fmt_slot_message(reminder_type, lines, mode=slot_mode, followup=True)
-        markup = keyboards.slot_message_kb(
-            reminder_type, day, has_medications=bool(lines), mode=slot_mode
+        text = texts.fmt_slot_message(
+            reminder_type, lines, mode=slot_mode, followup=True, large=user.ui_large
         )
-        message_id = await self._sender(telegram_id, text, markup, silent=True)
+        markup = keyboards.slot_message_kb(
+            reminder_type, day, has_medications=bool(lines), mode=slot_mode,
+            large=user.ui_large,
+        )
+        message_id = await self._sender(telegram_id, text, markup, silent=True, html=True)
         await self._remember_message(reminder_id, telegram_id, message_id, previous_message_id)
         return True
 
@@ -865,11 +872,13 @@ class RemindersService:
         слот — слот и дату напоминания `day` (локальную, §6.7, 0.5.4).
         """
         async with self._session_factory() as session:
-            if reminder_type == TYPE_REMEASURE:
-                return texts.REMEASURE_MESSAGE, keyboards.remeasure_kb(reminder_id)
             user = (
                 await session.execute(select(User).where(User.id == user_id))
             ).scalar_one()
+            if reminder_type == TYPE_REMEASURE:
+                return texts.REMEASURE_MESSAGE, keyboards.remeasure_kb(
+                    reminder_id, large=user.ui_large
+                )
             mode = (
                 await session.execute(select(Reminder.mode).where(Reminder.id == reminder_id))
             ).scalar_one()
@@ -877,9 +886,12 @@ class RemindersService:
             lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
             mode = effective_mode(mode, bool(meds))
             return (
-                texts.fmt_slot_message(reminder_type, lines, mode=mode, resumed=resumed),
+                texts.fmt_slot_message(
+                    reminder_type, lines, mode=mode, resumed=resumed, large=user.ui_large
+                ),
                 keyboards.slot_message_kb(
-                    reminder_type, day, has_medications=bool(meds), mode=mode
+                    reminder_type, day, has_medications=bool(meds), mode=mode,
+                    large=user.ui_large,
                 ),
             )
 
@@ -1056,9 +1068,9 @@ def bind_service(service: Optional[RemindersService]) -> None:
     _service = service
 
 
-def _appointment_markup(appt, notice: str, with_doctor: bool):
+def _appointment_markup(appt, notice: str, with_doctor: bool, large: bool = False):
     """Клавиатура уведомления о визите (контракт `appointments.NoticeMarkup`)."""
-    return keyboards.ap_notice_kb(appt.id, appt.kind, notice, with_doctor)
+    return keyboards.ap_notice_kb(appt.id, appt.kind, notice, with_doctor, large=large)
 
 
 async def fire_tick() -> None:

@@ -1,17 +1,21 @@
 """Хендлеры /start: онбординг и главное меню (SPEC.md, §6.1–6.2).
 
-Онбординг — цепочка экранов с кнопками (приветствие → часовой пояс → цели →
-мультивыбор слотов → время слотов → «Готово»). «Другое» — свободный ввод (FSM);
-прерванный онбординг при следующем /start начинается заново (state.clear()).
-«Пропустить» принимает значения по умолчанию (DEFAULT_TIMEZONE, 130/80, время
-слота по умолчанию). Финал включает напоминания выбранных слотов
-(`RemindersService.ensure_slot`), ставит `users.onboarded = 1` и показывает
-главное меню. Тексты экранов редактируются (`edit_message_text`), ответы на
-свободный ввод — новыми сообщениями.
+Онбординг — цепочка экранов с кнопками (приветствие → режим отображения →
+часовой пояс → цели → мультивыбор слотов → время слотов → «Готово»). Шаг 2
+«Как вам удобнее смотреть?» (UI7): `onb:ui:0|1|skip`; «Крупный» перерисовывает
+экран с «✓» (демонстрация режима), повторное нажатие — дальше; `skip` — обычный.
+Шаги 3–4 отрисовываются в выбранном режиме (`users.ui_large`). «Другое» —
+свободный ввод (FSM); прерванный онбординг при следующем /start начинается
+заново (state.clear()). «Пропустить» принимает значения по умолчанию
+(DEFAULT_TIMEZONE, 130/80, время слота по умолчанию). Финал включает напоминания
+выбранных слотов (`RemindersService.ensure_slot`), ставит `users.onboarded = 1`
+и показывает главное меню. Тексты экранов редактируются (`edit_message_text`),
+ответы на свободный ввод — новыми сообщениями.
 """
 from __future__ import annotations
 
 from datetime import datetime, timedelta
+from typing import Optional
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
@@ -58,19 +62,24 @@ def _welcome_screen() -> tuple[str, InlineKeyboardMarkup]:
     return texts.WELCOME, keyboards.onboarding_start_kb()
 
 
+def _ui_screen(selected: Optional[str] = None) -> tuple[str, InlineKeyboardMarkup]:
+    """Шаг 2 (UI7): «Как вам удобнее смотреть?»; `selected` — «✓ » у варианта."""
+    return texts.ONB_UI_ASK, keyboards.onboarding_ui_kb(selected)
+
+
 def _tz_screen() -> tuple[str, InlineKeyboardMarkup]:
     return texts.ONB_TZ_ASK, keyboards.onboarding_timezone_kb()
 
 
-def _targets_screen(tz_name: str) -> tuple[str, InlineKeyboardMarkup]:
-    confirm = texts.ONB_TZ_CONFIRM.format(tz=tz_name, offset=_tz_offset(tz_name))
+def _targets_screen(tz_name: str, *, large: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    confirm = texts.fmt_onb_tz_confirm(tz_name, _tz_offset(tz_name), large=large)
     return f"{confirm}\n\n{texts.ONB_TARGETS_ASK}", keyboards.onboarding_targets_kb()
 
 
 def _slots_screen(
-    target: tuple[int, int], selected: list[str]
+    target: tuple[int, int], selected: list[str], *, large: bool = False
 ) -> tuple[str, InlineKeyboardMarkup]:
-    confirm = texts.ONB_TARGETS_CONFIRM.format(target=f"{target[0]}/{target[1]}")
+    confirm = texts.fmt_onb_target_confirm(f"{target[0]}/{target[1]}", large=large)
     body = f"{confirm}\n\n{texts.ONB_SLOTS_ASK}\n\n{texts.ONB_REMEASURE_NOTE}"
     return body, keyboards.onboarding_slots_kb(selected)
 
@@ -156,7 +165,7 @@ async def cb_menu_back(
 async def cb_onb_start(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    """«Начать»: часовой пояс; без согласия — снова экран согласия (§6.11)."""
+    """«Начать»: выбор режима, дальше часовой пояс; без согласия — снова экран согласия (§6.11)."""
     await state.clear()
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     if not await consent_service.has_processing(session, user.id):
@@ -168,6 +177,38 @@ async def cb_onb_start(
         )
         await callback.answer(texts.CONSENT_REQUIRED)
         return
+    text, markup = _ui_screen()
+    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+# ─────────────────── Шаг 2: режим отображения (UI7, 0.5.10) ───────────────────
+
+
+@router.callback_query(F.data.in_({"onb:ui:0", "onb:ui:1", "onb:ui:skip"}))
+async def cb_onb_ui(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Выбор режима отображения (§6.1 шаг 2, UI7).
+
+    `onb:ui:skip` — обычный режим; `onb:ui:0` — обычный и сразу шаг 3; `onb:ui:1`
+    при первом нажатии перерисовывает этот же экран крупным с «✓» (демонстрация),
+    повторное нажатие — шаг 3. `users.ui_large` переключается сразу (§8).
+    """
+    value = (callback.data or "").split(":")[2]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if value == "1" and (await state.get_data()).get("onb_ui") != "1":
+        await state.update_data(onb_ui="1")
+        user.ui_large = True
+        await session.commit()
+        text, markup = _ui_screen("1")
+        await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+        await callback.answer()
+        return
+    large = value == "1"
+    await state.update_data(onb_ui="1" if large else "0")
+    user.ui_large = large
+    await session.commit()
     text, markup = _tz_screen()
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
@@ -177,20 +218,25 @@ async def cb_onb_start(
 
 
 @router.callback_query(F.data.startswith("onb:tz:"))
-async def cb_onb_tz(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_onb_tz(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     if value == "other":
         await state.set_state(Onboarding.tz_input)
         text, markup = texts.ONB_TZ_OTHER_PROMPT, keyboards.onboarding_skip_kb("tz")
     else:
         await state.update_data(onb_tz=value)
-        text, markup = _targets_screen(value)
+        user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+        text, markup = _targets_screen(value, large=user.ui_large)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
 
 @router.message(Onboarding.tz_input)
-async def msg_onb_tz(message: Message, state: FSMContext) -> None:
+async def msg_onb_tz(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
     try:
         tz_name = schemas.validate_timezone(message.text or "")
     except ValueError as exc:
@@ -198,7 +244,9 @@ async def msg_onb_tz(message: Message, state: FSMContext) -> None:
         return
     await state.update_data(onb_tz=tz_name)
     await state.set_state(None)
-    text, markup = _targets_screen(tz_name)
+    tg_user: User = message.from_user  # type: ignore[assignment]
+    user = await measurements_service.get_or_create_user(session, tg_user.id)
+    text, markup = _targets_screen(tz_name, large=user.ui_large)
     await message.answer(text, reply_markup=markup)
 
 
@@ -206,7 +254,9 @@ async def msg_onb_tz(message: Message, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data.startswith("onb:target:"))
-async def cb_onb_target(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_onb_target(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     value = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     if value == "other":
         await state.set_state(Onboarding.target_sys)
@@ -215,7 +265,8 @@ async def cb_onb_target(callback: CallbackQuery, state: FSMContext) -> None:
     else:
         target = keyboards.TARGET_PRESETS[value]
         await state.update_data(onb_target=target)
-        text, markup = _slots_screen(target, [])
+        user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+        text, markup = _slots_screen(target, [], large=user.ui_large)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
@@ -236,7 +287,9 @@ async def msg_onb_target_sys(message: Message, state: FSMContext) -> None:
 
 
 @router.message(Onboarding.target_dia)
-async def msg_onb_target_dia(message: Message, state: FSMContext) -> None:
+async def msg_onb_target_dia(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
     try:
         dia_v = schemas.validate_int(message.text or "", 40, 160, "диастолическое")
     except ValueError as exc:
@@ -246,12 +299,16 @@ async def msg_onb_target_dia(message: Message, state: FSMContext) -> None:
     target = (data.get("onb_target_sys", DEFAULT_TARGET[0]), dia_v)
     await state.update_data(onb_target=target)
     await state.set_state(None)
-    text, markup = _slots_screen(target, [])
+    tg_user: User = message.from_user  # type: ignore[assignment]
+    user = await measurements_service.get_or_create_user(session, tg_user.id)
+    text, markup = _slots_screen(target, [], large=user.ui_large)
     await message.answer(text, reply_markup=markup)
 
 
 @router.callback_query(F.data.startswith("onb:slot:"))
-async def cb_onb_slot(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_onb_slot(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     """Мультивыбор слотов: повторное нажатие снимает отметку."""
     slot = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
     data = await state.get_data()
@@ -262,7 +319,8 @@ async def cb_onb_slot(callback: CallbackQuery, state: FSMContext) -> None:
         selected.append(slot)
     await state.update_data(onb_slots=selected)
     target = data.get("onb_target", DEFAULT_TARGET)
-    text, markup = _slots_screen(tuple(target), selected)
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    text, markup = _slots_screen(tuple(target), selected, large=user.ui_large)
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
 
@@ -368,13 +426,18 @@ async def cb_onb_skip(
 ) -> None:
     """«Пропустить» — принимаются значения по умолчанию (§6.1)."""
     target = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     if target == "tz":
         await state.update_data(onb_tz=DEFAULT_TIMEZONE)
-        text, markup = _targets_screen(DEFAULT_TIMEZONE)
+        text, markup = _targets_screen(DEFAULT_TIMEZONE, large=user.ui_large)
         await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     elif target == "targets":
         await state.update_data(onb_target=DEFAULT_TARGET)
-        text, markup = _slots_screen(DEFAULT_TARGET, list((await state.get_data()).get("onb_slots", [])))
+        text, markup = _slots_screen(
+            DEFAULT_TARGET,
+            list((await state.get_data()).get("onb_slots", [])),
+            large=user.ui_large,
+        )
         await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     elif target.startswith("time:"):
         slot = target.partition(":")[2]

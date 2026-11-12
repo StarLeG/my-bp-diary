@@ -198,10 +198,12 @@ class TestAccess:
 
 class TestStatsAndHealth:
     async def test_stats_uses_cache(
-        self, admin, edit, cb_answer, as_admin
+        self, admin, session, edit, cb_answer, as_admin
     ) -> None:
         callback = make_callback("adm:stats", make_message())
-        await call(admin_handlers.cb_admin_stats, callback=callback, admin=admin)
+        await call(
+            admin_handlers.cb_admin_stats, callback=callback, admin=admin, session=session
+        )
         admin.get_stats.assert_awaited_once_with(force=False)
         text = edit.call_args.args[0]
         assert text.startswith(texts.ADMIN_STATS_HEADER)
@@ -212,10 +214,12 @@ class TestStatsAndHealth:
         assert edit.call_args.kwargs["reply_markup"] == keyboards.admin_stats_kb()
 
     async def test_refresh_forces_recount(
-        self, admin, edit, cb_answer, as_admin
+        self, admin, session, edit, cb_answer, as_admin
     ) -> None:
         callback = make_callback("adm:refresh", make_message())
-        await call(admin_handlers.cb_admin_stats, callback=callback, admin=admin)
+        await call(
+            admin_handlers.cb_admin_stats, callback=callback, admin=admin, session=session
+        )
         admin.get_stats.assert_awaited_once_with(force=True)
 
     async def test_health_screen(
@@ -378,7 +382,9 @@ class TestBroadcast:
         callback = make_callback("adm:bcast", make_message())
         await call(admin_handlers.cb_admin_bcast, callback=callback, state=state)
         assert await state.get_state() == AdminStates.broadcast.state
-        assert edit.call_args.args[0] == texts.ADMIN_BCAST_PROMPT
+        assert edit.call_args.args[0] == (
+            f"{texts.screen_header('admin_broadcast')}\n\n{texts.ADMIN_BCAST_PROMPT}"
+        )
         assert (
             edit.call_args.kwargs["reply_markup"]
             == keyboards.input_cancel_kb("adm:bcast:cancel")
@@ -405,8 +411,9 @@ class TestBroadcast:
         )
         data = await state.get_data()
         assert data[admin_handlers.B_TEXT] == "Плановые работы"
-        assert answer.call_args.args[0] == texts.ADMIN_BCAST_PREVIEW.format(
-            text="Плановые работы"
+        assert answer.call_args.args[0] == (
+            f"{texts.screen_header('admin_broadcast')}\n\n"
+            + texts.ADMIN_BCAST_PREVIEW.format(text="Плановые работы")
         )
         assert (
             answer.call_args.kwargs["reply_markup"]
@@ -474,10 +481,10 @@ class TestBroadcast:
         assert args[0] is bot
         assert args[1] == [1, 2, 3]
         assert args[2] == "Текст рассылки"
-        # Первый edit — прогресс «Отправлено 0 из 3...», последний — отчёт.
-        assert (
-            edit.call_args_list[0].args[0]
-            == texts.ADMIN_BCAST_PROGRESS.format(done=0, total=3)
+        # Первый edit — прогресс «📢 Рассылка / Отправлено 0 из 3 ▱… 0%» (UI17).
+        assert edit.call_args_list[0].args[0] == (
+            "📢 Рассылка\n"
+            "Отправлено 0 из 3 ▱▱▱▱▱▱▱▱▱▱ 0%"
         )
         assert (
             edit.call_args_list[-1].args[0]
@@ -497,7 +504,9 @@ class TestSearch:
         callback = make_callback("adm:search", make_message())
         await call(admin_handlers.cb_admin_search, callback=callback, state=state)
         assert await state.get_state() == AdminStates.search.state
-        assert edit.call_args.args[0] == texts.ADMIN_SEARCH_PROMPT
+        assert edit.call_args.args[0] == (
+            f"{texts.screen_header('admin_search')}\n\n{texts.ADMIN_SEARCH_PROMPT}"
+        )
         # «Отмена» ведёт в меню админки: старый вариант («adm:search») переоткрывал
         # тот же экран и получал от Telegram «message is not modified».
         assert edit.call_args.kwargs["reply_markup"] == keyboards.input_cancel_kb("adm:back")
@@ -623,8 +632,10 @@ class TestConsentLines:
         stats = make_stats()
         stats.consented = 7
         stats.profiles = 3
-        assert "Дали согласие: 7" in _fmt_stats(stats)
-        assert "Заполнили данные: 3" in _fmt_stats(stats)
+        updated = datetime(2026, 11, 12, 9, 30, tzinfo=timezone.utc)
+        text = _fmt_stats(stats, updated)
+        assert "Дали согласие: 7" in text
+        assert "Заполнили данные: 3" in text
 
     def test_card_consent(self) -> None:
         from dataclasses import replace
@@ -634,3 +645,131 @@ class TestConsentLines:
         given = replace(make_card(), consent_at=datetime(2026, 11, 10, tzinfo=timezone.utc))
         assert "Согласие: дано 10.11.2026" in _fmt_card(given)
         assert "Согласие: согласия нет" in _fmt_card(make_card())
+
+
+# ─────────────────── UI14–17: канон экранов админки (SPEC:1166) ───────────────────
+
+
+class TestStatsSections:
+    """Секции «Статистики БД» (UI15): «Показатель: значение», «Обновлено: ДД.ММ ЧЧ:ММ»."""
+
+    @staticmethod
+    def _text(stats: DbStats | None = None, updated: datetime | None = None) -> str:
+        from bot.handlers.admin import _fmt_stats
+
+        return _fmt_stats(
+            stats or make_stats(),
+            updated or datetime(2026, 11, 12, 9, 30, tzinfo=timezone.utc),
+        )
+
+    def test_sections_are_canonical(self) -> None:
+        """Шесть секций дословно (UI14)."""
+        assert admin_handlers.SEC_USERS == "👥 Пользователи"
+        assert admin_handlers.SEC_RECORDS == "📈 Записи"
+        assert admin_handlers.SEC_DB == "💾 База данных"
+        assert admin_handlers.SEC_REMINDERS == "⏰ Напоминания"
+        assert admin_handlers.SEC_CONSENTS == "🩺 Согласия"
+        assert admin_handlers.SEC_APPOINTMENTS == "📅 Визиты"
+
+    def test_sections_in_canonical_order(self) -> None:
+        text = self._text()
+        sections = [
+            admin_handlers.SEC_USERS,
+            admin_handlers.SEC_RECORDS,
+            admin_handlers.SEC_DB,
+            admin_handlers.SEC_REMINDERS,
+            admin_handlers.SEC_CONSENTS,
+            admin_handlers.SEC_APPOINTMENTS,
+        ]
+        positions = [text.index(section) for section in sections]
+        assert positions == sorted(positions)
+
+    def test_values_with_thousands_separator(self) -> None:
+        """«Показатель: значение», разделитель разрядов «1 240» (UI15)."""
+        stats = make_stats()
+        stats.users = 1240
+        assert "Всего пользователей: 1 240" in self._text(stats)
+
+    def test_updated_line_is_dd_mm_hh_mm(self) -> None:
+        """«Обновлено: ДД.ММ ЧЧ:ММ» (UI15)."""
+        text = self._text(updated=datetime(2026, 11, 12, 9, 30, tzinfo=timezone.utc))
+        assert "Обновлено: 12.11 09:30" in text
+
+    def test_now_in_tz_fallback_utc(self) -> None:
+        """Без пояса или с неизвестным — UTC (UI15)."""
+        from zoneinfo import ZoneInfo
+
+        assert admin_handlers._now_in_tz(None).tzinfo == ZoneInfo("UTC")
+        assert admin_handlers._now_in_tz("Mars/Olympus").tzinfo == ZoneInfo("UTC")
+        assert admin_handlers._now_in_tz("Europe/Minsk").tzinfo == ZoneInfo("Europe/Minsk")
+
+
+class TestBroadcastProgress:
+    """Прогресс рассылки (UI17): полоса 10 символов, throttle 1 с, ≤ 20 — без перерисовок."""
+
+    @staticmethod
+    def _expected(done: int, total: int) -> str:
+        filled = round(done / total * admin_handlers.BCAST_BAR_LEN)
+        bar = "▰" * filled + "▱" * (admin_handlers.BCAST_BAR_LEN - filled)
+        return (
+            "📢 Рассылка\n"
+            f"Отправлено {done} из {total} {bar} {round(done / total * 100)}%"
+        )
+
+    @pytest.mark.parametrize(
+        ("done", "total", "bar"),
+        [
+            (0, 3, "▱▱▱▱▱▱▱▱▱▱"),
+            (3, 10, "▰▰▰▱▱▱▱▱▱▱"),
+            (1, 3, "▰▰▰▱▱▱▱▱▱▱"),
+            (29, 30, "▰▰▰▰▰▰▰▰▰▰"),
+        ],
+    )
+    def test_bar_is_ten_chars(self, done: int, total: int, bar: str) -> None:
+        """Полоса ровно 10 символов ▰/▱ + процент (UI17, дословно)."""
+        text = admin_handlers._progress_text(done, total)
+        assert text == self._expected(done, total)
+        assert len(bar) == admin_handlers.BCAST_BAR_LEN == 10
+
+    async def _start_broadcast(self, state, edit, admin, mocker, total: int):
+        """Запустить рассылку на `total` получателей; вернуть on_progress."""
+        admin.all_user_ids.return_value = list(range(1, total + 1))
+        broadcast = mocker.patch(
+            "bot.handlers.admin.broadcast_message",
+            new_callable=mocker.AsyncMock,
+            return_value=BroadcastResult(delivered=total, blocked=0, failed=0),
+        )
+        await state.update_data(**{admin_handlers.B_TEXT: "Текст"})
+        await call(
+            admin_handlers.cb_admin_bcast_confirm,
+            callback=make_callback("adm:bcast:confirm", make_message()),
+            state=state,
+            bot=mocker.Mock(),
+            admin=admin,
+        )
+        return broadcast.call_args.args[3]
+
+    async def test_no_redraw_for_up_to_20(
+        self, state, edit, cb_answer, admin, mocker, as_admin
+    ) -> None:
+        """≤ 20 получателей — промежуточных перерисовок нет (UI17)."""
+        on_progress = await self._start_broadcast(state, edit, admin, mocker, 20)
+        edits_after_start = edit.call_count  # прогресс 0 из 20 + отчёт
+        for done in (5, 10, 20):
+            await on_progress(done, 20)
+        assert edit.call_count == edits_after_start
+
+    async def test_throttle_one_second(
+        self, state, edit, cb_answer, admin, mocker, as_admin
+    ) -> None:
+        """Перерисовка не чаще 1 с; через паузу — прогресс обновляется (UI17)."""
+        time_mock = mocker.MagicMock()
+        time_mock.monotonic = mocker.Mock(side_effect=[100.0, 100.5, 101.5])
+        mocker.patch("bot.handlers.admin.time", time_mock)
+        on_progress = await self._start_broadcast(state, edit, admin, mocker, 30)
+        edits_after_start = edit.call_count
+        await on_progress(5, 30)  # 100.5 − 100.0 = 0.5 с < 1 с — без перерисовки
+        assert edit.call_count == edits_after_start
+        await on_progress(10, 30)  # 101.5 − 100.0 = 1.5 с ≥ 1 с — перерисовка
+        assert edit.call_count == edits_after_start + 1
+        assert edit.call_args.args[0] == self._expected(10, 30)

@@ -103,6 +103,10 @@ class User(Base):
         Boolean, nullable=False, default=True, server_default=text("1")
     )
     """«Повторять, если не ответил» — общий для всех слотов (§6.7, 0.5.6)."""
+    ui_large: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=text("0")
+    )
+    """«Крупный режим» бота (§6.6, §11, 0.5.10): только рендер, не влияет на данные."""
     reminders_paused_until: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     """Пауза напоминаний: последний день паузы включительно, локальная дата (§6.7, 0.5.6)."""
 

@@ -38,12 +38,12 @@ class PatientProfile(StatesGroup):
 
 
 def profile_screen(user: User) -> tuple[str, InlineKeyboardMarkup]:
-    """П1 / П2 — экран «Мои данные»."""
+    """П1 / П2 — экран «Мои данные» (шапка `<b>`, показ — с parse_mode="HTML")."""
     if not profile_service.has_profile(user):
         return texts.PROFILE_EMPTY, keyboards.profile_kb(filled=False)
     return (
         texts.PROFILE_FILLED.format(
-            name=profile_service.full_name(user),
+            name=texts.esc(profile_service.full_name(user)),
             birth=f"{user.birth_date:%d.%m.%Y}",
             age=profile_service.age_text(user),
             sex=profile_service.SEX_LABELS[user.sex][0],  # type: ignore[index]
@@ -84,7 +84,9 @@ async def cb_profile(callback: CallbackQuery, state: FSMContext, session: AsyncS
     await state.clear()
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     text, markup = profile_screen(user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -235,10 +237,13 @@ async def cb_sex(callback: CallbackQuery, state: FSMContext, session: AsyncSessi
         from bot.handlers.doctor import _doctor_entry
 
         text, markup = await _doctor_entry(session, state, callback.from_user.id)
+        html = False  # «Мой врач» — без канонической шапки
     else:
         text, markup = profile_screen(user)
+        html = True  # шапка <b> (§11)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        f"{texts.PROFILE_SAVED}\n\n{text}", reply_markup=markup
+        f"{texts.PROFILE_SAVED}\n\n{text}", reply_markup=markup,
+        parse_mode="HTML" if html else None,
     )
     await callback.answer()
 
@@ -261,6 +266,6 @@ async def cb_delete_ok(callback: CallbackQuery, session: AsyncSession) -> None:
     await profile_service.clear(session, user)
     text, markup = profile_screen(user)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        f"{texts.PROFILE_DELETED}\n\n{text}", reply_markup=markup
+        f"{texts.PROFILE_DELETED}\n\n{text}", reply_markup=markup, parse_mode="HTML"
     )
     await callback.answer()

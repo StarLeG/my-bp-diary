@@ -227,7 +227,20 @@ class TestBuildApp:
         send_message = mocker.patch.object(app.bot, "send_message", new_callable=mocker.AsyncMock)
         await app.reminders._sender(42, "Пора измерить давление", "клавиатура")
         send_message.assert_awaited_once_with(
-            42, "Пора измерить давление", reply_markup="клавиатура", disable_notification=False
+            42,
+            "Пора измерить давление",
+            reply_markup="клавиатура",
+            disable_notification=False,
+            parse_mode=None,
+        )
+
+    async def test_sender_html_sets_parse_mode(self, settings: Settings, mocker) -> None:
+        """`html=True` — parse_mode="HTML" для экранированных текстов (§11)."""
+        app = build_app(settings)
+        send_message = mocker.patch.object(app.bot, "send_message", new_callable=mocker.AsyncMock)
+        await app.reminders._sender(42, "<b>Пора</b>", None, html=True)
+        send_message.assert_awaited_once_with(
+            42, "<b>Пора</b>", reply_markup=None, disable_notification=False, parse_mode="HTML"
         )
 
     async def test_sender_silent_and_clear_markup(self, settings: Settings, mocker) -> None:

@@ -1,7 +1,8 @@
 """Тесты хендлеров статистики и экспорта CSV (bot/handlers/stats.py, SPEC.md, §6.5, §10)."""
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
+import inspect
+from datetime import date, datetime, timedelta, timezone
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -101,12 +102,12 @@ def today_of(user: UserModel):
 
 class TestPeriodsScreen:
     async def test_menu_shows_periods(self, session, edit, cb_answer) -> None:
-        await stats.cb_stats_periods(make_callback("menu:stats", make_message()))
+        await stats.cb_stats_periods(make_callback("menu:stats", make_message()), session)
         assert edit.call_args.args[0] == texts.BTN_STATS
         assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
 
     async def test_periods_returns(self, session, edit, cb_answer) -> None:
-        await stats.cb_stats_periods(make_callback("stats:periods", make_message()))
+        await stats.cb_stats_periods(make_callback("stats:periods", make_message()), session)
         assert edit.call_args.args[0] == texts.BTN_STATS
         assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
 
@@ -363,10 +364,11 @@ class TestHistogram:
 
         seen = {}
 
-        def fake_render(days):
+        def fake_render(days, *, large=False):
             seen["thread"] = threading.current_thread() is not threading.main_thread()
             seen["days"] = days
             seen["in_tx"] = session.in_transaction()
+            seen["large"] = large
             return b"PNG"
 
         mocker.patch.object(stats_chart, "render", side_effect=fake_render)
@@ -376,6 +378,7 @@ class TestHistogram:
         assert len(seen["days"]) == 30
         assert all(isinstance(d, stats_chart.DayValues) for d in seen["days"])
         assert seen["days"][-1].systolic == 150
+        assert seen["large"] is False  # обычный режим
 
     async def test_empty_period_stays_text(self, session, user, photo, delete, edit, cb_answer) -> None:
         await stats.cb_stats_show(make_callback("stats:7", make_message()), session)
@@ -400,9 +403,11 @@ class TestHistogram:
             ("cb_pdf_menu", "stats:pdf", texts.CSV_ASK, keyboards.pdf_period_kb()),
         ],
     )
-    async def test_buttons_under_photo(self, delete, answer, edit, cb_answer, handler, data, text, markup) -> None:
+    async def test_buttons_under_photo(self, delete, answer, edit, cb_answer, session, handler, data, text, markup) -> None:
         """«Назад» / «Экспорт CSV» / «Экспорт PDF» под фото: фото удаляется, экран — новым сообщением."""
-        await getattr(stats, handler)(make_callback(data, photo_message()))
+        target = getattr(stats, handler)
+        kwargs = {"session": session} if "session" in inspect.signature(target).parameters else {}
+        await target(make_callback(data, photo_message()), **kwargs)
         delete.assert_awaited_once()
         edit.assert_not_called()
         assert answer.call_args.args[0] == text
@@ -634,12 +639,13 @@ class TestByDays:
         edit.assert_not_called()
         text = answer.call_args.args[0]
         assert text == (
-            f"📅 Средние по дням · {d1:%d.%m}–{today:%d.%m}\n"
+            f"<b>📅 Средние по дням</b> · {d1:%d.%m}–{today:%d.%m}\n"
             f"🟡 {d1:%d.%m} — 134/86, пульс 71\n"
             f"🟢 {d3:%d.%m} — 120/80\n"
             "Среднее за день: 127/83, пульс 71"
         )
         assert answer.call_args.kwargs["reply_markup"] == keyboards.stats_days_kb("7")
+        assert answer.call_args.kwargs["parse_mode"] == "HTML"
 
     async def test_list_30_days(self, session, user, edit, cb_answer) -> None:
         today = today_of(user)
@@ -647,9 +653,10 @@ class TestByDays:
         await add_row(session, user, systolic=150, diastolic=95, pulse=80, timestamp=local_noon(user, first))
         await stats.cb_stats_days(make_callback("stats:days:30", make_message()), session)
         lines = edit.call_args.args[0].splitlines()
-        assert lines[0] == f"📅 Средние по дням · {first:%d.%m}–{today:%d.%m}"
+        assert lines[0] == f"<b>📅 Средние по дням</b> · {first:%d.%m}–{today:%d.%m}"
         assert lines[1].startswith("🔴 ")
         assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_days_kb("30")
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
 
     async def test_list_custom(self, session, user, edit, cb_answer) -> None:
         today = today_of(user)
@@ -657,7 +664,7 @@ class TestByDays:
         await add_row(session, user, timestamp=local_noon(user, start))
         key = f"{ymd(start)}:{ymd(end)}"
         await stats.cb_stats_days(make_callback(f"stats:days:{key}", make_message()), session)
-        assert edit.call_args.args[0].startswith(f"📅 Средние по дням · {start:%d.%m}–{end:%d.%m}")
+        assert edit.call_args.args[0].startswith(f"<b>📅 Средние по дням</b> · {start:%d.%m}–{end:%d.%m}")
         assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_days_kb(key)
 
     async def test_no_records(self, session, user, edit, cb_answer) -> None:
@@ -665,7 +672,7 @@ class TestByDays:
         assert edit.call_args.args[0] == texts.STATS_EMPTY
         assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
 
-    @pytest.mark.parametrize("key", ["14", "x", "20261101", "20261101:20990101"])
+    @pytest.mark.parametrize("key", ["14", "x", "20261101", "20261101:20990101", "7:abc", "30:abc"])
     async def test_broken(self, session, user, edit, cb_answer, key) -> None:
         await stats.cb_stats_days(make_callback(f"stats:days:{key}", make_message()), session)
         assert edit.call_args.args[0] == texts.BTN_STATS
@@ -677,3 +684,228 @@ class TestByDays:
         delete.assert_awaited_once()
         assert photo.call_args.kwargs["caption"].startswith("📊 За 30 дней")
         assert photo.call_args.kwargs["reply_markup"] == keyboards.stats_result_kb("30")
+
+
+# ─────────── Календарь stats:cal:m:/w: и пагинация «По дням» (0.5.10) ───────────
+
+
+async def make_large(session, user) -> None:
+    """Крупный режим пользователя (§11)."""
+    user.ui_large = True
+    await session.commit()
+
+
+async def add_recent_rows(session, user, count: int) -> None:
+    """По одному измерению в каждый из последних `count` дней (сегодня — последним)."""
+    today = today_of(user)
+    for offset in range(count):
+        await add_row(session, user, timestamp=local_noon(user, today - timedelta(days=offset)))
+
+
+class TestCalendarFormats:
+    """Протокол `stats:cal:m:/w:` и совместимость прежних `stats:cal:{…}` (UI12, UI19)."""
+
+    async def test_m_grid_like_legacy(self, session, user, edit, cb_answer) -> None:
+        """`stats:cal:m:{ГГГГММ}` — сетка месяца (обычный режим)."""
+        today = today_of(user)
+        await stats.cb_stats_calendar(make_callback("stats:cal:m:202501", make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_CAL_FIRST
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_calendar_kb(2025, 1, today)
+
+    @pytest.mark.parametrize(
+        ("legacy", "modern"),
+        [
+            ("stats:cal:202501", "stats:cal:m:202501"),
+            ("stats:cal:202501:20250115", "stats:cal:m:202501:20250115"),
+        ],
+    )
+    async def test_legacy_same_as_m(self, session, user, edit, cb_answer, legacy, modern) -> None:
+        """Прежние `stats:cal:{ГГГГММ}[:{с}]` = `:m:`-вариант (UI19)."""
+        await stats.cb_stats_calendar(make_callback(legacy, make_message()), session)
+        legacy_markup = edit.call_args.kwargs["reply_markup"]
+        await stats.cb_stats_calendar(make_callback(modern, make_message()), session)
+        assert edit.call_args.kwargs["reply_markup"] == legacy_markup
+
+    async def test_m_arrows_availability(self, session, user, edit, cb_answer) -> None:
+        """«◀»/«▶» по доступности: в текущем месяце «▶» нет, в прошлом — обе стрелки."""
+        today = today_of(user)
+        current = f"{today.year:04d}{today.month:02d}"
+        await stats.cb_stats_calendar(make_callback(f"stats:cal:m:{current}", make_message()), session)
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert texts.BTN_CAL_PREV in labels and texts.BTN_CAL_NEXT not in labels
+        prev = (today.year - 1, 12) if today.month == 1 else (today.year, today.month - 1)
+        assert f"stats:cal:m:{prev[0]:04d}{prev[1]:02d}" in callbacks
+        await stats.cb_stats_calendar(make_callback("stats:cal:m:202501", make_message()), session)
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert texts.BTN_CAL_PREV in labels and texts.BTN_CAL_NEXT in labels
+        assert "stats:cal:m:202412" in callbacks and "stats:cal:m:202502" in callbacks
+
+    async def test_m_minyear_only_next(self, session, user, edit, cb_answer) -> None:
+        """Январь 1 года: «◀» не показывается (MINYEAR), «▶» — в февраль."""
+        await stats.cb_stats_calendar(make_callback("stats:cal:m:000101", make_message()), session)
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert texts.BTN_CAL_PREV not in labels and texts.BTN_CAL_NEXT in labels
+        assert "stats:cal:m:000102" in callbacks
+
+    async def test_w_week_list(self, session, user, edit, cb_answer) -> None:
+        """`stats:cal:w:{пн}` в крупном — список недели вместо сетки (UI12)."""
+        await make_large(session, user)
+        today = today_of(user)
+        monday = today - timedelta(days=today.weekday())
+        week_end = monday + timedelta(days=6)
+        await stats.cb_stats_calendar(make_callback(f"stats:cal:w:{ymd(monday)}", make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_CAL_FIRST
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert texts.CAL_WEEK_LABEL.format(
+            date_from=f"{monday.day}.{monday.month}", date_to=f"{week_end.day}.{week_end.month}"
+        ) in labels
+        for offset in range(7):
+            day = monday + timedelta(days=offset)
+            if day <= today:
+                assert f"{texts.STATS_CAL_WEEKDAYS[offset]} {day.day}.{day.month}" in labels
+                assert f"stats:day:{ymd(day)}" in callbacks
+            else:
+                assert f"stats:day:{ymd(day)}" not in callbacks
+        # «◀» — всегда на будущих неделях; для текущей — «▶» недоступен (UI12)
+        assert texts.BTN_CAL_PREV in labels and texts.BTN_CAL_NEXT not in labels
+        assert callbacks[-1] == "stats:periods"
+
+    async def test_w_week_prev_has_next(self, session, user, edit, cb_answer) -> None:
+        """На неделе позади «▶» возвращает к текущей, «◀» листает ещё назад (UI12)."""
+        await make_large(session, user)
+        today = today_of(user)
+        today_week = today - timedelta(days=today.weekday())
+        prev_week = today_week - timedelta(days=7)
+        await stats.cb_stats_calendar(make_callback(f"stats:cal:w:{ymd(prev_week)}", make_message()), session)
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert texts.BTN_CAL_PREV in labels and texts.BTN_CAL_NEXT in labels
+        assert f"stats:cal:w:{ymd(prev_week - timedelta(days=7))}" in callbacks
+        assert f"stats:cal:w:{ymd(today_week)}" in callbacks
+
+    async def test_m_step2_marks_day(self, session, user, edit, cb_answer) -> None:
+        """Шаг 2 `stats:cal:m:{мм}:{с}`: день отмечен «[N]», клики несут обе даты."""
+        start = date(2025, 1, 15)
+        await stats.cb_stats_calendar(
+            make_callback(f"stats:cal:m:202501:{ymd(start)}", make_message()), session
+        )
+        assert edit.call_args.args[0] == texts.STATS_CAL_LAST.format(date=f"{start:%d.%m}")
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert "[15]" in labels
+        assert f"stats:day:{ymd(start)}:{ymd(start)}" in callbacks
+        assert f"stats:day:{ymd(start)}:{ymd(date(2025, 1, 20))}" in callbacks
+
+    async def test_w_step2_marks_day(self, session, user, edit, cb_answer) -> None:
+        """Шаг 2 `stats:cal:w:{пн}:{с}`: выбранный день — «✓ N.M», клики — `stats:day:{с}:{д}`."""
+        await make_large(session, user)
+        today = today_of(user)
+        monday = today - timedelta(days=today.weekday())
+        await stats.cb_stats_calendar(
+            make_callback(f"stats:cal:w:{ymd(monday)}:{ymd(monday)}", make_message()), session
+        )
+        assert edit.call_args.args[0] == texts.STATS_CAL_LAST.format(date=f"{monday:%d.%m}")
+        rows = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        labels = [b.text for row in rows for b in row]
+        callbacks = [b.callback_data for row in rows for b in row]
+        assert f"✓ {monday.day}.{monday.month}" in labels
+        assert f"stats:day:{ymd(monday)}:{ymd(monday)}" in callbacks
+        assert f"stats:day:{ymd(monday)}:{ymd(today)}" in callbacks
+
+    @pytest.mark.parametrize(
+        "data",
+        [
+            "stats:cal:m:2025",
+            "stats:cal:m:209912",  # будущий месяц
+            "stats:cal:m:202501:20990101",  # будущий первый день
+            "stats:cal:w:2025",
+            "stats:cal:w:20250101:20990101",  # будущий первый день
+            "stats:cal:w:20250101:20250102:x",
+        ],
+    )
+    async def test_broken(self, session, user, edit, cb_answer, data) -> None:
+        """Мусор в любом из форматов — возврат на экран «Статистика»."""
+        await stats.cb_stats_calendar(make_callback(data, make_message()), session)
+        assert edit.call_args.args[0] == texts.BTN_STATS
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb()
+
+
+class TestDaysPagination:
+    """Пагинация «По дням»: `stats:days:{…}[:{limit}]`, по 5 в крупном (UI13, §13)."""
+
+    @pytest.mark.parametrize(
+        ("limit", "rows_shown", "more_count", "more_data"),
+        [
+            (5, 5, 5, "stats:days:30:10"),
+            (10, 10, 2, "stats:days:30:15"),
+            (15, 12, None, None),  # 12 измеренных дней — всё показано
+        ],
+    )
+    async def test_large_pages(
+        self, session, user, edit, cb_answer, limit, rows_shown, more_count, more_data
+    ) -> None:
+        """Крупный: показаны первые `limit` строк, «Показать ещё {min(5, N−limit)}»."""
+        await make_large(session, user)
+        await add_recent_rows(session, user, 12)
+        today = today_of(user)
+        await stats.cb_stats_days(make_callback(f"stats:days:30:{limit}", make_message()), session)
+        lines = edit.call_args.args[0].splitlines()
+        assert lines[0] == f"<b>📅 Средние по дням</b> · {today - timedelta(days=29):%d.%m}–{today:%d.%m}"
+        assert len(lines) == rows_shown + 3  # шапка + пустая строка (крупный) + итог
+        day_lines = lines[2 : 2 + rows_shown]
+        oldest = today - timedelta(days=11)  # 12 измеренных дней — со старшего
+        assert f"{oldest:%d.%m}" in day_lines[0]
+        assert f"{oldest + timedelta(days=rows_shown - 1):%d.%m}" in day_lines[-1]
+        assert f"{oldest + timedelta(days=rows_shown):%d.%m}" not in "\n".join(day_lines)
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert markup == keyboards.stats_days_kb("30", large=True, total=12, limit=limit)
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        if more_data is None:
+            assert not any(d.startswith("stats:days:30:") for d in callbacks)
+        else:
+            labels = [b.text for row in markup.inline_keyboard for b in row]
+            assert texts.BTN_SHOW_MORE.format(count=more_count) in labels
+            assert more_data in callbacks
+
+    async def test_normal_ignores_limit(self, session, user, edit, cb_answer) -> None:
+        """Обычный режим — весь список сразу, `limit` игнорируется (UI13)."""
+        await add_recent_rows(session, user, 12)
+        today = today_of(user)
+        await stats.cb_stats_days(make_callback("stats:days:30:5", make_message()), session)
+        lines = edit.call_args.args[0].splitlines()
+        assert len(lines) == 12 + 2  # шапка + 12 строк + итог (без пустой строки)
+        assert f"{today:%d.%m}" in lines[-2]  # последняя строка дней — сегодня
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert markup == keyboards.stats_days_kb("30", large=False, total=12, limit=12)
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert not any(d.startswith("stats:days:30:") for d in callbacks)
+
+    async def test_custom_period_with_limit(self, session, user, edit, cb_answer) -> None:
+        """Пагинация и своего периода: `stats:days:{с}:{по}:{limit}` (UI13)."""
+        await make_large(session, user)
+        today = today_of(user)
+        start, end = today - timedelta(days=4), today
+        for offset in range(3):
+            await add_row(session, user, timestamp=local_noon(user, start + timedelta(days=offset)))
+        key = f"{ymd(start)}:{ymd(end)}"
+        await stats.cb_stats_days(make_callback(f"stats:days:{key}:2", make_message()), session)
+        lines = edit.call_args.args[0].splitlines()
+        assert lines[0] == f"<b>📅 Средние по дням</b> · {start:%d.%m}–{end:%d.%m}"
+        assert len(lines) == 2 + 3  # шапка + пустая + 2 строки + итог
+        markup = edit.call_args.kwargs["reply_markup"]
+        labels = [b.text for row in markup.inline_keyboard for b in row]
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert texts.BTN_SHOW_MORE.format(count=1) in labels
+        assert f"stats:days:{key}:7" in callbacks
+        assert f"stats:c:{key}" in callbacks  # «Назад» — к сводке своего периода

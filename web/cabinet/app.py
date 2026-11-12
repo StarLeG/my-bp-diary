@@ -1006,7 +1006,7 @@ def create_app(
             "age": profile_service.age_text(user) if filled else "",
             "sex": profile_service.SEX_LABELS[user.sex][0] if filled else "",  # type: ignore[index]
             "not_filled": texts.CABINET_PROFILE_NOT_FILLED,
-            "hint": texts.PROFILE_EMPTY.split("\n\n", 1)[1],
+            "hint": texts.PROFILE_HINT,
             "message": message,
             "ok": ok,
         }

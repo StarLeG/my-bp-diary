@@ -67,14 +67,16 @@ async def cmd_support(message: Message, state: FSMContext) -> None:
         text, markup = texts.SUPPORT_TEXT, keyboards.support_kb(settings.support_url)
     else:
         text, markup = _about_screen(settings)
-    await message.answer(text, reply_markup=markup)
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")  # шапка <b> (§11)
 
 
 @router.callback_query(F.data == "menu:about")
 async def cb_about(callback: CallbackQuery) -> None:
     """«О боте / Поддержать» из главного меню (сообщение редактируется, §6.8)."""
     text, markup = _about_screen(get_settings())
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -86,7 +88,9 @@ async def cb_about_support(callback: CallbackQuery) -> None:
         text, markup = _about_screen(settings)
     else:
         text, markup = texts.SUPPORT_TEXT, keyboards.support_kb(settings.support_url)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -97,11 +101,13 @@ async def cb_about_author(callback: CallbackQuery) -> None:
     if not settings.author_button_visible:
         text, markup = _about_screen(settings)
     else:
-        text, markup = settings.author_contact, keyboards.about_kb(
+        text, markup = texts.esc(settings.author_contact), keyboards.about_kb(
             support_visible=settings.support_button_visible,
             author_visible=settings.author_button_visible,
         )
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 

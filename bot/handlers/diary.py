@@ -32,7 +32,7 @@ from bot.services.reminders import RemindersService
 router = Router(name="diary")
 
 
-def _line(measurement: Measurement, tz_name: str) -> str:
+def _line(measurement: Measurement, tz_name: str, *, large: bool = False) -> str:
     """Строка дневника: локальное время + показатели и флаги (§6.4)."""
     local = measurement.timestamp.astimezone(ZoneInfo(tz_name))
     return texts.fmt_diary_line(
@@ -42,6 +42,7 @@ def _line(measurement: Measurement, tz_name: str) -> str:
         measurement.pulse,
         measurement.medication_taken,
         measurement.feeling,
+        large=large,
     )
 
 
@@ -64,35 +65,52 @@ def _unmarked(statuses: list[tuple[str, str]]) -> list[str]:
 
 
 async def _diary_screen(
-    session: AsyncSession, user: User, header: Optional[str] = None
+    session: AsyncSession,
+    user: User,
+    header: Optional[str] = None,
+    *,
+    large: bool = False,
 ) -> tuple[str, object]:
-    """Экран дневника: записи, строка лекарств, кнопки; `header` — итог отметки."""
+    """Экран дневника: шапка, записи, строка лекарств, кнопки (§6.4, мокап 2.3).
+
+    `header` — итог отметки приёма (HTML-текст, экранированный форматтером).
+    Крупный режим: записи блоками, секции разделяются пустой строкой.
+    """
     today = _today(user)
     rows = await measurements_service.measurements_for_day(session, user, today)
     statuses = await medications_service.day_slot_statuses(session, user, today)
-    lines = [header] if header else []
+    tail: list[str] = []
     if not rows:
-        lines.append(texts.DIARY_EMPTY)
+        tail.append(texts.DIARY_EMPTY)
     else:
-        lines.extend(_line(row, user.timezone) for row in rows)
-        lines.append(texts.DIARY_TOTAL.format(count=len(rows)))
+        tail.append(texts.DIARY_TOTAL.format(count=len(rows)))
     if statuses:
-        lines.append(_meds_line(statuses))
+        tail.append(_meds_line(statuses))
     events_line = appointments_service.diary_line(
         *await appointments_service.day_events(session, user, today)
     )
     if events_line:
-        lines.append(events_line)  # ближайшее событие (§6.4, 0.5.8)
+        tail.append(events_line)  # ближайшее событие (§6.4, 0.5.8)
+    sections = [texts.screen_header("diary")]
+    if header:
+        sections.append(header)
+    if rows:
+        entries = [_line(row, user.timezone, large=large) for row in rows]
+        sections.append("\n\n".join(entries) if large else "\n".join(entries))
+    sections.append("\n".join(tail))
+    text = ("\n\n" if large else "\n").join(sections)
     markup = keyboards.diary_kb(is_empty=not rows, mark_intake=bool(_unmarked(statuses)))
-    return "\n".join(lines), markup
+    return text, markup
 
 
 @router.callback_query(F.data == "menu:diary")
 async def cb_diary(callback: CallbackQuery, session: AsyncSession) -> None:
     """«Дневник за сегодня» — список за локальные сутки (сообщение редактируется)."""
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-    text, markup = await _diary_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    text, markup = await _diary_screen(session, user, large=user.ui_large)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -200,8 +218,10 @@ async def cb_diary_done(
     if user.med_remeasure_delay is not None and result.taken:
         await reminders.ensure_remeasure(user.id, None, user.med_remeasure_delay)
     header = texts.fmt_intake_result(result.taken, result.skipped, result.already)
-    text, markup = await _diary_screen(session, user, header=header)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    text, markup = await _diary_screen(session, user, header=header, large=user.ui_large)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -212,6 +232,8 @@ async def cb_diary_cancel(callback: CallbackQuery, session: AsyncSession) -> Non
     if _list_args(callback, user) is None:
         await _stale(callback)
         return
-    text, markup = await _diary_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    text, markup = await _diary_screen(session, user, large=user.ui_large)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()

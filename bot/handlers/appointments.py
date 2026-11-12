@@ -67,16 +67,23 @@ async def _stale(callback: CallbackQuery) -> None:
     await callback.answer(texts.STALE_MESSAGE)
 
 
-async def _show(target: Target, text: str, markup) -> None:
-    """Callback — правка сообщения; сообщение (свободный ввод) — новый ответ."""
+async def _show(
+    target: Target, text: str, markup, *, parse_mode: Optional[str] = None
+) -> None:
+    """Callback — правка сообщения; сообщение (свободный ввод) — новый ответ.
+
+    `parse_mode` — точечно, только для сообщений с тегами (§11).
+    """
     if isinstance(target, CallbackQuery):
         try:
-            await target.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+            await target.message.edit_text(  # type: ignore[union-attr]
+                text, reply_markup=markup, parse_mode=parse_mode
+            )
         except TelegramBadRequest as error:
             if "message is not modified" not in str(error):
                 raise
     else:
-        await target.answer(text, reply_markup=markup)
+        await target.answer(text, reply_markup=markup, parse_mode=parse_mode)
 
 
 async def _user(session: AsyncSession, target: Target) -> User:
@@ -118,32 +125,57 @@ def _list_label(appt: Appointment) -> str:
     return f"{texts.AP_ICONS[appt.kind]} {appt.title} · {appt.starts_on:%d.%m}"
 
 
-async def _list_screen(session: AsyncSession, user: User) -> tuple[str, object]:
+async def _list_screen(
+    session: AsyncSession, user: User, limit: Optional[int] = None
+) -> tuple[str, object]:
+    """Список «Скоро»: в крупном — первые `limit` событий и «Показать ещё» (UI13).
+
+    Без `limit` в крупном — первый показ 5 (§11); обычный режим — весь список.
+    Строки событий экранируются (`texts.esc`): шапка AP_HEADER — теги HTML,
+    сообщение уходит с `parse_mode="HTML"` (§11).
+    """
     current = ap.today(user)
     upcoming = await ap.list_upcoming(session, user, current)
     _, past_total = await ap.list_past(session, user, current, limit=0)
+    if user.ui_large and limit is None:
+        limit = 5  # первый показ — 5 (§11, UI13)
+    shown = upcoming if limit is None else upcoming[:limit]
     lines = [texts.AP_HEADER, ""]
-    if upcoming:
+    if shown:
         lines.append(texts.AP_SOON)
-        lines.extend(ap.fmt_event_block(appt) for appt in upcoming)
+        lines.extend(texts.esc(ap.fmt_event_block(appt)) for appt in shown)
     else:
         lines.append(texts.AP_EMPTY)
-    markup = keyboards.ap_list_kb([(a.id, _list_label(a)) for a in upcoming], has_past=past_total > 0)
+    markup = keyboards.ap_list_kb(
+        [(a.id, _list_label(a)) for a in upcoming],
+        has_past=past_total > 0,
+        large=user.ui_large,
+        limit=limit,
+    )
     return "\n".join(lines), markup
 
 
-async def _past_screen(session: AsyncSession, user: User) -> tuple[str, object]:
+async def _past_screen(
+    session: AsyncSession, user: User, limit: Optional[int] = None
+) -> tuple[str, object]:
+    """«Прошедшие»: в крупном — первые `limit` строк и «Показать ещё» (UI13).
+
+    Без `limit` в крупном — первый показ 5 (§11); обычный режим — весь список.
+    """
     current = ap.today(user)
     rows, total = await ap.list_past(session, user, current)
+    if user.ui_large and limit is None:
+        limit = 5  # первый показ — 5 (§11, UI13)
+    shown = rows if limit is None else rows[:limit]
     lines = [texts.AP_PAST_HEADER, ""]
     lines.extend(
         f"{texts.AP_ICONS[a.kind]} {a.title} — {a.starts_on:%d.%m.%Y} · {ap.status_label(a, current)}"
-        for a in rows
+        for a in shown
     )
     if total > len(rows):
         lines.append(texts.AP_PAST_MORE)
     items = [(a.id, f"{texts.AP_ICONS[a.kind]} {a.title} · {a.starts_on:%d.%m.%Y}") for a in rows]
-    return "\n".join(lines), keyboards.ap_past_kb(items)
+    return "\n".join(lines), keyboards.ap_past_kb(items, large=user.ui_large, limit=limit)
 
 
 def _card(appt: Appointment, user: User) -> tuple[str, object]:
@@ -154,19 +186,42 @@ def _card(appt: Appointment, user: User) -> tuple[str, object]:
         card_state, back = "waiting", "ap:past"
     else:
         card_state, back = "closed", "ap:past"
-    return ap.fmt_card(appt, user), keyboards.ap_card_kb(appt.id, appt.kind, card_state, back)
+    return ap.fmt_card(appt, user), keyboards.ap_card_kb(
+        appt.id, appt.kind, card_state, back, large=user.ui_large
+    )
 
 
-async def _calendar(target: Target, state: FSMContext, user: User, month: Optional[date] = None) -> None:
-    """Шаг 3: календарь месяца черновика (или текущего); «Назад» — по режиму."""
+async def _calendar(
+    target: Target,
+    state: FSMContext,
+    user: User,
+    month: Optional[date] = None,
+    week_start: Optional[date] = None,
+) -> None:
+    """Шаг 3: календарь месяца черновика (или текущего); «Назад» — по режиму.
+
+    Обычный режим — сетка месяца, крупный — список недели (UI12): `week_start`
+    задаёт показываемую неделю (понедельник), иначе она выводится из `month`.
+    """
     draft = await _draft(state)
     current = ap.today(user)
     shown = month or (date.fromisoformat(draft[K_DAY]) if draft[K_DAY] else current)
+    if user.ui_large and week_start is None:
+        # Крупный режим без явной недели — неделя показываемого дня (UI12).
+        week_start = shown - timedelta(days=shown.weekday())
     await state.update_data({K_STEP: "day"})
     await _show(
         target,
         texts.AP_DAY_ASK,
-        keyboards.ap_calendar_kb(shown.year, shown.month, current, ap.max_day(current), "ap:back"),
+        keyboards.ap_calendar_kb(
+            shown.year,
+            shown.month,
+            current,
+            ap.max_day(current),
+            "ap:back",
+            user.ui_large,
+            week_start,
+        ),
     )
 
 
@@ -204,23 +259,41 @@ async def cmd_visits(message: Message, state: FSMContext, session: AsyncSession)
     await state.clear()
     user = await _user(session, message)
     text, markup = await _list_screen(session, user)
-    await message.answer(text, reply_markup=markup)
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
-@router.callback_query(F.data == "ap:list")
+@router.callback_query((F.data == "ap:list") | F.data.startswith("ap:list:"))
 async def cb_list(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Список «Скоро»; `ap:list:{limit}` — «Показать ещё» крупного режима (UI13)."""
     await _clear_draft(state)
     user = await _user(session, callback)
-    text, markup = await _list_screen(session, user)
-    await _show(callback, text, markup)
+    data = callback.data or ""
+    limit: Optional[int] = None
+    if data.startswith("ap:list:"):
+        value = _int(data.removeprefix("ap:list:"))
+        if value is None or value <= 0:
+            await _stale(callback)  # мусор в callback (§8, аудит U8)
+            return
+        limit = value if user.ui_large else None  # обычный — без пагинации (UI13)
+    text, markup = await _list_screen(session, user, limit)
+    await _show(callback, text, markup, parse_mode="HTML")
     await callback.answer()
 
 
-@router.callback_query(F.data == "ap:past")
+@router.callback_query((F.data == "ap:past") | F.data.startswith("ap:past:"))
 async def cb_past(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """«Прошедшие»; `ap:past:{limit}` — «Показать ещё» крупного режима (UI13)."""
     await _clear_draft(state)
     user = await _user(session, callback)
-    text, markup = await _past_screen(session, user)
+    data = callback.data or ""
+    limit: Optional[int] = None
+    if data.startswith("ap:past:"):
+        value = _int(data.removeprefix("ap:past:"))
+        if value is None or value <= 0:
+            await _stale(callback)  # мусор в callback (§8, аудит U8)
+            return
+        limit = value if user.ui_large else None  # обычный — без пагинации (UI13)
+    text, markup = await _past_screen(session, user, limit)
     await _show(callback, text, markup)
     await callback.answer()
 
@@ -312,18 +385,44 @@ async def msg_title(message: Message, state: FSMContext, session: AsyncSession) 
 
 @router.callback_query(F.data.startswith("ap:cal:"))
 async def cb_calendar_month(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
-    raw = (callback.data or "").split(":")[2]
+    """Листание календаря шага 3: `ap:cal:m:{ГГГГММ}` / `ap:cal:w:{пн}` (UI12, UI19).
+
+    Обычный режим — сетка месяца, крупный — список недели (`пн` — понедельник
+    показываемой недели). Прежние `ap:cal:{ГГГГММ}` принимаются как `:m:`
+    (UI19). Недоступные дни не показываются, «◀»/«▶» — только у недель,
+    пересекающих диапазон «сегодня … сегодня + 2 года» (§6.13).
+    """
+    parts = (callback.data or "").split(":")[2:]
+    kind = parts[0] if parts and parts[0] in ("m", "w") else "m"
+    rest = parts[1:] if parts and parts[0] in ("m", "w") else parts
     draft = await _draft(state)
     user = await _user(session, callback)
     current = ap.today(user)
+    if draft[K_MODE] not in ("add", "when", "moved") or len(rest) != 1:
+        await _stale(callback)
+        return
+    if kind == "w":
+        raw = rest[0]
+        try:
+            week_start = (
+                datetime.strptime(raw, "%Y%m%d").date() if len(raw) == 8 and raw.isdigit() else None
+            )
+        except ValueError:
+            week_start = None
+        if week_start is None:
+            await _stale(callback)
+            return
+        await _calendar(callback, state, user, week_start, week_start)
+        await callback.answer()
+        return
+    raw = rest[0]
     try:
-        month = date(int(raw[:4]), int(raw[4:6]), 1) if len(raw) == 6 else None
+        month = date(int(raw[:4]), int(raw[4:6]), 1) if len(raw) == 6 and raw.isdigit() else None
     except ValueError:
         month = None
     last = ap.max_day(current)
     if (
         month is None
-        or draft[K_MODE] not in ("add", "when", "moved")
         or (month.year, month.month) < (current.year, current.month)
         or (month.year, month.month) > (last.year, last.month)
     ):
@@ -388,7 +487,7 @@ async def _time_chosen(
             return texts.STALE_MESSAGE
     await session.commit()
     await _clear_draft(state)
-    await _show(target, ap.fmt_saved(result, user), keyboards.ap_done_kb())
+    await _show(target, ap.fmt_saved(result, user), keyboards.ap_done_kb(user.ui_large))
     return None
 
 
@@ -454,7 +553,7 @@ async def _note_chosen(target: Target, state: FSMContext, session: AsyncSession,
         await session.rollback()
         return texts.AP_LIMIT
     await session.commit()
-    await _show(target, ap.fmt_saved(appt, user), keyboards.ap_done_kb())
+    await _show(target, ap.fmt_saved(appt, user), keyboards.ap_done_kb(user.ui_large))
     return None
 
 
@@ -588,7 +687,12 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext, session: AsyncSe
         await _show(
             callback,
             texts.AP_DELETE_ASK.format(title=appt.title, day=f"{appt.starts_on:%d.%m}"),
-            keyboards.ap_confirm_kb(texts.BTN_AP_DELETE_YES, f"ap:del:{appt.id}:ok", f"ap:open:{appt.id}"),
+            keyboards.ap_confirm_kb(
+                texts.BTN_AP_DELETE_YES,
+                f"ap:del:{appt.id}:ok",
+                f"ap:open:{appt.id}",
+                large=user.ui_large,
+            ),
         )
     await callback.answer()
 
@@ -611,13 +715,18 @@ async def cb_cancel(callback: CallbackQuery, state: FSMContext, session: AsyncSe
         await _show(
             callback,
             texts.AP_CANCELLED.format(title=appt.title, day=f"{appt.starts_on:%d.%m}"),
-            keyboards.ap_done_kb(),
+            keyboards.ap_done_kb(user.ui_large),
         )
     else:
         await _show(
             callback,
             texts.AP_CANCEL_ASK.format(event=ap.fmt_event(appt, icon=False)),
-            keyboards.ap_confirm_kb(texts.BTN_AP_CANCEL_YES, f"ap:cancel:{appt.id}:ok", f"ap:open:{appt.id}"),
+            keyboards.ap_confirm_kb(
+                texts.BTN_AP_CANCEL_YES,
+                f"ap:cancel:{appt.id}:ok",
+                f"ap:open:{appt.id}",
+                large=user.ui_large,
+            ),
         )
     await callback.answer()
 
@@ -672,9 +781,9 @@ async def cb_after(callback: CallbackQuery, state: FSMContext, session: AsyncSes
         return
     await session.commit()
     if answer == "done":
-        await _show(callback, texts.AP_DONE, keyboards.ap_next_kb(appt.id))
+        await _show(callback, texts.AP_DONE, keyboards.ap_next_kb(appt.id, user.ui_large))
     else:
-        await _show(callback, texts.AP_MISSED, keyboards.ap_done_kb())
+        await _show(callback, texts.AP_MISSED, keyboards.ap_done_kb(user.ui_large))
     await callback.answer()
 
 
@@ -689,7 +798,7 @@ async def cb_next(callback: CallbackQuery, session: AsyncSession) -> None:
         await _stale(callback)
         return
     if months == 0:
-        await _show(callback, texts.AP_NEXT_NO, keyboards.ap_done_kb())
+        await _show(callback, texts.AP_NEXT_NO, keyboards.ap_done_kb(user.ui_large))
         await callback.answer()
         return
     try:
@@ -702,7 +811,7 @@ async def cb_next(callback: CallbackQuery, session: AsyncSession) -> None:
         await _stale(callback)
         return
     await session.commit()
-    await _show(callback, ap.fmt_saved(created, user), keyboards.ap_done_kb())
+    await _show(callback, ap.fmt_saved(created, user), keyboards.ap_done_kb(user.ui_large))
     await callback.answer()
 
 

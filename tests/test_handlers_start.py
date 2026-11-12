@@ -143,17 +143,20 @@ class TestCbMenuBack:
 
 
 class TestOnboardingScreens:
-    async def test_onb_start_shows_tz_screen(self, edit, cb_answer, session) -> None:
+    async def test_onb_start_shows_ui_screen(self, edit, cb_answer, session) -> None:
+        """«Начать» — шаг 2: «Как вам удобнее смотреть?» (UI7, §6.1)."""
         await start.cb_onb_start(make_callback("onb:start", make_message()), make_state(), session)
-        assert edit.call_args.args[0] == texts.ONB_TZ_ASK
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_timezone_kb()
+        assert edit.call_args.args[0] == texts.ONB_UI_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_ui_kb()
         cb_answer.assert_awaited_once()
 
     async def test_onb_tz_preset_shows_targets_with_offset(
-        self, edit, cb_answer
+        self, edit, cb_answer, session
     ) -> None:
         state = make_state()
-        await start.cb_onb_tz(make_callback("onb:tz:Europe/Moscow", make_message()), state)
+        await start.cb_onb_tz(
+            make_callback("onb:tz:Europe/Moscow", make_message()), state, session
+        )
         assert (await state.get_data())["onb_tz"] == "Europe/Moscow"
         text = edit.call_args.args[0]
         assert text.startswith(
@@ -162,16 +165,16 @@ class TestOnboardingScreens:
         assert text.endswith(texts.ONB_TARGETS_ASK)
         assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_targets_kb()
 
-    async def test_onb_tz_other_prompts_input(self, edit, cb_answer) -> None:
+    async def test_onb_tz_other_prompts_input(self, edit, cb_answer, session) -> None:
         state = make_state()
-        await start.cb_onb_tz(make_callback("onb:tz:other", make_message()), state)
+        await start.cb_onb_tz(make_callback("onb:tz:other", make_message()), state, session)
         assert edit.call_args.args[0] == texts.ONB_TZ_OTHER_PROMPT
         assert await state.get_state() == start.Onboarding.tz_input.state
 
-    async def test_msg_onb_tz_valid(self, answer) -> None:
+    async def test_msg_onb_tz_valid(self, answer, session) -> None:
         state = make_state()
         await state.set_state(start.Onboarding.tz_input)
-        await start.msg_onb_tz(make_message("Asia/Yekaterinburg"), state)
+        await start.msg_onb_tz(make_message("Asia/Yekaterinburg"), state, session)
         assert (await state.get_data())["onb_tz"] == "Asia/Yekaterinburg"
         assert await state.get_state() is None
         text = answer.call_args.args[0]
@@ -179,17 +182,19 @@ class TestOnboardingScreens:
             texts.ONB_TZ_CONFIRM.format(tz="Asia/Yekaterinburg", offset="+05:00")
         )
 
-    async def test_msg_onb_tz_invalid_keeps_state(self, answer) -> None:
+    async def test_msg_onb_tz_invalid_keeps_state(self, answer, session) -> None:
         state = make_state()
         await state.set_state(start.Onboarding.tz_input)
-        await start.msg_onb_tz(make_message("НеПояс"), state)
+        await start.msg_onb_tz(make_message("НеПояс"), state, session)
         assert await state.get_state() == start.Onboarding.tz_input.state
         assert "Не знаю такой часовой пояс" in answer.call_args.args[0]
         assert answer.call_args.kwargs["reply_markup"] == keyboards.onboarding_skip_kb("tz")
 
-    async def test_onb_target_preset_shows_slots(self, edit, cb_answer) -> None:
+    async def test_onb_target_preset_shows_slots(self, edit, cb_answer, session) -> None:
         state = make_state()
-        await start.cb_onb_target(make_callback("onb:target:120-80", make_message()), state)
+        await start.cb_onb_target(
+            make_callback("onb:target:120-80", make_message()), state, session
+        )
         assert (await state.get_data())["onb_target"] == (120, 80)
         text = edit.call_args.args[0]
         assert text.startswith(texts.ONB_TARGETS_CONFIRM.format(target="120/80"))
@@ -197,9 +202,11 @@ class TestOnboardingScreens:
         assert texts.ONB_REMEASURE_NOTE in text
         assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_slots_kb([])
 
-    async def test_onb_target_other_prompts_sys(self, edit, cb_answer) -> None:
+    async def test_onb_target_other_prompts_sys(self, edit, cb_answer, session) -> None:
         state = make_state()
-        await start.cb_onb_target(make_callback("onb:target:other", make_message()), state)
+        await start.cb_onb_target(
+            make_callback("onb:target:other", make_message()), state, session
+        )
         assert edit.call_args.args[0] == texts.ONB_TARGETS_OTHER_PROMPT
         assert await state.get_state() == start.Onboarding.target_sys.state
 
@@ -218,33 +225,117 @@ class TestOnboardingScreens:
         assert answer.call_args.args[0] == "Нужно целое число от 70 до 260"
         assert await state.get_state() == start.Onboarding.target_sys.state
 
-    async def test_msg_onb_target_dia_valid(self, answer) -> None:
+    async def test_msg_onb_target_dia_valid(self, answer, session) -> None:
         state = make_state()
         await state.set_state(start.Onboarding.target_dia)
         await state.update_data(onb_target_sys=125)
-        await start.msg_onb_target_dia(make_message("75"), state)
+        await start.msg_onb_target_dia(make_message("75"), state, session)
         assert (await state.get_data())["onb_target"] == (125, 75)
         assert await state.get_state() is None
         text = answer.call_args.args[0]
         assert text.startswith(texts.ONB_TARGETS_CONFIRM.format(target="125/75"))
 
-    async def test_msg_onb_target_dia_invalid(self, answer) -> None:
+    async def test_msg_onb_target_dia_invalid(self, answer, session) -> None:
         state = make_state()
         await state.set_state(start.Onboarding.target_dia)
-        await start.msg_onb_target_dia(make_message("999"), state)
+        await start.msg_onb_target_dia(make_message("999"), state, session)
         assert answer.call_args.args[0] == (
             "Нужно диастолическое от 40 до 160, а получилось 999"
         )
         assert await state.get_state() == start.Onboarding.target_dia.state
 
-    async def test_slot_toggle_add_and_remove(self, edit, cb_answer) -> None:
+    async def test_slot_toggle_add_and_remove(self, edit, cb_answer, session) -> None:
         state = make_state()
         await state.update_data(onb_target=(130, 80))
-        await start.cb_onb_slot(make_callback("onb:slot:morning", make_message()), state)
+        await start.cb_onb_slot(
+            make_callback("onb:slot:morning", make_message()), state, session
+        )
         assert (await state.get_data())["onb_slots"] == ["morning"]
-        await start.cb_onb_slot(make_callback("onb:slot:morning", make_message()), state)
+        await start.cb_onb_slot(
+            make_callback("onb:slot:morning", make_message()), state, session
+        )
         assert (await state.get_data())["onb_slots"] == []
         assert keyboards.onboarding_slots_kb([]) == edit.call_args.kwargs["reply_markup"]
+
+
+class TestOnboardingUiStep:
+    """Шаг 2 онбординга: «Как вам удобнее смотреть?» (UI7; SPEC:1166).
+
+    `onb:ui:0|1|skip`, перерисовка «Крупный» с «✓», шаги 3–4 в выбранном
+    режиме, `onboarded=1` — шага нет.
+    """
+
+    async def test_ui0_goes_straight_to_tz(self, session, edit, cb_answer) -> None:
+        """«Обычный» — обычный режим и сразу шаг 3 (часовой пояс)."""
+        state = make_state()
+        await start.cb_onb_ui(make_callback("onb:ui:0", make_message()), state, session)
+        row = await reload_user(session)
+        assert row.ui_large is False
+        assert (await state.get_data())["onb_ui"] == "0"
+        assert edit.call_args.args[0] == texts.ONB_TZ_ASK
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_timezone_kb()
+
+    async def test_ui1_first_press_redraws_with_check(
+        self, session, edit, cb_answer
+    ) -> None:
+        """«Крупный» — перерисовка этого же экрана с «✓» (демонстрация режима)."""
+        state = make_state()
+        await start.cb_onb_ui(make_callback("onb:ui:1", make_message()), state, session)
+        row = await reload_user(session)
+        assert row.ui_large is True
+        assert (await state.get_data())["onb_ui"] == "1"
+        assert edit.call_args.args[0] == texts.ONB_UI_ASK
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert markup == keyboards.onboarding_ui_kb("1")
+        labels = [btn.text for row_ in markup.inline_keyboard for btn in row_]
+        assert f"{keyboards.PARTIAL_MARK}{texts.BTN_UI_LARGE}" in labels  # «✓ Крупный»
+
+    async def test_ui1_second_press_goes_to_tz(self, session, edit, cb_answer) -> None:
+        """Повторное «Крупный» — дальше, шаг 3 (§6.1 шаг 2)."""
+        state = make_state()
+        await state.update_data(onb_ui="1")
+        await start.cb_onb_ui(make_callback("onb:ui:1", make_message()), state, session)
+        row = await reload_user(session)
+        assert row.ui_large is True
+        assert edit.call_args.args[0] == texts.ONB_TZ_ASK
+
+    async def test_ui_skip_uses_regular(self, session, edit, cb_answer) -> None:
+        """«Пропустить» — обычный режим, шаг 3 (§6.1 шаг 2)."""
+        state = make_state()
+        await start.cb_onb_ui(
+            make_callback("onb:ui:skip", make_message()), state, session
+        )
+        row = await reload_user(session)
+        assert row.ui_large is False
+        assert (await state.get_data())["onb_ui"] == "0"
+        assert edit.call_args.args[0] == texts.ONB_TZ_ASK
+
+    async def test_steps_3_4_render_in_selected_mode(
+        self, session, user, edit, cb_answer
+    ) -> None:
+        """Шаги 3–4 отрисовываются в выбранном режиме: значения жирным (§11)."""
+        user.ui_large = True
+        await session.commit()
+        state = make_state()
+        await start.cb_onb_tz(
+            make_callback("onb:tz:Europe/Moscow", make_message()), state, session
+        )
+        assert edit.call_args.args[0].startswith(
+            "Часовой пояс: <b>Europe/Moscow</b> (UTC<b>+03:00</b>)"
+        )
+        await start.cb_onb_target(
+            make_callback("onb:target:120-80", make_message()), state, session
+        )
+        assert edit.call_args.args[0].startswith("Цель: <b>120/80</b>")
+
+    async def test_onboarded_user_skips_ui_step(self, session, user, answer) -> None:
+        """`onboarded=1` — шага 2 нет: сразу главное меню (§6.1)."""
+        user.onboarded = True
+        await session.commit()
+        await start.cmd_start(make_message("/start"), make_state(), session)
+        text = answer.call_args.args[0]
+        assert text == texts.MAIN_MENU
+        assert texts.ONB_UI_ASK not in text
 
 
 class TestSlotsAndTime:
@@ -374,17 +465,21 @@ class TestSlotsAndTime:
 
 
 class TestSkip:
-    async def test_skip_tz_uses_default(self, edit, cb_answer) -> None:
+    async def test_skip_tz_uses_default(self, edit, cb_answer, session, reminders) -> None:
         state = make_state()
-        await start.cb_onb_skip(make_callback("onb:skip:tz", make_message()), state, None, None)  # type: ignore[arg-type]
+        await start.cb_onb_skip(
+            make_callback("onb:skip:tz", make_message()), state, session, reminders
+        )
         assert (await state.get_data())["onb_tz"] == DEFAULT_TIMEZONE
         text = edit.call_args.args[0]
         assert text.startswith(texts.ONB_TZ_CONFIRM.format(tz=DEFAULT_TIMEZONE, offset="+03:00"))
 
-    async def test_skip_targets_uses_default(self, edit, cb_answer) -> None:
+    async def test_skip_targets_uses_default(self, edit, cb_answer, session, reminders) -> None:
         state = make_state()
         await state.update_data(onb_slots=["morning"])
-        await start.cb_onb_skip(make_callback("onb:skip:targets", make_message()), state, None, None)  # type: ignore[arg-type]
+        await start.cb_onb_skip(
+            make_callback("onb:skip:targets", make_message()), state, session, reminders
+        )
         data = await state.get_data()
         assert data["onb_target"] == (130, 80)
         assert edit.call_args.kwargs["reply_markup"] == keyboards.onboarding_slots_kb(["morning"])
@@ -407,9 +502,11 @@ class TestSkip:
             user.id, "evening", start.DEFAULT_SLOT_TIMES["evening"], "Europe/Minsk"
         )
 
-    async def test_skip_unknown_target_is_noop(self, edit, cb_answer) -> None:
+    async def test_skip_unknown_target_is_noop(self, edit, cb_answer, session, reminders) -> None:
         state = make_state()
-        await start.cb_onb_skip(make_callback("onb:skip:что-то", make_message()), state, None, None)  # type: ignore[arg-type]
+        await start.cb_onb_skip(
+            make_callback("onb:skip:что-то", make_message()), state, session, reminders
+        )
         edit.assert_not_called()
         cb_answer.assert_awaited_once()
         assert await state.get_state() is None
@@ -459,10 +556,11 @@ class TestFullOnboardingFlow:
         msg = make_message("/start")
         await start.cmd_start(msg, state, session)
         await start.cb_onb_start(make_callback("onb:start", msg), state, session)
-        await start.cb_onb_tz(make_callback("onb:tz:Europe/Moscow", msg), state)
-        await start.cb_onb_target(make_callback("onb:target:120-80", msg), state)
-        await start.cb_onb_slot(make_callback("onb:slot:morning", msg), state)
-        await start.cb_onb_slot(make_callback("onb:slot:evening", msg), state)
+        await start.cb_onb_ui(make_callback("onb:ui:0", msg), state, session)
+        await start.cb_onb_tz(make_callback("onb:tz:Europe/Moscow", msg), state, session)
+        await start.cb_onb_target(make_callback("onb:target:120-80", msg), state, session)
+        await start.cb_onb_slot(make_callback("onb:slot:morning", msg), state, session)
+        await start.cb_onb_slot(make_callback("onb:slot:evening", msg), state, session)
         await start.cb_onb_slots_done(
             make_callback("onb:slots:done", msg), state, session, reminders
         )
@@ -476,6 +574,7 @@ class TestFullOnboardingFlow:
         assert row.onboarded is True
         assert row.timezone == "Europe/Moscow"
         assert (row.target_systolic, row.target_diastolic) == (120, 80)
+        assert row.ui_large is False  # шаг 2: «Обычный» (onb:ui:0)
         calls = reminders.ensure_slot.call_args_list
         assert [c.args for c in calls] == [
             (row.id, "morning", "07:00", "Europe/Moscow"),

@@ -8,8 +8,8 @@
 from __future__ import annotations
 
 import calendar
-from datetime import MINYEAR, date
-from typing import Collection, Iterable, Mapping, Optional, Sequence
+from datetime import MINYEAR, date, timedelta
+from typing import Callable, Collection, Iterable, Mapping, Optional, Sequence
 
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPreviewOptions
 from aiogram.utils.keyboard import InlineKeyboardBuilder
@@ -83,6 +83,35 @@ SLOT_TIME_PRESETS = {
     "evening": ("20:00", "21:00", "22:00"),
 }
 
+# ─────────────────── Крупный режим (§11, UI3/UI6, 0.5.10) ───────────────────
+
+
+def _layout_rows(
+    builder: InlineKeyboardBuilder,
+    buttons: Sequence[tuple[str, str]],
+    *,
+    large: bool,
+    pairs: bool = True,
+) -> None:
+    """Разложить кнопки по рядам (§11).
+
+    `pairs=True` — короткие альтернативы парами в обычном режиме («Да»/«Нет»),
+    в крупном — по одной в строке (UI6.1). `pairs=False` — всегда по одной.
+    Раскладки-исключения (калькулятор, сетки времени, календари) сюда не
+    попадают: их ряды задают разделы §6.1/§6.3/§6.5/§6.6/§6.13.
+    """
+    if pairs and not large:
+        for index in range(0, len(buttons), 2):
+            builder.row(
+                *[
+                    InlineKeyboardButton(text=text, callback_data=callback)
+                    for text, callback in buttons[index : index + 2]
+                ]
+            )
+    else:
+        for text, callback in buttons:
+            builder.row(InlineKeyboardButton(text=text, callback_data=callback))
+
 # ─────────────────────────── Главное меню ───────────────────────────
 
 
@@ -116,8 +145,8 @@ def back_to_menu() -> InlineKeyboardMarkup:
 # ─────────────────────────── Запись давления ───────────────────────────
 
 
-def keypad_kb(buf: str, *, allow_skip: bool) -> InlineKeyboardMarkup:
-    """Клавиатура-калькулятор ввода значения (SPEC.md, раздел 6.3).
+def keypad_kb(buf: str, *, allow_skip: bool, large: bool = False) -> InlineKeyboardMarkup:
+    """Клавиатура-калькулятор ввода значения (SPEC.md, раздел 6.3; мокап 2.1).
 
     Цифры 0…9, «C» (`m:key:clear`) — очистить, «⌫» (`m:key:bksp`) — стереть
     последнюю цифру, «Готово» (`m:key:ok`) — подтвердить, «Пропустить»
@@ -125,8 +154,33 @@ def keypad_kb(buf: str, *, allow_skip: bool) -> InlineKeyboardMarkup:
 
     `buf` — текущий буфер набора; на разметку не влияет (значение показывает
     `texts.fmt_keypad_prompt`), передаётся для единообразия с текстом экрана.
+
+    Крупный режим (§11): цифры в 2 колонки (1–0 по порядку), «C»/«⌫» рядом,
+    «Готово»/«Пропустить»/«Отмена» — каждая отдельной строкой (мокап 2.1).
     """
     builder = InlineKeyboardBuilder()
+    if large:
+        # Раскладка крупного режима: 2 колонки (кнопка вдвое шире) — мокап 2.1.
+        for digits in ((1, 2), (3, 4), (5, 6), (7, 8), (9, 0)):
+            builder.row(
+                *[
+                    InlineKeyboardButton(text=str(d), callback_data=f"m:key:{d}")
+                    for d in digits
+                ]
+            )
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_KEYPAD_CLEAR, callback_data="m:key:clear"),
+            InlineKeyboardButton(
+                text=texts.BTN_KEYPAD_BACKSPACE, callback_data="m:key:bksp"
+            ),
+        )
+        builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"))
+        if allow_skip:
+            builder.row(
+                InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="m:key:skip")
+            )
+        builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+        return builder.as_markup()
     # Раскладка как у калькулятора: 7-8-9 сверху, 1-2-3 снизу, «C 0 ⌫» последним рядом.
     for digits in ((7, 8, 9), (4, 5, 6), (1, 2, 3)):
         builder.row(
@@ -190,27 +244,39 @@ def saved_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def medication_taken_kb() -> InlineKeyboardMarkup:
-    """«Приняли лекарство?» → Да / Нет (TRUE / FALSE; NULL — не отмечал)."""
+def medication_taken_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """«Приняли лекарство?» → Да / Нет (TRUE / FALSE; NULL — не отмечал).
+
+    Пара §11; в крупном режиме — по одной в строке (UI6.1).
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_MED_YES, callback_data="m:med:yes"),
-        InlineKeyboardButton(text=texts.BTN_MED_NO, callback_data="m:med:no"),
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_MED_YES, "m:med:yes"),
+            (texts.BTN_MED_NO, "m:med:no"),
+        ),
+        large=large,
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()
 
 
-def feeling_kb() -> InlineKeyboardMarkup:
-    """Самочувствие: Норма / Головная боль / Слабость / Другое."""
+def feeling_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """Самочувствие: Норма / Головная боль / Слабость / Другое.
+
+    Обычный — сетка 2×2 (зафиксированный канон, UI3); крупный — по одной (UI6.1).
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_FEEL_NORMAL, callback_data="m:feeling:normal"),
-        InlineKeyboardButton(text=texts.BTN_FEEL_HEADACHE, callback_data="m:feeling:headache"),
-    )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_FEEL_WEAKNESS, callback_data="m:feeling:weakness"),
-        InlineKeyboardButton(text=texts.BTN_FEEL_OTHER, callback_data="m:feeling:other"),
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_FEEL_NORMAL, "m:feeling:normal"),
+            (texts.BTN_FEEL_HEADACHE, "m:feeling:headache"),
+            (texts.BTN_FEEL_WEAKNESS, "m:feeling:weakness"),
+            (texts.BTN_FEEL_OTHER, "m:feeling:other"),
+        ),
+        large=large,
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()
@@ -276,29 +342,22 @@ def archive_menu_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def archive_date_kb() -> InlineKeyboardMarkup:
-    """Шаг «Когда?»: сегодня / вчера / 3 дня / неделя / другая дата (§6.10)."""
+def archive_date_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """Шаг «Когда?»: сегодня / вчера / 3 дня / неделя / другая дата (§6.10).
+
+    Обычный — сетка 2+2+1 (зафиксированный канон, UI3); крупный — по одной (UI6.1).
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.BTN_ARCHIVE_TODAY, callback_data="set:archive:date:today"
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_ARCHIVE_TODAY, "set:archive:date:today"),
+            (texts.BTN_ARCHIVE_YESTERDAY, "set:archive:date:yesterday"),
+            (texts.BTN_ARCHIVE_3D, "set:archive:date:3d"),
+            (texts.BTN_ARCHIVE_WEEK, "set:archive:date:week"),
+            (texts.BTN_ARCHIVE_OTHER_DATE, "set:archive:date:other"),
         ),
-        InlineKeyboardButton(
-            text=texts.BTN_ARCHIVE_YESTERDAY, callback_data="set:archive:date:yesterday"
-        ),
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.BTN_ARCHIVE_3D, callback_data="set:archive:date:3d"
-        ),
-        InlineKeyboardButton(
-            text=texts.BTN_ARCHIVE_WEEK, callback_data="set:archive:date:week"
-        ),
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.BTN_ARCHIVE_OTHER_DATE, callback_data="set:archive:date:other"
-        )
+        large=large,
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
     return builder.as_markup()
@@ -346,41 +405,35 @@ def archive_saved_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def archive_medication_taken_kb() -> InlineKeyboardMarkup:
+def archive_medication_taken_kb(large: bool = False) -> InlineKeyboardMarkup:
     """«Приняли лекарство?» архива: Да / Нет — только исторический флаг (§6.10)."""
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_MED_YES, callback_data="m:arch:med:yes"),
-        InlineKeyboardButton(text=texts.BTN_MED_NO, callback_data="m:arch:med:no"),
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_MED_YES, "m:arch:med:yes"),
+            (texts.BTN_MED_NO, "m:arch:med:no"),
+        ),
+        large=large,
     )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu")
-    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu"))
     return builder.as_markup()
 
 
-def archive_feeling_kb() -> InlineKeyboardMarkup:
+def archive_feeling_kb(large: bool = False) -> InlineKeyboardMarkup:
     """Самочувствие архива: те же варианты, кнопки `m:arch:feel:*` (§6.10)."""
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.BTN_FEEL_NORMAL, callback_data="m:arch:feel:normal"
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_FEEL_NORMAL, "m:arch:feel:normal"),
+            (texts.BTN_FEEL_HEADACHE, "m:arch:feel:headache"),
+            (texts.BTN_FEEL_WEAKNESS, "m:arch:feel:weakness"),
+            (texts.BTN_FEEL_OTHER, "m:arch:feel:other"),
         ),
-        InlineKeyboardButton(
-            text=texts.BTN_FEEL_HEADACHE, callback_data="m:arch:feel:headache"
-        ),
+        large=large,
     )
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.BTN_FEEL_WEAKNESS, callback_data="m:arch:feel:weakness"
-        ),
-        InlineKeyboardButton(
-            text=texts.BTN_FEEL_OTHER, callback_data="m:arch:feel:other"
-        ),
-    )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu")
-    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="m:arch:menu"))
     return builder.as_markup()
 
 
@@ -424,12 +477,16 @@ def intake_done_kb() -> InlineKeyboardMarkup:
 # ─────────────────────────── Статистика ───────────────────────────
 
 
-def stats_period_kb() -> InlineKeyboardMarkup:
-    """Выбор периода статистики: 7 / 30 дней / свой период (§6.5)."""
+def stats_period_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """Выбор периода статистики: 7 / 30 дней / свой период (§6.5).
+
+    «7 дней»/«30 дней» — пара §11; в крупном — по одной (UI6.1).
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_7_DAYS, callback_data="stats:7"),
-        InlineKeyboardButton(text=texts.BTN_30_DAYS, callback_data="stats:30"),
+    _layout_rows(
+        builder,
+        ((texts.BTN_7_DAYS, "stats:7"), (texts.BTN_30_DAYS, "stats:30")),
+        large=large,
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_CUSTOM_PERIOD, callback_data="stats:cal"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
@@ -456,9 +513,32 @@ def stats_summary_callback(period: str) -> str:
     return f"stats:{period}" if period in ("7", "30") else f"stats:c:{period}"
 
 
-def stats_days_kb(period: str) -> InlineKeyboardMarkup:
-    """Под списком «По дням»: «Назад» — к фото сводки того же периода."""
+def show_more_button(callback: str, total: int, limit: int) -> Optional[InlineKeyboardButton]:
+    """«Показать ещё {min(5, N − limit)}» (UI13); `None`, когда показано всё.
+
+    Кнопка по одной в строке, callback несёт новый `limit` (§8).
+    """
+    if total <= limit:
+        return None
+    return InlineKeyboardButton(
+        text=texts.BTN_SHOW_MORE.format(count=min(5, total - limit)),
+        callback_data=callback,
+    )
+
+
+def stats_days_kb(
+    period: str, *, large: bool = False, total: int = 0, limit: int = 0
+) -> InlineKeyboardMarkup:
+    """Под списком «По дням»: пагинация крупного и «Назад» к сводке периода.
+
+    `period` — `7` / `30` / `{с}:{по}`; кнопка «Показать ещё» несёт
+    `stats:days:{period}:{limit + 5}` (UI13, §8).
+    """
     builder = InlineKeyboardBuilder()
+    if large:
+        more = show_more_button(f"stats:days:{period}:{limit + 5}", total, limit)
+        if more is not None:
+            builder.row(more)
     builder.row(
         InlineKeyboardButton(
             text=texts.BTN_BACK, callback_data=stats_summary_callback(period)
@@ -471,17 +551,103 @@ def _noop(text: str = " ") -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data="stats:noop")
 
 
+def _week_calendar_rows(
+    builder: InlineKeyboardBuilder,
+    *,
+    area: str,
+    week_start: date,
+    start: Optional[date],
+    show_prev: bool,
+    show_next: bool,
+    day_ok: Callable[[date], bool],
+) -> None:
+    """Недельный список календаря крупного режима (UI12, §11).
+
+    Ряд «◀ Неделя ДД.ММ–ДД.ММ ▶» и дни строками «Пн 3.11»; недоступные дни не
+    показываются; выбранный первый день (шаг 2) — «✓ 3.11». Навигация —
+    `…:cal:w:{пн±7дн}[:{с}]`, дни — `{area}:day:{д}` / `stats:day:{с}:{д}`.
+    """
+    week_end = week_start + timedelta(days=6)
+    suffix = f":{start:%Y%m%d}" if start is not None else ""
+    nav: list[InlineKeyboardButton] = []
+    if show_prev:
+        prev = week_start - timedelta(days=7)
+        nav.append(
+            InlineKeyboardButton(
+                text=texts.BTN_CAL_PREV,
+                callback_data=f"{area}:cal:w:{prev:%Y%m%d}{suffix}",
+            )
+        )
+    nav.append(
+        _noop(
+            texts.CAL_WEEK_LABEL.format(
+                date_from=f"{week_start.day}.{week_start.month}",
+                date_to=f"{week_end.day}.{week_end.month}",
+            )
+        )
+    )
+    if show_next:
+        nxt = week_start + timedelta(days=7)
+        nav.append(
+            InlineKeyboardButton(
+                text=texts.BTN_CAL_NEXT,
+                callback_data=f"{area}:cal:w:{nxt:%Y%m%d}{suffix}",
+            )
+        )
+    builder.row(*nav)
+    for offset in range(7):
+        day = week_start + timedelta(days=offset)
+        if not day_ok(day):
+            continue
+        day_str = f"{day.day}.{day.month}"
+        if day == start:
+            label = f"✓ {day_str}"
+        else:
+            label = f"{texts.STATS_CAL_WEEKDAYS[offset]} {day_str}"
+        if area == "stats" and start is not None:
+            data = f"stats:day:{start:%Y%m%d}:{day:%Y%m%d}"
+        else:
+            data = f"{area}:day:{day:%Y%m%d}"
+        builder.row(InlineKeyboardButton(text=label, callback_data=data))
+
+
 def stats_calendar_kb(
-    year: int, month: int, today: date, start: Optional[date] = None
+    year: int,
+    month: int,
+    today: date,
+    start: Optional[date] = None,
+    large: bool = False,
+    week_start: Optional[date] = None,
 ) -> InlineKeyboardMarkup:
     """Календарь своего периода (§6.5): шаг 1 — `start` не задан, шаг 2 — задан.
 
     Неделя — с понедельника; клетки вне месяца — пустые заглушки; будущие дни
-    кликабельны (проверка — на сервере); «▶» нет в текущем месяце; выбранный
-    первый день — «[N]».
+    кликабельны (проверка — на сервере); «▶» нет вперёд за неделю с сегодня;
+    выбранный первый день — «[N]» (сетка) / «✓ 3.11» (неделя, UI12).
+
+    Крупный режим — список недели вместо сетки (UI12, Б): `stats:cal:w:{пн}`
+    (шаг 1) / `stats:cal:w:{пн}:{с}` (шаг 2), неделя — `week_start` (понедельник,
+    иначе неделя 1-го числа `month`); обычный — сетка месяца
+    `stats:cal:m:{ГГГГММ}[:{с}]`. Прежние `stats:cal:{ГГГГММ}[:{с}]` хендлеры
+    принимают как `:m:`-вариант (UI19).
     """
     suffix = f":{start:%Y%m%d}" if start is not None else ""
     builder = InlineKeyboardBuilder()
+    if large:
+        if week_start is None:
+            week_start = date(year, month, 1) - timedelta(days=date(year, month, 1).weekday())
+        today_week = today - timedelta(days=today.weekday())
+        _week_calendar_rows(
+            builder,
+            area="stats",
+            week_start=week_start,
+            start=start,
+            show_prev=True,  # назад — без ограничений (UI12)
+            show_next=week_start + timedelta(days=7) <= today_week,
+            day_ok=lambda day: day <= today,  # будущее не выбирается (§6.5)
+        )
+        builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="stats:periods"))
+        return builder.as_markup()
     builder.row(_noop(f"{texts.STATS_CAL_MONTHS[month - 1]} {year}"))
     builder.row(*(_noop(name) for name in texts.STATS_CAL_WEEKDAYS))
     for week in calendar.Calendar(firstweekday=0).monthdayscalendar(year, month):
@@ -504,14 +670,16 @@ def stats_calendar_kb(
         prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
         nav.append(
             InlineKeyboardButton(
-                text="◀", callback_data=f"stats:cal:{prev_year:04d}{prev_month:02d}{suffix}"
+                text=texts.BTN_CAL_PREV,
+                callback_data=f"stats:cal:m:{prev_year:04d}{prev_month:02d}{suffix}",
             )
         )
     if (year, month) < (today.year, today.month):
         next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
         nav.append(
             InlineKeyboardButton(
-                text="▶", callback_data=f"stats:cal:{next_year:04d}{next_month:02d}{suffix}"
+                text=texts.BTN_CAL_NEXT,
+                callback_data=f"stats:cal:m:{next_year:04d}{next_month:02d}{suffix}",
             )
         )
     builder.row(*nav)  # хотя бы одна стрелка есть всегда: «◀» или «▶»
@@ -542,9 +710,20 @@ def pdf_period_kb() -> InlineKeyboardMarkup:
 # ─────────────────────────── Настройки ───────────────────────────
 
 
-def settings_kb() -> InlineKeyboardMarkup:
-    """Меню настроек (SPEC.md, раздел 6.6; удаление аккаунта — §19, врач — §21)."""
+def settings_kb(ui_large: bool = False) -> InlineKeyboardMarkup:
+    """Меню настроек (SPEC.md, раздел 6.6; удаление аккаунта — §19, врач — §21).
+
+    Первая строка — переключатель «👁 Крупный режим: вкл/выкл» (`set:ui:{0|1}`,
+    §6.6, UI7): нажатие переключает режим и перерисовывает экран.
+    """
     builder = InlineKeyboardBuilder()
+    state = texts.UI_MODE_ON if ui_large else texts.UI_MODE_OFF
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_UI_MODE.format(state=state),
+            callback_data=f"set:ui:{0 if ui_large else 1}",
+        )
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_TARGETS, callback_data="set:targets"))
     builder.row(InlineKeyboardButton(text=texts.BTN_REMINDERS, callback_data="set:reminders"))
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_MEDS, callback_data="set:meds"))
@@ -602,12 +781,16 @@ def doctor_tg_invite_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def doctor_invite_kb(code: str) -> InlineKeyboardMarkup:
-    """Приглашение у врача: «✅ Принять» / «Отклонить» (§21, п.5)."""
+def doctor_invite_kb(code: str, large: bool = False) -> InlineKeyboardMarkup:
+    """Приглашение у врача: «✅ Принять» / «Отклонить» (§21, п.5; пара §11)."""
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_ACCEPT, callback_data=f"doc:accept:{code}"),
-        InlineKeyboardButton(text=texts.BTN_DECLINE, callback_data=f"doc:decline:{code}"),
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_ACCEPT, f"doc:accept:{code}"),
+            (texts.BTN_DECLINE, f"doc:decline:{code}"),
+        ),
+        large=large,
     )
     return builder.as_markup()
 
@@ -622,28 +805,41 @@ def doctor_panel_kb(show_diary: bool) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def doctor_patients_kb(patients: Sequence[tuple[int, str]]) -> InlineKeyboardMarkup:
+def doctor_patients_kb(
+    patients: Sequence[tuple[int, str]],
+    *,
+    large: bool = False,
+    limit: Optional[int] = None,
+) -> InlineKeyboardMarkup:
     """«Мои пациенты»: кнопка пациента → «Открыть в кабинете», и «Назад».
 
     `patients` — пары (users.id, подпись: «Иванов И. И., 67 лет», имя из
     Telegram или «Пациент {telegram_id}», §6.12); в callback — users.id,
-    доступ проверяется при нажатии.
+    доступ проверяется при нажатии. Крупный режим — пагинация по 5
+    (`doc:patients:{limit}`, UI13): показаны первые `limit`, кнопка
+    «Показать ещё» до полного списка.
     """
     builder = InlineKeyboardBuilder()
-    for user_id, label in patients:
+    shown = patients if limit is None else patients[:limit]
+    for user_id, label in shown:
         builder.row(
             InlineKeyboardButton(text=label, callback_data=f"doc:open:{user_id}")
         )
+    if large and limit is not None:
+        more = show_more_button(f"doc:patients:{limit + 5}", len(patients), limit)
+        if more is not None:
+            builder.row(more)
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="doc:menu"))
     return builder.as_markup()
 
 
-def doctor_registered_kb() -> InlineKeyboardMarkup:
-    """`/iamdoctor` для зарегистрированного врача: «Изменить» / «Назад»."""
+def doctor_registered_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """`/iamdoctor` для зарегистрированного врача: «Изменить» / «Назад» (пара §11)."""
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_CHANGE, callback_data="doc:name"),
-        InlineKeyboardButton(text=texts.BTN_BACK, callback_data="doc:menu"),
+    _layout_rows(
+        builder,
+        ((texts.BTN_CHANGE, "doc:name"), (texts.BTN_BACK, "doc:menu")),
+        large=large,
     )
     return builder.as_markup()
 
@@ -760,14 +956,18 @@ def slot_mode_kb(slot: str, current: str, has_medications: bool) -> InlineKeyboa
     return builder.as_markup()
 
 
-def pause_kb(paused: bool) -> InlineKeyboardMarkup:
-    """Пауза напоминаний: 1 / 3 / 7 дней, на паузе — «▶️ Снять паузу», «Назад» (§6.7)."""
+def pause_kb(paused: bool, large: bool = False) -> InlineKeyboardMarkup:
+    """Пауза напоминаний: 1 / 3 / 7 дней, на паузе — «▶️ Снять паузу», «Назад» (§6.7).
+
+    Обычный — сетка 3 в ряд (зафиксированный канон, UI3); крупный — по одной.
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        *(
-            InlineKeyboardButton(text=label, callback_data=f"set:rem:pause:{days}")
-            for days, label in texts.PAUSE_OPTIONS.items()
-        )
+    _layout_rows(
+        builder,
+        tuple(
+            (label, f"set:rem:pause:{days}") for days, label in texts.PAUSE_OPTIONS.items()
+        ),
+        large=large,
     )
     if paused:
         builder.row(InlineKeyboardButton(text=texts.BTN_PAUSE_OFF, callback_data="set:rem:pause:off"))
@@ -812,13 +1012,24 @@ def timezone_kb(callback_prefix: str = "set:tz") -> InlineKeyboardMarkup:
 # ─────────────────────────── Лекарства ───────────────────────────
 
 
-def medications_list_kb(has_medications: bool = False) -> InlineKeyboardMarkup:
+def medications_list_kb(
+    has_medications: bool = False,
+    *,
+    large: bool = False,
+    total: int = 0,
+    limit: int = 0,
+) -> InlineKeyboardMarkup:
     """Список лекарств: «Добавить», «Изменить», «Удалить» и «Назад» (§6.6).
 
     У пустого списка (`has_medications=False`) — только «Добавить» и «Назад»:
-    изменять и удалять нечего.
+    изменять и удалять нечего. Крупный режим — пагинация по 5 (`med:list:{limit}`,
+    UI13): кнопка «Показать ещё», когда показано меньше `total`.
     """
     builder = InlineKeyboardBuilder()
+    if large:
+        more = show_more_button(f"med:list:{limit + 5}", total, limit)
+        if more is not None:
+            builder.row(more)
     builder.row(InlineKeyboardButton(text=texts.BTN_ADD, callback_data="med:add"))
     if has_medications:
         builder.row(InlineKeyboardButton(text=texts.BTN_EDIT, callback_data="med:edit"))
@@ -857,29 +1068,35 @@ def med_name_input_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def dosage_kb(*, keep: bool = False) -> InlineKeyboardMarkup:
+def dosage_kb(*, keep: bool = False, large: bool = False) -> InlineKeyboardMarkup:
     """Дозировка: 5/10/20/50/100 мг + «Без дозировки» / «Другое» (число + мг/мл/таб).
 
     При правке (`keep=True`) добавлен ряд «Оставить как есть» — текущая
-    дозировка уже в черновике (§6.6).
+    дозировка уже в черновике (§6.6). Крупный режим — по одной в строке (UI6.1).
     """
     builder = InlineKeyboardBuilder()
-    builder.row(
-        *[
-            InlineKeyboardButton(text=d, callback_data=f"med:dose:{d}")
-            for d in DOSAGE_PRESETS[:3]
-        ]
-    )
-    builder.row(
-        *[
-            InlineKeyboardButton(text=d, callback_data=f"med:dose:{d}")
-            for d in DOSAGE_PRESETS[3:]
-        ]
-    )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_NO_DOSAGE, callback_data="med:dose:none"),
-        InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="med:dose:other"),
-    )
+    if large:
+        for d in DOSAGE_PRESETS:
+            builder.row(InlineKeyboardButton(text=d, callback_data=f"med:dose:{d}"))
+        builder.row(InlineKeyboardButton(text=texts.BTN_NO_DOSAGE, callback_data="med:dose:none"))
+        builder.row(InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="med:dose:other"))
+    else:
+        builder.row(
+            *[
+                InlineKeyboardButton(text=d, callback_data=f"med:dose:{d}")
+                for d in DOSAGE_PRESETS[:3]
+            ]
+        )
+        builder.row(
+            *[
+                InlineKeyboardButton(text=d, callback_data=f"med:dose:{d}")
+                for d in DOSAGE_PRESETS[3:]
+            ]
+        )
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_NO_DOSAGE, callback_data="med:dose:none"),
+            InlineKeyboardButton(text=texts.BTN_OTHER, callback_data="med:dose:other"),
+        )
     if keep:
         builder.row(
             InlineKeyboardButton(
@@ -924,9 +1141,13 @@ def reminder_day_key(day: date) -> str:
 
 
 def slot_message_kb(
-    slot: str, day: date, has_medications: bool = True, mode: str = "both"
+    slot: str,
+    day: date,
+    has_medications: bool = True,
+    mode: str = "both",
+    large: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Кнопки слот-сообщения (SPEC.md, §6.7, 0.5.4–0.5.6).
+    """Кнопки слот-сообщения (SPEC.md, §6.7, 0.5.4–0.5.6; раскладка — §11, мокап 2.4).
 
     Каждая кнопка несёт слот и дату напоминания (`{д}`): приём пишется за
     этот день, строка слота находится на сервере по `(users.id, type)`;
@@ -934,20 +1155,39 @@ def slot_message_kb(
     Без лекарств в слоте кнопки «Принял всё ✓» и «Отметить принятые» не
     показываются; режим `meds` — без «Записать давление», `pressure` — без
     кнопок лекарств.
+
+    Пары §11 (обычный): «Записать давление»/«Принял всё ✓», «Отметить
+    принятые»/«Через 30 мин», «Пропускаю сегодня» отдельно; у `meds` —
+    «Принял всё ✓»/«Отметить принятые», «Через 30 мин» и «Пропускаю сегодня»
+    отдельно. Крупный режим — по одной в строке (UI6.1).
     """
     if mode == "meds" and not has_medications:
         mode = "both"
     key = f"{slot}:{reminder_day_key(day)}"
+    measure = (texts.BTN_MEASURE, f"rem:write:{key}")
+    take_all = (texts.BTN_TAKE_ALL, f"rem:all:{key}")
+    partial = (texts.BTN_PARTIAL, f"rem:partial:{key}")
+    snooze = (texts.BTN_SNOOZE_30, f"rem:snooze:{key}")
+    skip = (texts.BTN_SKIP_SLOT, f"rem:skip:{key}")
+    with_meds = has_medications and mode != "pressure"
+    if mode == "meds":
+        # «Только лекарства»: пара «Принял всё ✓»/«Отметить принятые», остальное по одной.
+        rows = [[take_all, partial], [snooze], [skip]]
+    elif with_meds:
+        # «Давление и лекарства»: две пары + «Пропускаю сегодня» (мокап 2.4).
+        rows = [[measure, take_all], [partial, snooze], [skip]]
+    else:
+        # «Только давление» или без лекарств в слоте — по одной в строке.
+        rows = [[measure], [snooze], [skip]]
     builder = InlineKeyboardBuilder()
-    if mode != "meds":
-        builder.row(
-            InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data=f"rem:write:{key}")
-        )
-    if has_medications and mode != "pressure":
-        builder.row(InlineKeyboardButton(text=texts.BTN_TAKE_ALL, callback_data=f"rem:all:{key}"))
-        builder.row(InlineKeyboardButton(text=texts.BTN_PARTIAL, callback_data=f"rem:partial:{key}"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_SNOOZE_30, callback_data=f"rem:snooze:{key}"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_SKIP_SLOT, callback_data=f"rem:skip:{key}"))
+    if large:
+        for button in (button for row in rows for button in row):
+            builder.row(InlineKeyboardButton(text=button[0], callback_data=button[1]))
+    else:
+        for row in rows:
+            builder.row(
+                *[InlineKeyboardButton(text=text, callback_data=data) for text, data in row]
+            )
     return builder.as_markup()
 
 
@@ -991,19 +1231,22 @@ def partial_checked_ids(markup: Optional[InlineKeyboardMarkup]) -> set[int]:
     return checked
 
 
-def remeasure_kb(reminder_id: int) -> InlineKeyboardMarkup:
-    """Кнопки повторного замера после лекарства (§6.7).
+def remeasure_kb(reminder_id: int, large: bool = False) -> InlineKeyboardMarkup:
+    """Кнопки повторного замера после лекарства (§6.7; раскладка — §11).
 
-    «Через 30 мин» и «Больше не напоминать» действуют по строке повтора,
-    поэтому несут её id в callback_data.
+    Пара «Записать сейчас»/«Через 30 мин» + «Больше не напоминать» отдельно;
+    в крупном режиме — по одной в строке (UI6.1). «Через 30 мин» и «Больше не
+    напоминать» действуют по строке повтора, поэтому несут её id в callback_data.
     """
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_REMEASURE_NOW, callback_data="rem:now"))
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_SNOOZE_30, callback_data=f"rem:snooze:{reminder_id}")
-    )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_REMEASURE_OFF, callback_data=f"rem:off:{reminder_id}")
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_REMEASURE_NOW, "rem:now"),
+            (texts.BTN_SNOOZE_30, f"rem:snooze:{reminder_id}"),
+            (texts.BTN_REMEASURE_OFF, f"rem:off:{reminder_id}"),
+        ),
+        large=large,
     )
     return builder.as_markup()
 
@@ -1022,6 +1265,23 @@ def onboarding_skip_kb(next_action: str) -> InlineKeyboardMarkup:
     """Кнопка «Пропустить» — принимаются значения по умолчанию."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_SKIP, callback_data=f"onb:skip:{next_action}"))
+    return builder.as_markup()
+
+
+def onboarding_ui_kb(selected: Optional[str] = None) -> InlineKeyboardMarkup:
+    """Шаг «Как вам удобнее смотреть?» онбординга (UI7, 0.5.10).
+
+    «Обычный» (`onb:ui:0`) / «Крупный» (`onb:ui:1`) по одной в строке, выбранный
+    вариант помечен «✓ » (демонстрация режима перерисовкой), «Пропустить»
+    (`onb:ui:skip`) — обычный режим.
+    """
+    builder = InlineKeyboardBuilder()
+    for value, label in (("0", texts.BTN_UI_REGULAR), ("1", texts.BTN_UI_LARGE)):
+        mark = PARTIAL_MARK if selected == value else ""
+        builder.row(
+            InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"onb:ui:{value}")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="onb:ui:skip"))
     return builder.as_markup()
 
 
@@ -1290,12 +1550,13 @@ def profile_middle_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def profile_sex_kb() -> InlineKeyboardMarkup:
-    """Шаг пола: «Мужской» / «Женский» и «Отмена»."""
+def profile_sex_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """Шаг пола: «Мужской» / «Женский» (пара §11) и «Отмена»."""
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_SEX_MALE, callback_data="prof:sex:m"),
-        InlineKeyboardButton(text=texts.BTN_SEX_FEMALE, callback_data="prof:sex:f"),
+    _layout_rows(
+        builder,
+        ((texts.BTN_SEX_MALE, "prof:sex:m"), (texts.BTN_SEX_FEMALE, "prof:sex:f")),
+        large=large,
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
     return builder.as_markup()
@@ -1326,11 +1587,26 @@ def _btn(text: str, data: str) -> InlineKeyboardButton:
     return InlineKeyboardButton(text=text, callback_data=data)
 
 
-def ap_list_kb(upcoming: Sequence[tuple[int, str]], has_past: bool) -> InlineKeyboardMarkup:
-    """Список: кнопка на событие «Скоро», «➕ Добавить», «🗂 Прошедшие», «В меню»."""
+def ap_list_kb(
+    upcoming: Sequence[tuple[int, str]],
+    has_past: bool,
+    *,
+    large: bool = False,
+    limit: Optional[int] = None,
+) -> InlineKeyboardMarkup:
+    """Список: кнопка на событие «Скоро», «➕ Добавить», «🗂 Прошедшие», «В меню».
+
+    Крупный режим — пагинация по 5 (`ap:list:{limit}`, до 30 событий, UI13):
+    показаны первые `limit`, кнопка «Показать ещё» до полного списка.
+    """
     builder = InlineKeyboardBuilder()
-    for appointment_id, label in upcoming:
+    shown = upcoming if limit is None else upcoming[:limit]
+    for appointment_id, label in shown:
         builder.row(_btn(label, f"ap:open:{appointment_id}"))
+    if large and limit is not None:
+        more = show_more_button(f"ap:list:{limit + 5}", len(upcoming), limit)
+        if more is not None:
+            builder.row(more)
     builder.row(_btn(texts.BTN_AP_ADD, "ap:add"))
     if has_past:
         builder.row(_btn(texts.BTN_AP_PAST, "ap:past"))
@@ -1338,11 +1614,25 @@ def ap_list_kb(upcoming: Sequence[tuple[int, str]], has_past: bool) -> InlineKey
     return builder.as_markup()
 
 
-def ap_past_kb(items: Sequence[tuple[int, str]]) -> InlineKeyboardMarkup:
-    """«Прошедшие»: кнопка на событие и «Назад» к списку."""
+def ap_past_kb(
+    items: Sequence[tuple[int, str]],
+    *,
+    large: bool = False,
+    limit: Optional[int] = None,
+) -> InlineKeyboardMarkup:
+    """«Прошедшие»: кнопка на событие и «Назад» к списку.
+
+    Крупный режим — пагинация по 5 из 20 (`ap:past:{limit}`: 5 → 10 → 15 → 20,
+    UI13); обычный — до 20 со строкой «Более ранние — в личном кабинете».
+    """
     builder = InlineKeyboardBuilder()
-    for appointment_id, label in items:
+    shown = items if limit is None else items[:limit]
+    for appointment_id, label in shown:
         builder.row(_btn(label, f"ap:open:{appointment_id}"))
+    if large and limit is not None:
+        more = show_more_button(f"ap:past:{limit + 5}", len(items), limit)
+        if more is not None:
+            builder.row(more)
     builder.row(_btn(texts.BTN_BACK, "ap:list"))
     return builder.as_markup()
 
@@ -1370,9 +1660,40 @@ def ap_title_kb(kind: str, back: str = "ap:add") -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def ap_calendar_kb(year: int, month: int, today: date, last: date, back: str) -> InlineKeyboardMarkup:
-    """Шаг 3: календарь дат от `today` до `last`, прочие дни — «·» (§6.13)."""
+def ap_calendar_kb(
+    year: int,
+    month: int,
+    today: date,
+    last: date,
+    back: str,
+    large: bool = False,
+    week_start: Optional[date] = None,
+) -> InlineKeyboardMarkup:
+    """Шаг 3: календарь дат от `today` до `last`, прочие дни — «·» (§6.13).
+
+    Крупный режим — список недели вместо сетки (UI12, Б): `ap:cal:w:{пн}`
+    (неделя — `week_start`, понедельник, иначе неделя 1-го числа `month`);
+    недоступные дни не показываются. Обычный — сетка месяца `ap:cal:m:{ГГГГММ}`;
+    прежние `ap:cal:{ГГГГММ}` хендлеры принимают как `:m:`-вариант (UI19).
+    «◀»/«▶» — только на недели, пересекающие диапазон «сегодня … сегодня + 2 года».
+    """
     builder = InlineKeyboardBuilder()
+    if large:
+        if week_start is None:
+            week_start = date(year, month, 1) - timedelta(days=date(year, month, 1).weekday())
+        prev_start = week_start - timedelta(days=7)
+        next_start = week_start + timedelta(days=7)
+        _week_calendar_rows(
+            builder,
+            area="ap",
+            week_start=week_start,
+            start=None,
+            show_prev=prev_start + timedelta(days=6) >= today,
+            show_next=next_start <= last,
+            day_ok=lambda day: today <= day <= last,
+        )
+        builder.row(_btn(texts.BTN_BACK, back))
+        return builder.as_markup()
     builder.row(_noop(f"{texts.STATS_CAL_MONTHS[month - 1]} {year}"))
     builder.row(*(_noop(name) for name in texts.STATS_CAL_WEEKDAYS))
     for week in calendar.Calendar(firstweekday=0).monthdayscalendar(year, month):
@@ -1390,10 +1711,10 @@ def ap_calendar_kb(year: int, month: int, today: date, last: date, back: str) ->
     nav = []
     if (year, month) > (today.year, today.month):
         prev_year, prev_month = (year, month - 1) if month > 1 else (year - 1, 12)
-        nav.append(_btn("◀", f"ap:cal:{prev_year:04d}{prev_month:02d}"))
+        nav.append(_btn(texts.BTN_CAL_PREV, f"ap:cal:m:{prev_year:04d}{prev_month:02d}"))
     if (year, month) < (last.year, last.month):
         next_year, next_month = (year, month + 1) if month < 12 else (year + 1, 1)
-        nav.append(_btn("▶", f"ap:cal:{next_year:04d}{next_month:02d}"))
+        nav.append(_btn(texts.BTN_CAL_NEXT, f"ap:cal:m:{next_year:04d}{next_month:02d}"))
     builder.row(*nav)  # хотя бы одна стрелка есть всегда: «▶» до месяца сегодня + 2 года
     builder.row(_btn(texts.BTN_BACK, back))
     return builder.as_markup()
@@ -1428,44 +1749,82 @@ def ap_back_kb() -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def ap_done_kb() -> InlineKeyboardMarkup:
-    """«📅 К списку» / «В меню»."""
+def ap_done_kb(large: bool = False) -> InlineKeyboardMarkup:
+    """«📅 К списку» / «В меню» (пара §11)."""
     builder = InlineKeyboardBuilder()
-    builder.row(_btn(texts.BTN_AP_LIST, "ap:list"), _btn(texts.BTN_IN_MENU, "menu:back"))
+    _layout_rows(
+        builder, ((texts.BTN_AP_LIST, "ap:list"), (texts.BTN_IN_MENU, "menu:back")), large=large
+    )
     return builder.as_markup()
 
 
-def ap_after_kb(appointment_id: int, kind: str) -> InlineKeyboardMarkup:
-    """«✓ Был(а)» / «Перенёс(ла)» / «Не был(а)» (у анализов — «Сдал(а)»), §6.13."""
+def ap_after_kb(appointment_id: int, kind: str, large: bool = False) -> InlineKeyboardMarkup:
+    """«✓ Был(а)» / «Перенёс(ла)» / «Не был(а)» (у анализов — «Сдал(а)»), §6.13.
+
+    Обычный — «✓ Был(а)» отдельно, пара «Перенёс(ла)»/«Не был(а)» (зафиксированный
+    канон, UI3); крупный — по одной в строке.
+    """
     done, moved, missed = texts.AP_AFTER_BUTTONS[kind]
     builder = InlineKeyboardBuilder()
-    builder.row(_btn(done, f"ap:after:{appointment_id}:done"))
-    builder.row(
-        _btn(moved, f"ap:after:{appointment_id}:moved"),
-        _btn(missed, f"ap:after:{appointment_id}:missed"),
-    )
+    if large:
+        builder.row(_btn(done, f"ap:after:{appointment_id}:done"))
+        builder.row(_btn(moved, f"ap:after:{appointment_id}:moved"))
+        builder.row(_btn(missed, f"ap:after:{appointment_id}:missed"))
+    else:
+        builder.row(_btn(done, f"ap:after:{appointment_id}:done"))
+        builder.row(
+            _btn(moved, f"ap:after:{appointment_id}:moved"),
+            _btn(missed, f"ap:after:{appointment_id}:missed"),
+        )
     return builder.as_markup()
 
 
-def ap_notice_kb(appointment_id: int, kind: str, notice: str, with_doctor: bool = False) -> InlineKeyboardMarkup:
-    """Кнопки уведомления (§6.13, В9, В12); «Как прошёл визит?» — `ap_after_kb`."""
+def ap_notice_kb(
+    appointment_id: int,
+    kind: str,
+    notice: str,
+    with_doctor: bool = False,
+    large: bool = False,
+) -> InlineKeyboardMarkup:
+    """Кнопки уведомления (§6.13, В9, В12); «Как прошёл визит?» — `ap_after_kb`.
+
+    Пары §11: «✓ Помню»/«Перенести»; у `doctor` — «Отменить визит»/«📄 Отчёт
+    для врача», «Отправить врачу» отдельной строкой; у `lab`/`exam` —
+    «Отменить» отдельной строкой. Крупный режим — по одной в строке.
+    """
     if notice == "after":
-        return ap_after_kb(appointment_id, kind)
+        return ap_after_kb(appointment_id, kind, large=large)
     builder = InlineKeyboardBuilder()
-    if kind == "doctor":
-        top = [_btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}")]
-        if with_doctor:
-            top.append(_btn(texts.BTN_AP_SEND, f"ap:send:{appointment_id}"))
-        builder.row(*top)
-    builder.row(_btn(texts.BTN_AP_SEEN, f"ap:seen:{appointment_id}"))
+    if large:
+        builder.row(_btn(texts.BTN_AP_SEEN, f"ap:seen:{appointment_id}"))
+        builder.row(_btn(texts.BTN_AP_MOVE, f"ap:move:{appointment_id}"))
+        if kind == "doctor":
+            builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
+            builder.row(_btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}"))
+            if with_doctor:
+                builder.row(_btn(texts.BTN_AP_SEND, f"ap:send:{appointment_id}"))
+        else:
+            builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
+        return builder.as_markup()
     builder.row(
+        _btn(texts.BTN_AP_SEEN, f"ap:seen:{appointment_id}"),
         _btn(texts.BTN_AP_MOVE, f"ap:move:{appointment_id}"),
-        _btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"),
     )
+    if kind == "doctor":
+        builder.row(
+            _btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"),
+            _btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}"),
+        )
+        if with_doctor:
+            builder.row(_btn(texts.BTN_AP_SEND, f"ap:send:{appointment_id}"))
+    else:
+        builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
     return builder.as_markup()
 
 
-def ap_card_kb(appointment_id: int, kind: str, state: str, back: str) -> InlineKeyboardMarkup:
+def ap_card_kb(
+    appointment_id: int, kind: str, state: str, back: str, large: bool = False
+) -> InlineKeyboardMarkup:
     """Карточка: `upcoming` — отчёт, правка, отмена; `waiting` — ответ; дальше — «Удалить», «Назад»."""
     builder = InlineKeyboardBuilder()
     if state == "upcoming":
@@ -1474,7 +1833,7 @@ def ap_card_kb(appointment_id: int, kind: str, state: str, back: str) -> InlineK
         builder.row(_btn(texts.BTN_AP_EDIT, f"ap:edit:{appointment_id}"))
         builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
     elif state == "waiting":
-        for row in ap_after_kb(appointment_id, kind).inline_keyboard:
+        for row in ap_after_kb(appointment_id, kind, large=large).inline_keyboard:
             builder.row(*row)
     builder.row(_btn(texts.BTN_AP_DELETE, f"ap:del:{appointment_id}"))
     builder.row(_btn(texts.BTN_BACK, back))
@@ -1491,17 +1850,29 @@ def ap_edit_kb(appointment_id: int) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
-def ap_confirm_kb(yes_text: str, yes_data: str, no_data: str) -> InlineKeyboardMarkup:
-    """Подтверждение: «Да, …» / «Нет»."""
+def ap_confirm_kb(
+    yes_text: str, yes_data: str, no_data: str, large: bool = False
+) -> InlineKeyboardMarkup:
+    """Подтверждение: «Да, …» / «Нет» (пара §11)."""
     builder = InlineKeyboardBuilder()
-    builder.row(_btn(yes_text, yes_data), _btn(texts.BTN_AP_NO, no_data))
+    _layout_rows(builder, ((yes_text, yes_data), (texts.BTN_AP_NO, no_data)), large=large)
     return builder.as_markup()
 
 
-def ap_next_kb(appointment_id: int) -> InlineKeyboardMarkup:
-    """«Записать следующий?» — через 1 / 3 / 6 / 12 месяцев, «Не нужно» (В11)."""
+def ap_next_kb(appointment_id: int, large: bool = False) -> InlineKeyboardMarkup:
+    """«Записать следующий?» — через 1 / 3 / 6 / 12 месяцев, «Не нужно» (В11).
+
+    Обычный — сетка 2+2+1 (зафиксированный канон, UI3); крупный — по одной.
+    """
     builder = InlineKeyboardBuilder()
-    choices = [_btn(label, f"ap:next:{appointment_id}:{months}") for months, label in texts.AP_NEXT_BUTTONS]
+    if large:
+        for months, label in texts.AP_NEXT_BUTTONS:
+            builder.row(_btn(label, f"ap:next:{appointment_id}:{months}"))
+        return builder.as_markup()
+    choices = [
+        _btn(label, f"ap:next:{appointment_id}:{months}")
+        for months, label in texts.AP_NEXT_BUTTONS
+    ]
     builder.row(*choices[:2])
     builder.row(*choices[2:4])
     builder.row(choices[4])

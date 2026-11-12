@@ -55,19 +55,26 @@ CSV_KIND_MEDS = "bp_meds"
 # ─────────────────────────── Экраны ───────────────────────────
 
 
-async def _show(callback: CallbackQuery, text: str, markup: InlineKeyboardMarkup) -> None:
+async def _show(
+    callback: CallbackQuery,
+    text: str,
+    markup: InlineKeyboardMarkup,
+    *,
+    parse_mode: Optional[str] = None,
+) -> None:
     """Показать текстовый экран вместо текущего сообщения (§6.5).
 
     Текстовое сообщение редактируется; фото-гистограмма текстом стать не
-    может — она удаляется, экран приходит новым сообщением.
+    может — она удаляется, экран приходит новым сообщением. `parse_mode`
+    передаётся точечно: только для сообщений с тегами (§11).
     """
     message = callback.message
     if message.photo:  # type: ignore[union-attr]
         await _delete(callback)
-        await message.answer(text, reply_markup=markup)  # type: ignore[union-attr]
+        await message.answer(text, reply_markup=markup, parse_mode=parse_mode)  # type: ignore[union-attr]
     else:
         try:
-            await message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+            await message.edit_text(text, reply_markup=markup, parse_mode=parse_mode)  # type: ignore[union-attr]
         except TelegramBadRequest as error:
             # Двойное нажатие той же кнопки календаря — тот же экран (§7.2).
             if "message is not modified" not in str(error):
@@ -82,8 +89,8 @@ async def _delete(callback: CallbackQuery) -> None:
         pass
 
 
-def _periods_screen() -> tuple[str, object]:
-    return texts.BTN_STATS, keyboards.stats_period_kb()
+def _periods_screen(ui_large: bool = False) -> tuple[str, object]:
+    return texts.BTN_STATS, keyboards.stats_period_kb(ui_large)
 
 
 def _format_summary(
@@ -94,10 +101,12 @@ def _format_summary(
     summary: stats_service.StatsSummary,
     *,
     custom: bool = False,
+    large: bool = False,
 ) -> str:
     """Сводка по числам сервиса; строка приверженности — только при лекарствах.
 
-    `custom` — свой период: заголовок «За период … (N дней)» (§6.5, 0.5.3).
+    `custom` — свой период: заголовок «За период … (N дней)» (§6.5, 0.5.3);
+    `large` — крупный режим: значения жирным (§11).
     """
     adherence = None
     if summary.adherence is not None:
@@ -120,6 +129,7 @@ def _format_summary(
         goal_verdict=summary.goal_verdict or texts.STATS_GOAL_OK,
         adherence=adherence,
         custom=custom,
+        large=large,
     )
 
 
@@ -145,9 +155,10 @@ async def _support_footer(session: AsyncSession, user: User) -> Optional[str]:
 
 
 @router.callback_query(F.data.in_({"menu:stats", "stats:periods"}))
-async def cb_stats_periods(callback: CallbackQuery) -> None:
+async def cb_stats_periods(callback: CallbackQuery, session: AsyncSession) -> None:
     """«Статистика» / «Назад» — выбор периода (под фото — новым сообщением)."""
-    text, markup = _periods_screen()
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    text, markup = _periods_screen(user.ui_large)
     await _show(callback, text, markup)  # type: ignore[arg-type]
     await callback.answer()
 
@@ -165,7 +176,7 @@ async def cb_stats_show(callback: CallbackQuery, session: AsyncSession) -> None:
     if data.startswith("stats:c:"):
         period = _parse_period(data.removeprefix("stats:c:"), today)
         if period is None:
-            await _broken(callback)
+            await _broken(callback, large=user.ui_large)
             return
         await _send_summary(callback, session, user, period[0], period[1], custom=True)
         return
@@ -192,11 +203,11 @@ async def _send_summary(
     summary = await stats_service.summary(session, user, start_day, end_day)
     if summary.count == 0:
         await session.commit()
-        await _show(callback, texts.STATS_EMPTY, keyboards.stats_period_kb())
+        await _show(callback, texts.STATS_EMPTY, keyboards.stats_period_kb(user.ui_large))
         await callback.answer()
         return
     days = (end_day - start_day).days + 1
-    text = _format_summary(days, start_day, end_day, user, summary, custom=custom)
+    text = _format_summary(days, start_day, end_day, user, summary, custom=custom, large=user.ui_large)
     footer = await _support_footer(session, user)
     if footer is not None:
         text = f"{text}\n\n{footer}"
@@ -206,13 +217,15 @@ async def _send_summary(
     chart_days = stats_chart.daily_values(measurements, user.timezone, start_day, end_day)
     await session.commit()  # фиксация last_support_shown_at (§7.2 — вне транзакций чтения)
     await callback.answer()
-    png = await asyncio.to_thread(stats_chart.render, chart_days)
+    png = await asyncio.to_thread(stats_chart.render, chart_days, large=user.ui_large)
     await _delete(callback)
     period = _period_key(start_day, end_day) if custom else str(days)
     await callback.message.answer_photo(  # type: ignore[union-attr]
         BufferedInputFile(png, filename=f"bp_stats_{start_day:%Y%m%d}-{end_day:%Y%m%d}.png"),
         caption=text,
         reply_markup=keyboards.stats_result_kb(period),
+        # Теги `<b>` в подписи — только в крупном режиме (§11).
+        parse_mode="HTML" if user.ui_large else None,
     )
 
 
@@ -234,6 +247,11 @@ def _parse_day(value: str) -> Optional[date]:
         return datetime.strptime(value, "%Y%m%d").date()
     except ValueError:
         return None
+
+
+def _int(raw: str) -> Optional[int]:
+    """Целое из callback_data; мусор — None (§8)."""
+    return int(raw) if raw.isdigit() else None
 
 
 def _parse_month(value: str) -> Optional[tuple[int, int]]:
@@ -277,22 +295,38 @@ def _period_key(start_day: date, end_day: date) -> str:
     return f"{start_day:%Y%m%d}:{end_day:%Y%m%d}"
 
 
-async def _broken(callback: CallbackQuery) -> None:
+async def _broken(callback: CallbackQuery, *, large: bool = False) -> None:
     """Битая или устаревшая callback_data — экран выбора периода (§6.5)."""
-    text, markup = _periods_screen()
+    text, markup = _periods_screen(large)
     await _show(callback, text, markup)  # type: ignore[arg-type]
     await callback.answer()
 
 
 async def _show_calendar(
-    callback: CallbackQuery, year: int, month: int, today: date, start: Optional[date]
+    callback: CallbackQuery,
+    year: int,
+    month: int,
+    today: date,
+    start: Optional[date],
+    *,
+    large: bool = False,
+    week_start: Optional[date] = None,
 ) -> None:
+    """Экран календаря: обычный — сетка месяца, крупный — список недели (UI12).
+
+    `week_start` — понедельник показываемой недели (крупный режим, UI12);
+    без него неделя выводится из `month` в `stats_calendar_kb`.
+    """
     text = (
         texts.STATS_CAL_LAST.format(date=start.strftime("%d.%m"))
         if start is not None
         else texts.STATS_CAL_FIRST
     )
-    await _show(callback, text, keyboards.stats_calendar_kb(year, month, today, start))
+    await _show(
+        callback,
+        text,
+        keyboards.stats_calendar_kb(year, month, today, start, large, week_start),
+    )
     await callback.answer()
 
 
@@ -304,23 +338,51 @@ async def cb_stats_noop(callback: CallbackQuery) -> None:
 
 @router.callback_query((F.data == "stats:cal") | F.data.startswith("stats:cal:"))
 async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> None:
-    """«📆 Свой период» и листание месяцев: `stats:cal[:{ГГГГММ}[:{с}]]` (§6.5, §8)."""
+    """«📆 Свой период» и листание: `stats:cal[:m:{ГГГГММ}[:{с}]|w:{пн}[:{с}]]` (UI12, UI19).
+
+    Обычный режим — сетка месяца `:cal:m:`, крупный — список недели `:cal:w:`
+    (пн — понедельник недели, `с` — выбранный первый день шага 2). Прежние
+    `stats:cal:{ГГГГММ}[:{с}]` принимаются как `:m:`-вариант (UI19).
+    """
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     today = _today(user)
-    parts = (callback.data or "").split(":")[2:]
-    if not parts:
-        await _show_calendar(callback, today.year, today.month, today, None)
+    large = user.ui_large
+    raw = (callback.data or "").split(":")[2:]
+    kind = raw[0] if raw and raw[0] in ("m", "w") else "m"
+    rest = raw[1:] if raw and raw[0] in ("m", "w") else raw
+    if not raw:
+        # «Свой период»: обычный — текущий месяц, крупный — неделя сегодняшнего (UI12).
+        week_start = today - timedelta(days=today.weekday()) if large else None
+        await _show_calendar(
+            callback, today.year, today.month, today, None, large=large, week_start=week_start
+        )
         return
-    month = _parse_month(parts[0]) if len(parts) <= 2 else None
-    start = _parse_day(parts[1]) if month is not None and len(parts) == 2 else None
+    if kind == "w":
+        week_start = _parse_day(rest[0]) if len(rest) in (1, 2) else None
+        start = _parse_day(rest[1]) if len(rest) == 2 else None
+        if week_start is None or (len(rest) == 2 and (start is None or start > today)):
+            await _broken(callback, large=user.ui_large)
+            return
+        await _show_calendar(
+            callback,
+            week_start.year,
+            week_start.month,
+            today,
+            start,
+            large=large,
+            week_start=week_start,
+        )
+        return
+    month = _parse_month(rest[0]) if len(rest) in (1, 2) else None
+    start = _parse_day(rest[1]) if month is not None and len(rest) == 2 else None
     if (
         month is None
         or month > (today.year, today.month)
-        or (len(parts) == 2 and (start is None or start > today))
+        or (len(rest) == 2 and (start is None or start > today))
     ):
-        await _broken(callback)
+        await _broken(callback, large=user.ui_large)
         return
-    await _show_calendar(callback, month[0], month[1], today, start)
+    await _show_calendar(callback, month[0], month[1], today, start, large=large)
 
 
 @router.callback_query(F.data.startswith("stats:day:"))
@@ -334,7 +396,7 @@ async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
     parts = (callback.data or "").split(":")[2:]
     picked = [_parse_day(part) for part in parts]
     if not 1 <= len(picked) <= 2 or any(day is None for day in picked):
-        await _broken(callback)
+        await _broken(callback, large=user.ui_large)
         return
     if len(picked) == 1:
         first = picked[0]
@@ -342,7 +404,17 @@ async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
         if first > today:
             await callback.answer(texts.STATS_CAL_FUTURE)
             return
-        await _show_calendar(callback, first.year, first.month, today, first)
+        # Шаг 2: выбранный день остаётся отмеченным «✓» на своей неделе (UI12).
+        week_start = first - timedelta(days=first.weekday()) if user.ui_large else None
+        await _show_calendar(
+            callback,
+            first.year,
+            first.month,
+            today,
+            first,
+            large=user.ui_large,
+            week_start=week_start,
+        )
         return
     first, last = picked
     assert first is not None and last is not None  # noqa: S101 — проверено выше
@@ -355,18 +427,35 @@ async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
 
 @router.callback_query(F.data.startswith("stats:days:"))
 async def cb_stats_days(callback: CallbackQuery, session: AsyncSession) -> None:
-    """«📅 По дням»: средние по дням с измерениями и итог «Среднее за день» (§6.5)."""
+    """«📅 По дням»: средние по дням с измерениями и итог «Среднее за день» (§6.5).
+
+    `stats:days:{7|30}[:{limit}]` и `stats:days:{с}:{по}[:{limit}]` (§8); `limit`
+    несёт «Показать ещё» крупного режима (по 5, UI13) — показаны первые `limit`
+    строк. Обычный режим — весь список без пагинации.
+    """
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     today = _today(user)
     key = (callback.data or "").removeprefix("stats:days:")
-    if key in ("7", "30"):
-        start_day, end_day = today - timedelta(days=int(key) - 1), today
-    else:
-        period = _parse_period(key, today)
-        if period is None:
-            await _broken(callback)
+    parts = key.split(":")
+    limit: Optional[int] = None
+    if parts[0] in ("7", "30") and len(parts) in (1, 2):
+        period = parts[0]
+        start_day, end_day = today - timedelta(days=int(period) - 1), today
+        if len(parts) == 2:
+            limit = _int(parts[1])
+            if limit is None:
+                await _broken(callback, large=user.ui_large)
+                return
+    elif len(parts) in (2, 3):
+        period = f"{parts[0]}:{parts[1]}"
+        period_range = _parse_period(period, today)
+        if period_range is None or (len(parts) == 3 and (limit := _int(parts[2])) is None):
+            await _broken(callback, large=user.ui_large)
             return
-        start_day, end_day = period
+        start_day, end_day = period_range
+    else:
+        await _broken(callback, large=user.ui_large)
+        return
     measurements = await measurements_service.measurements_for_period(
         session, user, start_day, end_day
     )
@@ -374,20 +463,34 @@ async def cb_stats_days(callback: CallbackQuery, session: AsyncSession) -> None:
     await session.commit()  # сессия не держится во время отправки (§7.2)
     measured = averages.measured_days
     if not measured:
-        await _show(callback, texts.STATS_EMPTY, keyboards.stats_period_kb())
+        await _show(callback, texts.STATS_EMPTY, keyboards.stats_period_kb(user.ui_large))
         await callback.answer()
         return
     rows = [
         (d.day.strftime("%d.%m"), d.zone, d.systolic, d.diastolic, d.pulse)
         for d in measured
     ]
+    shown = limit if user.ui_large else None  # обычный режим — весь список (UI13)
+    total = len(rows)
+    rows = rows[:shown] if shown is not None else rows
     text = texts.fmt_daily_averages(
         start_day.strftime("%d.%m"),
         end_day.strftime("%d.%m"),
         rows,  # type: ignore[arg-type]
         (averages.systolic, averages.diastolic, averages.pulse),  # type: ignore[arg-type]
+        large=user.ui_large,
     )
-    await _show(callback, text, keyboards.stats_days_kb(key))
+    await _show(
+        callback,
+        text,
+        keyboards.stats_days_kb(
+            period,
+            large=user.ui_large,
+            total=total,
+            limit=shown if shown is not None else total,
+        ),
+        parse_mode="HTML",
+    )
     await callback.answer()
 
 

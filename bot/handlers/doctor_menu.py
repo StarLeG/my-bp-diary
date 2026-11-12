@@ -256,7 +256,9 @@ async def cb_self_consent_yes(
         return
     await consent_service.give_doctor_self(session, doctor, consent_service.CHANNEL_BOT)
     text, markup = await _panel(session, callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -344,7 +346,9 @@ async def cb_panel(callback: CallbackQuery, state: FSMContext, session: AsyncSes
     if await _require_doctor(callback, session) is None:
         return
     text, markup = await _panel(session, callback.from_user.id)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -365,17 +369,37 @@ async def cb_cabinet(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data == "doc:patients")
+@router.callback_query(F.data.startswith("doc:patients"))
 async def cb_patients(callback: CallbackQuery, session: AsyncSession) -> None:
-    """«👥 Мои пациенты»: только пациенты с `status='active'` (§21)."""
+    """«👥 Мои пациенты»: только пациенты с `status='active'` (§21).
+
+    Крупный режим — пагинация по 5 (`doc:patients:{limit}`, UI13), обычный —
+    весь список; мусорный `limit` — «устарело». Показ с `parse_mode="HTML"`
+    (шапка `<b>`, §11).
+    """
     doctor = await _require_doctor(callback, session)
     if doctor is None:
         return
+    raw = (callback.data or "").split(":")[2:]
+    limit: Optional[int] = None
+    if raw and raw[0]:
+        if not raw[0].isdigit() or int(raw[0]) <= 0:
+            await callback.answer(texts.STALE_MESSAGE)
+            return
+        limit = int(raw[0])
+    user = await measurements_service.get_user(session, callback.from_user.id)
+    large = bool(user is not None and user.ui_large)
     rows = profile_service.sorted_patients(await consent_service.visible_patients(session, doctor))
-    patients = [(user.id, profile_service.bot_label(user)) for _, user in rows]
+    patients = [(patient.id, profile_service.bot_label(patient)) for _, patient in rows]
+    if large:
+        limit = limit if limit is not None else 5  # первый показ — 5 (§11)
+    else:
+        limit = None  # обычный режим — весь список
     text = texts.DOCTOR_PATIENTS if patients else texts.DOCTOR_PATIENTS_EMPTY
     await callback.message.edit_text(  # type: ignore[union-attr]
-        text, reply_markup=keyboards.doctor_patients_kb(patients)
+        text,
+        reply_markup=keyboards.doctor_patients_kb(patients, large=large, limit=limit),
+        parse_mode="HTML",
     )
     await callback.answer()
 

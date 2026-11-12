@@ -1146,7 +1146,9 @@ class TestFollowupAnswerRace:
     async def _setup(self, session_factory, user: DbUser):
         sent: list[tuple] = []
 
-        async def sender(telegram_id: int, text: str, markup, silent: bool = False) -> int:
+        async def sender(
+            telegram_id: int, text: str, markup, silent: bool = False, html: bool = False
+        ) -> int:
             sent.append((telegram_id, text, silent))
             return 500
 

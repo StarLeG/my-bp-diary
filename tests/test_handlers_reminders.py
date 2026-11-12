@@ -970,3 +970,205 @@ class TestPressureMode:
         assert edit.call_args.kwargs["reply_markup"] == keyboards.slot_message_kb(
             "morning", day, has_medications=True, mode="meds"
         )
+
+
+# ─────────────────── Крупный режим: раскладки кнопок (§11, UI3/UI6, 0.5.10) ───────────────────
+
+
+def buttons_of(markup) -> list[list[tuple[str, str]]]:
+    """Ряды кнопок как пары (текст, callback_data)."""
+    return [[(b.text, b.callback_data) for b in row] for row in markup.inline_keyboard]
+
+
+class TestLargeButtonsOnePerRow:
+    """По одной в строке в крупном, парами — в обычном (§11, UI3/UI6.1)."""
+
+    def test_medication_taken_pairs(self) -> None:
+        assert buttons_of(keyboards.medication_taken_kb()) == [
+            [(texts.BTN_MED_YES, "m:med:yes"), (texts.BTN_MED_NO, "m:med:no")],
+            [(texts.BTN_IN_MENU, "menu:back")],
+        ]
+
+    def test_medication_taken_large_one_per_row(self) -> None:
+        rows = buttons_of(keyboards.medication_taken_kb(large=True))
+        assert rows == [
+            [(texts.BTN_MED_YES, "m:med:yes")],
+            [(texts.BTN_MED_NO, "m:med:no")],
+            [(texts.BTN_IN_MENU, "menu:back")],
+        ]
+        assert all(len(row) == 1 for row in rows)
+
+    def test_feeling_pairs(self) -> None:
+        assert buttons_of(keyboards.feeling_kb()) == [
+            [
+                (texts.BTN_FEEL_NORMAL, "m:feeling:normal"),
+                (texts.BTN_FEEL_HEADACHE, "m:feeling:headache"),
+            ],
+            [
+                (texts.BTN_FEEL_WEAKNESS, "m:feeling:weakness"),
+                (texts.BTN_FEEL_OTHER, "m:feeling:other"),
+            ],
+            [(texts.BTN_IN_MENU, "menu:back")],
+        ]
+
+    def test_feeling_large_one_per_row(self) -> None:
+        rows = buttons_of(keyboards.feeling_kb(large=True))
+        assert rows == [
+            [(texts.BTN_FEEL_NORMAL, "m:feeling:normal")],
+            [(texts.BTN_FEEL_HEADACHE, "m:feeling:headache")],
+            [(texts.BTN_FEEL_WEAKNESS, "m:feeling:weakness")],
+            [(texts.BTN_FEEL_OTHER, "m:feeling:other")],
+            [(texts.BTN_IN_MENU, "menu:back")],
+        ]
+        assert all(len(row) == 1 for row in rows)
+
+    def test_archive_medication_pairs(self) -> None:
+        assert buttons_of(keyboards.archive_medication_taken_kb()) == [
+            [(texts.BTN_MED_YES, "m:arch:med:yes"), (texts.BTN_MED_NO, "m:arch:med:no")],
+            [(texts.BTN_IN_MENU, "m:arch:menu")],
+        ]
+
+    def test_archive_medication_large_one_per_row(self) -> None:
+        rows = buttons_of(keyboards.archive_medication_taken_kb(large=True))
+        assert rows == [
+            [(texts.BTN_MED_YES, "m:arch:med:yes")],
+            [(texts.BTN_MED_NO, "m:arch:med:no")],
+            [(texts.BTN_IN_MENU, "m:arch:menu")],
+        ]
+        assert all(len(row) == 1 for row in rows)
+
+    def test_archive_feeling_pairs(self) -> None:
+        assert buttons_of(keyboards.archive_feeling_kb()) == [
+            [
+                (texts.BTN_FEEL_NORMAL, "m:arch:feel:normal"),
+                (texts.BTN_FEEL_HEADACHE, "m:arch:feel:headache"),
+            ],
+            [
+                (texts.BTN_FEEL_WEAKNESS, "m:arch:feel:weakness"),
+                (texts.BTN_FEEL_OTHER, "m:arch:feel:other"),
+            ],
+            [(texts.BTN_IN_MENU, "m:arch:menu")],
+        ]
+
+    def test_archive_feeling_large_one_per_row(self) -> None:
+        rows = buttons_of(keyboards.archive_feeling_kb(large=True))
+        assert rows == [
+            [(texts.BTN_FEEL_NORMAL, "m:arch:feel:normal")],
+            [(texts.BTN_FEEL_HEADACHE, "m:arch:feel:headache")],
+            [(texts.BTN_FEEL_WEAKNESS, "m:arch:feel:weakness")],
+            [(texts.BTN_FEEL_OTHER, "m:arch:feel:other")],
+            [(texts.BTN_IN_MENU, "m:arch:menu")],
+        ]
+        assert all(len(row) == 1 for row in rows)
+
+
+class TestKeypadLayout:
+    """Калькулятор — исключение §11: 3 колонки обычный / 2 крупный (мокап 2.1)."""
+
+    def test_normal_three_columns(self) -> None:
+        assert buttons_of(keyboards.keypad_kb("", allow_skip=True)) == [
+            [("7", "m:key:7"), ("8", "m:key:8"), ("9", "m:key:9")],
+            [("4", "m:key:4"), ("5", "m:key:5"), ("6", "m:key:6")],
+            [("1", "m:key:1"), ("2", "m:key:2"), ("3", "m:key:3")],
+            [
+                (texts.BTN_KEYPAD_CLEAR, "m:key:clear"),
+                ("0", "m:key:0"),
+                (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
+            ],
+            [(texts.BTN_DONE, "m:key:ok"), (texts.BTN_SKIP, "m:key:skip")],
+            [(texts.BTN_CANCEL, "m:cancel")],
+        ]
+
+    def test_large_two_columns(self) -> None:
+        rows = buttons_of(keyboards.keypad_kb("", allow_skip=True, large=True))
+        assert rows == [
+            [("1", "m:key:1"), ("2", "m:key:2")],
+            [("3", "m:key:3"), ("4", "m:key:4")],
+            [("5", "m:key:5"), ("6", "m:key:6")],
+            [("7", "m:key:7"), ("8", "m:key:8")],
+            [("9", "m:key:9"), ("0", "m:key:0")],
+            [(texts.BTN_KEYPAD_CLEAR, "m:key:clear"), (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp")],
+            [(texts.BTN_DONE, "m:key:ok")],
+            [(texts.BTN_SKIP, "m:key:skip")],
+            [(texts.BTN_CANCEL, "m:cancel")],
+        ]
+
+    def test_large_not_single_column(self) -> None:
+        """Крупный режим не разъезжает калькулятор в один столбец (§11, исключение)."""
+        rows = buttons_of(keyboards.keypad_kb("", allow_skip=False, large=True))
+        assert all(len(row) == 2 for row in rows[:6])  # цифры и «C»/«⌫» парами
+        assert rows[6] == [(texts.BTN_DONE, "m:key:ok")]
+        assert rows[7] == [(texts.BTN_CANCEL, "m:cancel")]
+
+    def test_normal_without_skip_single_done(self) -> None:
+        assert buttons_of(keyboards.keypad_kb("", allow_skip=False))[-2:] == [
+            [(texts.BTN_DONE, "m:key:ok")],
+            [(texts.BTN_CANCEL, "m:cancel")],
+        ]
+
+
+class TestSlotMessageLayouts:
+    """Ряды кнопок слот-сообщения по режимам (мокап 2.4; §11, UI3/UI6.1)."""
+
+    day = date(2026, 11, 12)
+    key = "morning:20261112"
+
+    def test_meds_mode_three_rows(self) -> None:
+        """«Только лекарства»: пара + «Через 30 мин» + «Пропускаю сегодня» (ревью 2026-11-12)."""
+        rows = buttons_of(
+            keyboards.slot_message_kb("morning", self.day, has_medications=True, mode="meds")
+        )
+        assert rows == [
+            [(texts.BTN_TAKE_ALL, f"rem:all:{self.key}"), (texts.BTN_PARTIAL, f"rem:partial:{self.key}")],
+            [(texts.BTN_SNOOZE_30, f"rem:snooze:{self.key}")],
+            [(texts.BTN_SKIP_SLOT, f"rem:skip:{self.key}")],
+        ]
+
+    def test_meds_mode_large_one_per_row(self) -> None:
+        rows = buttons_of(
+            keyboards.slot_message_kb(
+                "morning", self.day, has_medications=True, mode="meds", large=True
+            )
+        )
+        assert rows == [
+            [(texts.BTN_TAKE_ALL, f"rem:all:{self.key}")],
+            [(texts.BTN_PARTIAL, f"rem:partial:{self.key}")],
+            [(texts.BTN_SNOOZE_30, f"rem:snooze:{self.key}")],
+            [(texts.BTN_SKIP_SLOT, f"rem:skip:{self.key}")],
+        ]
+        assert all(len(row) == 1 for row in rows)
+
+    def test_both_mode_two_pairs_and_skip(self) -> None:
+        rows = buttons_of(
+            keyboards.slot_message_kb("morning", self.day, has_medications=True, mode="both")
+        )
+        assert rows == [
+            [(texts.BTN_MEASURE, f"rem:write:{self.key}"), (texts.BTN_TAKE_ALL, f"rem:all:{self.key}")],
+            [(texts.BTN_PARTIAL, f"rem:partial:{self.key}"), (texts.BTN_SNOOZE_30, f"rem:snooze:{self.key}")],
+            [(texts.BTN_SKIP_SLOT, f"rem:skip:{self.key}")],
+        ]
+
+    def test_both_mode_large_one_per_row(self) -> None:
+        rows = buttons_of(
+            keyboards.slot_message_kb(
+                "morning", self.day, has_medications=True, mode="both", large=True
+            )
+        )
+        assert rows == [
+            [(texts.BTN_MEASURE, f"rem:write:{self.key}")],
+            [(texts.BTN_TAKE_ALL, f"rem:all:{self.key}")],
+            [(texts.BTN_PARTIAL, f"rem:partial:{self.key}")],
+            [(texts.BTN_SNOOZE_30, f"rem:snooze:{self.key}")],
+            [(texts.BTN_SKIP_SLOT, f"rem:skip:{self.key}")],
+        ]
+        assert all(len(row) == 1 for row in rows)
+
+    def test_pressure_mode_one_per_row(self) -> None:
+        rows = buttons_of(
+            keyboards.slot_message_kb("morning", self.day, has_medications=True, mode="pressure")
+        )
+        assert rows == [
+            [(texts.BTN_MEASURE, f"rem:write:{self.key}")],
+            [(texts.BTN_SNOOZE_30, f"rem:snooze:{self.key}")],
+            [(texts.BTN_SKIP_SLOT, f"rem:skip:{self.key}")],
+        ]

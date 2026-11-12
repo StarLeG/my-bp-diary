@@ -158,13 +158,99 @@ async def meds_of(session: AsyncSession, owner_id: int) -> list[Medication]:
 
 class TestSettingsMenu:
     async def test_menu(self, session, edit, cb_answer) -> None:
-        await call(settings.cb_settings, callback=make_callback("menu:settings", make_message()))
+        await call(
+            settings.cb_settings,
+            callback=make_callback("menu:settings", make_message()),
+            session=session,
+        )
         assert edit.call_args.args[0] == texts.SETTINGS_MENU
         assert edit.call_args.kwargs["reply_markup"] == keyboards.settings_kb()
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
 
     async def test_back(self, session, edit, cb_answer) -> None:
-        await call(settings.cb_settings, callback=make_callback("set:back", make_message()))
+        await call(
+            settings.cb_settings,
+            callback=make_callback("set:back", make_message()),
+            session=session,
+        )
         assert edit.call_args.args[0] == texts.SETTINGS_MENU
+
+
+class TestUiMode:
+    """«👁 Крупный режим» (§11, UI7): `set:ui:0|1`, перерисовка экрана (SPEC:1166)."""
+
+    async def test_turn_on_switches_and_redraws(
+        self, session, user, edit, cb_answer
+    ) -> None:
+        """`set:ui:1` — режим включён, экран перерисован в крупном (§11)."""
+        await call(
+            settings.cb_ui_mode,
+            callback=make_callback("set:ui:1", make_message()),
+            session=session,
+        )
+        await session.refresh(user)
+        assert user.ui_large is True
+        assert edit.call_args.args[0] == texts.SETTINGS_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.settings_kb(True)
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
+
+    async def test_turn_off_switches_and_redraws(
+        self, session, user, edit, cb_answer
+    ) -> None:
+        """`set:ui:0` — режим выключен, экран перерисован в обычном."""
+        user.ui_large = True
+        await session.commit()
+        await call(
+            settings.cb_ui_mode,
+            callback=make_callback("set:ui:0", make_message()),
+            session=session,
+        )
+        await session.refresh(user)
+        assert user.ui_large is False
+        assert edit.call_args.args[0] == texts.SETTINGS_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.settings_kb(False)
+
+    async def test_button_carries_new_state(self) -> None:
+        """Label — текущее состояние, callback — НОВОЕ (§8).
+
+        Выключенный режим: «…: выкл» → `set:ui:1`; включенный: «…: вкл» → `set:ui:0`.
+        """
+        off = keyboards.settings_kb(False)
+        button = off.inline_keyboard[0][0]
+        assert button.text == texts.BTN_UI_MODE.format(state=texts.UI_MODE_OFF)
+        assert button.callback_data == "set:ui:1"
+        on = keyboards.settings_kb(True)
+        button = on.inline_keyboard[0][0]
+        assert button.text == texts.BTN_UI_MODE.format(state=texts.UI_MODE_ON)
+        assert button.callback_data == "set:ui:0"
+
+    async def test_menu_uses_saved_mode(self, session, user, edit, cb_answer) -> None:
+        """«Настройки» рисуются в сохранённом режиме (§11)."""
+        user.ui_large = True
+        await session.commit()
+        await call(
+            settings.cb_settings,
+            callback=make_callback("menu:settings", make_message()),
+            session=session,
+        )
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.settings_kb(True)
+
+    async def test_toggle_is_committed(
+        self, session, session_factory, user, edit, cb_answer
+    ) -> None:
+        """Middleware не коммитит — хендлер обязан сам: значение видно из другой сессии."""
+        await call(
+            settings.cb_ui_mode,
+            callback=make_callback("set:ui:1", make_message()),
+            session=session,
+        )
+        async with session_factory() as other:
+            value = (
+                await other.execute(
+                    select(UserModel.ui_large).where(UserModel.id == user.id)
+                )
+            ).scalar_one()
+        assert value is True
 
 
 class TestTargets:

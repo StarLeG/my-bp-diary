@@ -173,7 +173,9 @@ async def _log_and_finish(
     header = f"{texts.SLOT_EMOJI[slot]} {texts.SLOT_LABELS[slot]}"
     body = texts.fmt_intake_result(result.taken, result.skipped, result.already)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        f"{header}\n{body}", reply_markup=keyboards.intake_done_kb()
+        f"{header}\n{body}",
+        reply_markup=keyboards.intake_done_kb(),
+        parse_mode="HTML",  # fmt_intake_result экранирует имена (§11)
     )
     await callback.answer()
 
@@ -299,8 +301,11 @@ async def cb_partial_cancel(callback: CallbackQuery, session: AsyncSession) -> N
     lines = [texts.fmt_med_item(m.name, m.dosage) for m in meds]
     mode = effective_mode(await _slot_mode(session, user, slot), bool(meds))
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.fmt_slot_message(slot, lines, mode=mode),
-        reply_markup=keyboards.slot_message_kb(slot, day, has_medications=bool(meds), mode=mode),
+        texts.fmt_slot_message(slot, lines, mode=mode, large=user.ui_large),
+        reply_markup=keyboards.slot_message_kb(
+            slot, day, has_medications=bool(meds), mode=mode, large=user.ui_large
+        ),
+        parse_mode="HTML",  # fmt_slot_message экранирует названия (§11)
     )
     await callback.answer()
 

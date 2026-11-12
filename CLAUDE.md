@@ -36,7 +36,7 @@ Pydantic для валидации, python-dotenv для конфига. Код 
 - В терминах — «поддержать», не «донат».
 - Схема БД: `users` (telegram_id, timezone, target_systolic, target_diastolic,
   med_remeasure_delay, last_support_shown_at, onboarded, followup_enabled,
-  reminders_paused_until), `measurements` (user_id, timestamp,
+  reminders_paused_until, ui_large), `measurements` (user_id, timestamp,
   systolic, diastolic, pulse, medication_taken, feeling, note), `reminders` (user_id, type,
   local_time, next_trigger_time, enabled, last_sent_date, measurement_id, last_message_id,
   mode: both|meds|pressure, followup_at), `medications`

@@ -270,7 +270,9 @@ class TestCanonicalTexts:
 
     def test_admin_broadcast_texts_canonical(self) -> None:
         # SPEC.md, §18.5 — дословно.
-        assert texts.ADMIN_BCAST_PROGRESS == "Отправлено {done} из {total}..."
+        assert texts.ADMIN_BCAST_PROGRESS == (
+            "📢 Рассылка\nОтправлено {done} из {total} {bar} {percent}%"
+        )
         assert texts.ADMIN_BCAST_REPORT == (
             "Рассылка завершена.\nДоставлено: {delivered}, Заблокировали: {blocked}"
         )
@@ -395,7 +397,7 @@ class TestDailyAveragesTexts:
             (131, 84, 70),
         )
         assert result == (
-            "📅 Средние по дням · 04.11–10.11\n"
+            "<b>📅 Средние по дням</b> · 04.11–10.11\n"
             "🟡 04.11 — 134/86, пульс 71\n"
             "🟢 05.11 — 128/81\n"
             "🔴 07.11 — 146/92, пульс 75\n"
@@ -405,3 +407,48 @@ class TestDailyAveragesTexts:
     def test_daily_list_without_pulse(self) -> None:
         result = texts.fmt_daily_averages("04.11", "04.11", [("04.11", 0, 120, 80, None)], (120, 80, None))
         assert result.splitlines()[-1] == "Среднее за день: 120/80"
+
+
+class TestScreenHeaders:
+    """Словарь шапок экранов (§11, канон 0.5.10; SPEC:1130)."""
+
+    #: Канонические шапки дословно из doc/SPEC.md §11 («Словарь шапок»).
+    CANON = [
+        "📊 Статистика",
+        "⚙️ Настройки",
+        "☀️ Напоминания",
+        "📖 Дневник за сегодня",
+        "📅 Визиты и анализы",
+        "👤 Мои данные",
+        "📅 Средние по дням",
+        "📆 Свой период",
+        "📄 Отчёт для врача",
+        "💊 Мои лекарства",
+        "🗂 Архивные записи",
+        "📣 О боте",
+        "📣 Поддержать",
+        "👥 Мои пациенты",
+        "🩺 Меню врача",
+        "📊 Статистика БД",
+        "💾 Бэкапы",
+        "🩺 Здоровье системы",
+        "📢 Рассылка",
+        "👤 Поиск пользователя",
+    ]
+
+    def test_dictionary_matches_canon(self) -> None:
+        """Словарь — ровно канон §11: 20 шапок, те же тексты в том же порядке."""
+        assert list(texts.SCREEN_HEADERS.values()) == self.CANON
+
+    def test_keys_are_canonical(self) -> None:
+        assert list(texts.SCREEN_HEADERS) == [
+            "stats", "settings", "reminders", "diary", "appointments", "profile",
+            "stats_days", "stats_custom", "report", "meds", "archive", "about",
+            "support", "doctor_patients", "doctor_panel", "admin_stats",
+            "admin_backups", "admin_health", "admin_broadcast", "admin_search",
+        ]
+
+    @pytest.mark.parametrize("key", list(texts.SCREEN_HEADERS))
+    def test_screen_header_bold(self, key: str) -> None:
+        """Шапка — «<b>[эмодзи] Заголовок</b>» всегда, оба режима (§11)."""
+        assert texts.screen_header(key) == f"<b>{texts.SCREEN_HEADERS[key]}</b>"

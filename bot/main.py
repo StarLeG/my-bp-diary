@@ -134,14 +134,23 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
         scheduler = build_scheduler(settings.db_path)
 
     async def send(
-        telegram_id: int, text: str, markup: object | None, silent: bool = False
+        telegram_id: int,
+        text: str,
+        markup: object | None,
+        silent: bool = False,
+        html: bool = False,
     ) -> int:
         """Доставка напоминания (контракт `Sender`): `message_id` отправленного.
 
-        `silent` — без звука: повтор «если не ответил» (§6.7, 0.5.6).
+        `silent` — без звука: повтор «если не ответил» (§6.7, 0.5.6);
+        `html` — `parse_mode="HTML"` для экранированных текстов (§11).
         """
         message = await bot.send_message(
-            telegram_id, text, reply_markup=markup, disable_notification=silent  # type: ignore[arg-type]
+            telegram_id,
+            text,
+            reply_markup=markup,  # type: ignore[arg-type]
+            disable_notification=silent,
+            parse_mode="HTML" if html else None,
         )
         return message.message_id
 

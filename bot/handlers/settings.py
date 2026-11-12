@@ -61,8 +61,8 @@ T_SYS = "target_sys"
 # ─────────────────────────── Экраны ───────────────────────────
 
 
-def _settings_screen() -> tuple[str, InlineKeyboardMarkup]:
-    return texts.SETTINGS_MENU, keyboards.settings_kb()
+def _settings_screen(ui_large: bool = False) -> tuple[str, InlineKeyboardMarkup]:
+    return texts.SETTINGS_MENU, keyboards.settings_kb(ui_large)
 
 
 def _targets_screen() -> tuple[str, InlineKeyboardMarkup]:
@@ -120,7 +120,7 @@ async def _meds_screen(session: AsyncSession, user) -> tuple[str, InlineKeyboard
         return texts.MEDS_LIST_EMPTY, keyboards.medications_list_kb()
     lines = [
         texts.MEDS_ITEM.format(
-            med=texts.fmt_med_item(row.name, row.dosage),
+            med=texts.esc(texts.fmt_med_item(row.name, row.dosage)),
             slots=texts.SLOT_LABELS[row.slot],
         )
         for row in rows
@@ -169,7 +169,9 @@ async def _soft_to_list(
     await state.clear()
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     text, markup = await _meds_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -178,7 +180,7 @@ async def _saved_target(message, session, user, sys_v: int, dia_v: int, *, via_m
     user.target_systolic, user.target_diastolic = sys_v, dia_v
     await session.commit()
     text = texts.TARGETS_SAVED.format(target=f"{sys_v}/{dia_v}")
-    _, markup = _settings_screen()
+    _, markup = _settings_screen(user.ui_large)
     if via_message:
         await message.answer(text, reply_markup=markup)
     else:
@@ -189,10 +191,36 @@ async def _saved_target(message, session, user, sys_v: int, dia_v: int, *, via_m
 
 
 @router.callback_query(F.data.in_({"menu:settings", "set:back"}))
-async def cb_settings(callback: CallbackQuery) -> None:
-    """«Настройки» / «Назад» — корневое меню настроек."""
-    text, markup = _settings_screen()
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+async def cb_settings(
+    callback: CallbackQuery, session: AsyncSession
+) -> None:
+    """«Настройки» / «Назад» — корневое меню настроек (с учётом ui_large, §11)."""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    text, markup = _settings_screen(user.ui_large)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.in_({"set:ui:0", "set:ui:1"}))
+async def cb_ui_mode(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Переключатель крупного режима: callback несёт НОВОЕ состояние (§8).
+
+    Нажатие переключает `users.ui_large` и перерисовывает текущий экран
+    («Настройки») в новом режиме — мгновенная демонстрация.
+    """
+    value = (callback.data or "").split(":")[2]
+    if value not in ("0", "1"):
+        await callback.answer(texts.STALE_MESSAGE)
+        return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    user.ui_large = value == "1"
+    await session.commit()
+    text, markup = _settings_screen(user.ui_large)
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -269,7 +297,9 @@ async def msg_target_dia(
 async def cb_reminders(callback: CallbackQuery, session: AsyncSession) -> None:
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     text, markup = await _reminders_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -350,7 +380,9 @@ async def cb_pause(callback: CallbackQuery, session: AsyncSession) -> None:
     text, markup = await _reminders_screen(session, user)
     if header:
         text = f"{header}\n\n{text}"
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -368,7 +400,9 @@ async def cb_followup(
     await reminders.set_followup_enabled(user.id, value == "on")
     await session.refresh(user)
     text, markup = await _reminders_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -392,7 +426,9 @@ async def cb_slot_toggle(
         local_time = (current.local_time if current and current.local_time else None) or DEFAULT_SLOT_TIMES[slot]
         await reminders.ensure_slot(user.id, slot, local_time, user.timezone)
     text, markup = await _reminders_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -412,11 +448,13 @@ async def cb_slot_time(
     if action == "show":
         text = texts.SLOT_TIME_ASK.format(slot=texts.SLOT_LABELS[slot])
         markup = keyboards.slot_time_kb(slot)
+        await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     elif action == "other":
         await state.set_state(SettingsInput.slot_time)
         await state.update_data(**{T_SLOT: slot})
         text = texts.SLOT_TIME_ASK.format(slot=texts.SLOT_LABELS[slot])
         markup = keyboards.input_cancel_kb("set:reminders")
+        await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
     else:
         try:
             moment = schemas.validate_time(action)
@@ -427,7 +465,9 @@ async def cb_slot_time(
         await state.clear()
         await reminders.ensure_slot(user.id, slot, moment.strftime("%H:%M"), user.timezone)
         text, markup = await _reminders_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=markup, parse_mode="HTML"
+        )
     await callback.answer()
 
 
@@ -450,7 +490,7 @@ async def msg_slot_time(
     await state.clear()
     await reminders.ensure_slot(user.id, slot, moment.strftime("%H:%M"), user.timezone)
     text, markup = await _reminders_screen(session, user)
-    await message.answer(text, reply_markup=markup)
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
 
 
 @router.callback_query(F.data == "set:remeasure")
@@ -515,7 +555,7 @@ async def _saved_timezone(message, session, user, tz_name: str, *, via_message: 
     user.timezone = tz_name
     await session.commit()
     text = texts.TZ_SAVED.format(tz=tz_name, offset=_tz_offset(tz_name))
-    _, markup = _settings_screen()
+    _, markup = _settings_screen(user.ui_large)
     if via_message:
         await message.answer(text, reply_markup=markup)
     else:
@@ -630,7 +670,9 @@ async def cb_delete_account_confirm(
 async def cb_meds(callback: CallbackQuery, session: AsyncSession) -> None:
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     text, markup = await _meds_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -650,7 +692,9 @@ async def cb_med_cancel(callback: CallbackQuery, state: FSMContext, session: Asy
     await state.clear()
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     text, markup = await _meds_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer()
 
 
@@ -934,5 +978,7 @@ async def cb_med_del_pick(
     await medications_service.delete_medication_group(session, user, medication.name)
     await session.commit()
     text, markup = await _meds_screen(session, user)
-    await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        text, reply_markup=markup, parse_mode="HTML"
+    )
     await callback.answer(texts.MEDS_DELETED)  # тост: список уже обновлён (§6.6)

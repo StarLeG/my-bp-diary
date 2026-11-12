@@ -58,7 +58,7 @@ def sent() -> list[tuple[int, str, object]]:
 
 @pytest.fixture
 def svc(session_factory, scheduler, sent) -> rem.RemindersService:
-    async def sender(user_id: int, text: str, markup) -> None:
+    async def sender(user_id: int, text: str, markup, silent: bool = False, html: bool = False) -> None:
         sent.append((user_id, text, markup))
 
     return rem.RemindersService(session_factory, sender, scheduler)
@@ -458,7 +458,9 @@ class TestCancelRemeasureForMeasurement:
                     raise JobLookupError(job_id)
                 del self.jobs[job_id]
 
-        async def sender(user_id: int, text: str, markup) -> None:
+        async def sender(
+            user_id: int, text: str, markup, silent: bool = False, html: bool = False
+        ) -> None:
             sent.append((user_id, text, markup))
 
         svc = rem.RemindersService(session_factory, sender, StrictScheduler())
@@ -888,7 +890,9 @@ class FakeTelegram:
         self.fail_clear = fail_clear
         self.next_id = 100
 
-    async def send(self, telegram_id: int, text: str, markup) -> int:
+    async def send(
+        self, telegram_id: int, text: str, markup, silent: bool = False, html: bool = False
+    ) -> int:
         self.sent.append((telegram_id, text, markup))
         self.next_id += 1
         return self.next_id
@@ -1083,7 +1087,9 @@ class SilentTelegram(FakeTelegram):
         super().__init__()
         self.silent: list[bool] = []
 
-    async def send(self, telegram_id: int, text: str, markup, silent: bool = False) -> int:
+    async def send(
+        self, telegram_id: int, text: str, markup, silent: bool = False, html: bool = False
+    ) -> int:
         self.silent.append(silent)
         return await super().send(telegram_id, text, markup)
 
@@ -1441,7 +1447,9 @@ def tick_scheduler() -> TickScheduler:
 
 @pytest.fixture
 def tick_svc(session_factory, tick_scheduler, sent) -> rem.RemindersService:
-    async def sender(user_id: int, text: str, markup, silent: bool = False) -> None:
+    async def sender(
+        user_id: int, text: str, markup, silent: bool = False, html: bool = False
+    ) -> None:
         sent.append((user_id, text, markup))
 
     return rem.RemindersService(session_factory, sender, tick_scheduler)
@@ -1601,7 +1609,7 @@ class TestTickAppointments:
 
         sent = []
 
-        async def sender(telegram_id, text, markup, silent=False):
+        async def sender(telegram_id, text, markup, silent=False, html=False):
             sent.append((telegram_id, text, markup))
             return 900
 
@@ -1615,7 +1623,9 @@ class TestTickAppointments:
         with caplog.at_level(logging.INFO, logger="bot.services.reminders"):
             await svc.tick()
         assert sent and sent[0][1].startswith("Завтра визит 🩺")
-        assert [b.callback_data for row in sent[0][2].inline_keyboard for b in row][0] == f"ap:report:{appt.id}"
+        datas = [b.callback_data for row in sent[0][2].inline_keyboard for b in row]
+        assert datas[0] == f"ap:seen:{appt.id}"  # пара «✓ Помню»/«Перенести» первой (§11)
+        assert f"ap:report:{appt.id}" in datas
         assert "отправлено уведомлений о визитах: 1" in caplog.text
 
     async def test_appointments_error_does_not_break_tick(self, session_factory, tick_scheduler, mocker, caplog) -> None:

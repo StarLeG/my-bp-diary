@@ -120,6 +120,17 @@ async def past_row(session, user, days_ago=1, status="planned", kind="doctor", t
     return appt
 
 
+def ymd(day) -> str:
+    return day.strftime("%Y%m%d")
+
+
+async def open_calendar_draft(session, state) -> None:
+    """Черновик добавления доведён до шага календаря (`ap_mode=add`)."""
+    await press(h.cb_add, "ap:add", session, state)
+    await press(h.cb_kind, "ap:kind:doctor", session, state)
+    await press(h.cb_title, "ap:title:doctor:0", session, state)
+
+
 # ─────────────────────────── Список ───────────────────────────
 
 
@@ -134,8 +145,9 @@ class TestList:
         await past_row(session, user)
         await press(h.cb_list, "ap:list", session, state)
         assert edit.call_args.args[0] == (
-            "📅 Визиты и анализы\n\nСкоро:\n🩺 Кардиолог — сб 14.11, 10:30\n   каб. 212"
+            f"{texts.AP_HEADER}\n\nСкоро:\n🩺 Кардиолог — сб 14.11, 10:30\n   каб. 212"
         )
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
         markup = edit.call_args.kwargs["reply_markup"]
         assert labels(markup) == ["🩺 Кардиолог · 14.11", texts.BTN_AP_ADD, texts.BTN_AP_PAST, texts.BTN_IN_MENU]
         assert f"ap:open:{a.id}" in datas(markup)
@@ -175,7 +187,7 @@ class TestAdd:
         await press(h.cb_title, "ap:title:doctor:1", session, state)
         assert edit.call_args.args[0] == texts.AP_DAY_ASK
         cal = datas(edit.call_args.kwargs["reply_markup"])
-        assert "ap:day:20261111" in cal and "ap:day:20261110" not in cal and "ap:cal:202612" in cal
+        assert "ap:day:20261111" in cal and "ap:day:20261110" not in cal and "ap:cal:m:202612" in cal
         await press(h.cb_day, "ap:day:20261114", session, state)
         assert edit.call_args.args[0] == texts.AP_TIME_ASK
         await press(h.cb_time, "ap:time:1000", session, state)
@@ -660,19 +672,65 @@ class TestReport:
 
 class TestKeyboards:
     def test_notice_kb(self) -> None:
+        """Пары §11: «✓ Помню»/«Перенести»; у doctor — «Отменить визит»/«Отчёт»."""
         doctor = keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True)
-        assert labels(doctor) == [texts.BTN_AP_REPORT, texts.BTN_AP_SEND, texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить визит"]
-        assert datas(doctor)[:2] == ["ap:report:5", "ap:send:5"]
+        assert labels(doctor) == [
+            texts.BTN_AP_SEEN, texts.BTN_AP_MOVE,
+            "Отменить визит", texts.BTN_AP_REPORT,
+            texts.BTN_AP_SEND,
+        ]
+        assert datas(doctor) == [
+            "ap:seen:5", "ap:move:5", "ap:cancel:5", "ap:report:5", "ap:send:5",
+        ]
         lab = keyboards.ap_notice_kb(6, "lab", "morning")
         assert labels(lab) == [texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить"]
         after = keyboards.ap_notice_kb(7, "exam", "after")
         assert datas(after) == ["ap:after:7:done", "ap:after:7:moved", "ap:after:7:missed"]
 
+    def test_notice_kb_large_one_per_row(self) -> None:
+        """Крупный режим: кнопки уведомления по одной в строке (§11)."""
+        doctor = keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True, large=True)
+        assert labels(doctor) == [
+            texts.BTN_AP_SEEN, texts.BTN_AP_MOVE,
+            "Отменить визит", texts.BTN_AP_REPORT,
+            texts.BTN_AP_SEND,
+        ]
+        assert datas(doctor) == [
+            "ap:seen:5", "ap:move:5", "ap:cancel:5", "ap:report:5", "ap:send:5",
+        ]
+        assert all(len(row) == 1 for row in doctor.inline_keyboard)
+        lab = keyboards.ap_notice_kb(6, "lab", "morning", large=True)
+        assert labels(lab) == [texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить"]
+        assert all(len(row) == 1 for row in lab.inline_keyboard)
+        after = keyboards.ap_notice_kb(7, "exam", "after", large=True)
+        assert all(len(row) == 1 for row in after.inline_keyboard)
+        assert datas(after) == ["ap:after:7:done", "ap:after:7:moved", "ap:after:7:missed"]
+
+    def test_notice_kb_pairs_rows(self) -> None:
+        """Обычный режим: пары §11 — ряды «✓ Помню»/«Перенести», «Отменить визит»/«Отчёт»."""
+        doctor = keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True)
+        rows = doctor.inline_keyboard
+        assert [b.text for b in rows[0]] == [texts.BTN_AP_SEEN, texts.BTN_AP_MOVE]
+        assert [b.text for b in rows[1]] == ["Отменить визит", texts.BTN_AP_REPORT]
+        assert [b.text for b in rows[2]] == [texts.BTN_AP_SEND]
+        lab = keyboards.ap_notice_kb(6, "lab", "morning")
+        assert [b.text for b in lab.inline_keyboard[0]] == [texts.BTN_AP_SEEN, texts.BTN_AP_MOVE]
+        assert [b.text for b in lab.inline_keyboard[1]] == ["Отменить"]
+
+    def test_after_kb_pairs(self) -> None:
+        """«Как прошёл визит?»: обычный — «✓» отдельно, пара «Перенёс(ла)»/«Не был(а)» (UI3)."""
+        rows = keyboards.ap_after_kb(7, "exam").inline_keyboard
+        assert [b.text for b in rows[0]] == ["✓ Был(а)"]
+        assert [b.text for b in rows[1]] == ["Перенёс(ла)", "Не был(а)"]
+        rows = keyboards.ap_after_kb(8, "lab").inline_keyboard
+        assert [b.text for b in rows[0]] == ["✓ Сдал(а)"]
+        assert [b.text for b in rows[1]] == ["Перенёс(ла)", "Не сдал(а)"]
+
     def test_time_and_calendar(self) -> None:
         time_kb = keyboards.ap_time_kb("ap:back")
         assert labels(time_kb)[:4] == ["07:00", "08:00", "09:00", "10:00"] and "18:00" in labels(time_kb)
         cal = keyboards.ap_calendar_kb(2026, 11, TODAY, date(2028, 11, 11), "ap:back")
-        assert not any(d.startswith("ap:cal:202610") for d in datas(cal))
+        assert not any(d.startswith("ap:cal:m:202610") for d in datas(cal))
         assert all(len(d.encode()) <= 64 for d in datas(cal))
 
     def test_callback_lengths(self) -> None:
@@ -707,6 +765,215 @@ class TestEdges:
             texts.BTN_AP_EDIT, "Отменить", texts.BTN_AP_DELETE, texts.BTN_BACK,
         ]
         assert labels(keyboards.ap_notice_kb(2, "doctor", "soon")) == [
-            texts.BTN_AP_REPORT, texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить визит",
+            texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить визит", texts.BTN_AP_REPORT,
         ]
         assert labels(keyboards.main_menu())[2] == texts.BTN_APPOINTMENTS
+
+
+# ─────────── Календарь ap:cal:m:/w: и пагинация списков (0.5.10) ───────────
+
+
+class TestCalendarProtocol:
+    """`ap:cal:m:{ГГГГММ}` / `ap:cal:w:{пн}` и совместимость `ap:cal:{…}` (UI12, UI19)."""
+
+    async def test_m_format_and_legacy(self, session, user, edit, cb_answer, state) -> None:
+        """Сетка месяца `:m:`; прежний формат `ap:cal:{ГГГГММ}` — идентичен (UI19)."""
+        await open_calendar_draft(session, state)
+        await press(h.cb_calendar_month, "ap:cal:m:202612", session, state)
+        modern = edit.call_args.kwargs["reply_markup"]
+        assert "ap:day:20261201" in datas(modern)
+        await press(h.cb_calendar_month, "ap:cal:202612", session, state)
+        assert edit.call_args.kwargs["reply_markup"] == modern
+
+    async def test_m_arrows(self, session, user, edit, cb_answer, state) -> None:
+        """В месяце сегодня «◀» нет, «▶» — дальше; в последнем месяце — наоборот (§6.13)."""
+        await open_calendar_draft(session, state)
+        await press(h.cb_calendar_month, "ap:cal:m:202611", session, state)
+        grid = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        assert texts.BTN_CAL_PREV not in [b.text for row in grid for b in row]
+        assert texts.BTN_CAL_NEXT in [b.text for row in grid for b in row]
+        assert "ap:cal:m:202612" in datas(edit.call_args.kwargs["reply_markup"])
+        await press(h.cb_calendar_month, "ap:cal:m:202811", session, state)
+        grid = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        assert texts.BTN_CAL_PREV in [b.text for row in grid for b in row]
+        assert texts.BTN_CAL_NEXT not in [b.text for row in grid for b in row]
+        assert "ap:cal:m:202810" in datas(edit.call_args.kwargs["reply_markup"])
+
+    async def test_w_week_list(self, session, user, edit, cb_answer, state) -> None:
+        """Крупный: `ap:cal:w:{пн}` — список недели, недоступные дни не показываются (UI12)."""
+        user.ui_large = True
+        await session.commit()
+        await open_calendar_draft(session, state)
+        monday = TODAY - timedelta(days=TODAY.weekday())
+        week_end = monday + timedelta(days=6)
+        await press(h.cb_calendar_month, f"ap:cal:w:{ymd(monday)}", session, state)
+        assert edit.call_args.args[0] == texts.AP_DAY_ASK
+        grid = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        shown_labels = [b.text for row in grid for b in row]
+        shown_datas = datas(edit.call_args.kwargs["reply_markup"])
+        assert texts.CAL_WEEK_LABEL.format(
+            date_from=f"{monday.day}.{monday.month}", date_to=f"{week_end.day}.{week_end.month}"
+        ) in shown_labels
+        assert f"{texts.STATS_CAL_WEEKDAYS[TODAY.weekday()]} {TODAY.day}.{TODAY.month}" in shown_labels
+        for offset in range(7):
+            day = monday + timedelta(days=offset)
+            assert (f"ap:day:{ymd(day)}" in shown_datas) == (day >= TODAY)  # прошедшие дни не выбираются
+        assert texts.BTN_CAL_PREV not in shown_labels  # неделя целиком до сегодня — «◀» нет
+        assert texts.BTN_CAL_NEXT in shown_labels
+        assert f"ap:cal:w:{ymd(monday + timedelta(days=7))}" in shown_datas
+
+    async def test_w_last_week_no_next(self, session, user, edit, cb_answer, state) -> None:
+        """У недели с последним днём (сегодня + 2 года) «▶» нет, «◀» — есть (§6.13)."""
+        user.ui_large = True
+        await session.commit()
+        await open_calendar_draft(session, state)
+        last = ap.max_day(TODAY)
+        monday = last - timedelta(days=last.weekday())
+        await press(h.cb_calendar_month, f"ap:cal:w:{ymd(monday)}", session, state)
+        grid = edit.call_args.kwargs["reply_markup"].inline_keyboard
+        shown_labels = [b.text for row in grid for b in row]
+        assert texts.BTN_CAL_PREV in shown_labels and texts.BTN_CAL_NEXT not in shown_labels
+
+    @pytest.mark.parametrize(
+        "data",
+        ["ap:cal:w:2026", "ap:cal:w:zzzzzzzz", "ap:cal:w:20261111:20261112", "ap:cal:w:"],
+    )
+    async def test_w_musor(self, session, user, edit, cb_answer, state, data) -> None:
+        """Мусор в недельном формате — «устарело»."""
+        await open_calendar_draft(session, state)
+        cb_answer.reset_mock()
+        await press(h.cb_calendar_month, data, session, state)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+
+
+class TestPagination:
+    """`ap:list:{limit}` / `ap:past:{limit}`: по 5 в крупном (UI13, §13)."""
+
+    @pytest.mark.parametrize(
+        ("limit", "more_count", "more_data"),
+        [
+            (5, 5, "ap:list:10"),
+            (10, 5, "ap:list:15"),
+            (15, 5, "ap:list:20"),
+            (20, 2, "ap:list:25"),
+        ],
+    )
+    async def test_list_large_pages(
+        self, session, user, edit, cb_answer, state, limit, more_count, more_data
+    ) -> None:
+        """Крупный: первые `limit` из 22 событий и «Показать ещё {min(5, N−limit)}»."""
+        user.ui_large = True
+        await session.commit()
+        for index in range(22):
+            await add(session, user, title=f"В{index}", starts_on=TODAY + timedelta(days=index + 1))
+        await press(h.cb_list, f"ap:list:{limit}", session, state)
+        text = edit.call_args.args[0]
+        assert f"🩺 В{limit - 1} —" in text and f"🩺 В{limit} —" not in text
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert len([d for d in datas(markup) if d.startswith("ap:open:")]) == limit
+        assert texts.BTN_SHOW_MORE.format(count=more_count) in labels(markup)
+        assert more_data in datas(markup)
+
+    async def test_list_normal_ignores_limit(self, session, user, edit, cb_answer, state) -> None:
+        """Обычный режим — весь список сразу, `limit` игнорируется (UI13)."""
+        for index in range(22):
+            await add(session, user, title=f"В{index}", starts_on=TODAY + timedelta(days=index + 1))
+        await press(h.cb_list, "ap:list:5", session, state)
+        text = edit.call_args.args[0]
+        assert "🩺 В21 —" in text
+        assert not any(
+            d.startswith("ap:list:") for d in datas(edit.call_args.kwargs["reply_markup"])
+        )
+
+    @pytest.mark.parametrize("data", ["ap:list:abc", "ap:list:", "ap:list:-1", "ap:list:0"])
+    async def test_list_musor(self, session, user, edit, cb_answer, state, data) -> None:
+        """Мусор в `ap:list:{limit}` (включая 0) — «устарело» (§8)."""
+        await press(h.cb_list, data, session, state)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        edit.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("limit", "more_count", "more_data"),
+        [
+            (5, 5, "ap:past:10"),
+            (10, 5, "ap:past:15"),
+            (15, 5, "ap:past:20"),
+            (20, None, None),  # все 20 — кнопки «ещё» нет
+        ],
+    )
+    async def test_past_large_pages(
+        self, session, user, edit, cb_answer, state, limit, more_count, more_data
+    ) -> None:
+        """Крупный: первые `limit` из 20 прошедших, кнопка кратно 5 (UI13)."""
+        user.ui_large = True
+        await session.commit()
+        for index in range(20):
+            await past_row(session, user, days_ago=index + 1, title=f"Т{index}")
+        await press(h.cb_past, f"ap:past:{limit}", session, state)
+        text = edit.call_args.args[0]
+        lines = text.splitlines()
+        assert lines[0] == texts.AP_PAST_HEADER
+        assert len(lines) == 2 + limit  # шапка + пустая + строки; total == rows — без AP_PAST_MORE
+        assert f"Т{limit - 1} —" in text and f"Т{limit} —" not in text
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert len([d for d in datas(markup) if d.startswith("ap:open:")]) == limit
+        if more_data is None:
+            assert not any(d.startswith("ap:past:") for d in datas(markup))
+        else:
+            assert texts.BTN_SHOW_MORE.format(count=more_count) in labels(markup)
+            assert more_data in datas(markup)
+        assert labels(markup)[-1] == texts.BTN_BACK
+
+    async def test_past_normal_ignores_limit(self, session, user, edit, cb_answer, state) -> None:
+        """Обычный режим — все прошедшие сразу, `limit` игнорируется (UI13)."""
+        for index in range(20):
+            await past_row(session, user, days_ago=index + 1, title=f"Т{index}")
+        await press(h.cb_past, "ap:past:5", session, state)
+        text = edit.call_args.args[0]
+        assert "Т19 —" in text
+        assert not any(
+            d.startswith("ap:past:") for d in datas(edit.call_args.kwargs["reply_markup"])
+        )
+
+    @pytest.mark.parametrize("data", ["ap:past:abc", "ap:past:", "ap:past:0"])
+    async def test_past_musor(self, session, user, edit, cb_answer, state, data) -> None:
+        """Мусор в `ap:past:{limit}` (включая 0) — «устарело» (§8)."""
+        await press(h.cb_past, data, session, state)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        edit.assert_not_awaited()
+
+    async def test_list_without_suffix_first_five(self, session, user, edit, cb_answer, state) -> None:
+        """Крупный: `ap:list` без суффикса — первый показ 5 (§11, UI13)."""
+        user.ui_large = True
+        await session.commit()
+        for index in range(12):
+            await add(session, user, title=f"В{index}", starts_on=TODAY + timedelta(days=index + 1))
+        await press(h.cb_list, "ap:list", session, state)
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert len([d for d in datas(markup) if d.startswith("ap:open:")]) == 5
+        assert texts.BTN_SHOW_MORE.format(count=5) in labels(markup)
+        assert "ap:list:10" in datas(markup)
+
+    async def test_past_without_suffix_first_five(self, session, user, edit, cb_answer, state) -> None:
+        """Крупный: `ap:past` без суффикса — первый показ 5 (§11, UI13)."""
+        user.ui_large = True
+        await session.commit()
+        for index in range(12):
+            await past_row(session, user, days_ago=index + 1, title=f"Т{index}")
+        await press(h.cb_past, "ap:past", session, state)
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert len([d for d in datas(markup) if d.startswith("ap:open:")]) == 5
+        assert texts.BTN_SHOW_MORE.format(count=5) in labels(markup)
+        assert "ap:past:10" in datas(markup)
+
+    async def test_command_first_five(self, session, user, answer, state) -> None:
+        """Крупный: `/visits` — первый показ 5 (§11, UI13)."""
+        user.ui_large = True
+        await session.commit()
+        for index in range(12):
+            await add(session, user, title=f"В{index}", starts_on=TODAY + timedelta(days=index + 1))
+        await call(h.cmd_visits, message=make_message("/visits"), session=session, state=state)
+        markup = answer.call_args.kwargs["reply_markup"]
+        assert len([d for d in datas(markup) if d.startswith("ap:open:")]) == 5
+        assert texts.BTN_SHOW_MORE.format(count=5) in labels(markup)
+        assert "ap:list:10" in datas(markup)

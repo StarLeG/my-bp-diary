@@ -43,7 +43,8 @@ RETRY_BASE_DELAY = 0.05
 #: 7 — режим слота, повтор «если не ответил», пауза: `reminders.mode`,
 #:     `reminders.followup_at`, `users.followup_enabled`, `users.reminders_paused_until`.
 #: 8 — визиты и анализы: таблица `appointments` (§4.16, 0.5.8; `create_all`).
-SCHEMA_VERSION = 8
+#: 9 — «Крупный режим» бота: `users.ui_large` (§4.1, §6.6, 0.5.10).
+SCHEMA_VERSION = 9
 
 #: Колонки поколений 4–7 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
 _ADDED_COLUMNS = (
@@ -77,6 +78,7 @@ _ADDED_COLUMNS = (
     ("reminders", "followup_at", "DATETIME"),
     ("users", "followup_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
     ("users", "reminders_paused_until", "DATE"),
+    ("users", "ui_large", "BOOLEAN NOT NULL DEFAULT 0"),
 )
 
 T = TypeVar("T")

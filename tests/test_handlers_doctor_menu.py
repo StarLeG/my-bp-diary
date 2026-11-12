@@ -80,6 +80,14 @@ async def call(handler, **kwargs) -> None:
     await handler(**{name: value for name, value in kwargs.items() if name in wanted})
 
 
+def labels(markup) -> list[str]:
+    return [b.text for row in markup.inline_keyboard for b in row]
+
+
+def datas(markup) -> list[str]:
+    return [b.callback_data for row in markup.inline_keyboard for b in row]
+
+
 @pytest.fixture
 def answer(mocker):
     return mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
@@ -464,3 +472,77 @@ async def test_grant_access_already_active(session, user) -> None:
     first = await doctor_service.grant_access(session, doctor.id, user.id)
     again = await doctor_service.grant_access(session, doctor.id, user.id)
     assert first.id == again.id and again.status == "active"
+
+
+# ─────────── Пагинация «Моих пациентов» (0.5.10, UI13, §13) ───────────
+
+
+async def add_patients(session, doctor, count: int) -> list[UserModel]:
+    """`count` пациентов без профиля — подписи «Пациент {telegram_id}»."""
+    created = []
+    for index in range(count):
+        patient = UserModel(telegram_id=300_000 + index)
+        session.add(patient)
+        await session.commit()
+        await doctor_service.grant_access(session, doctor.id, patient.id)
+        created.append(patient)
+    return created
+
+
+class TestPatientsPagination:
+    """`doc:patients:{limit}`: по 5 в крупном (UI13); обычный — весь список."""
+
+    async def test_large_first_page(self, edit, cb_answer, session) -> None:
+        """Крупный: первые 5 из 12 и «Показать ещё 5» (первый показ — 5, §11)."""
+        doctor = await make_doctor(session)
+        session.add(UserModel(telegram_id=DOC_TG, ui_large=True))  # крупный режим врача
+        await session.commit()
+        await add_patients(session, doctor, 12)
+        await call(doctor_menu.cb_patients, callback=make_callback("doc:patients"), session=session)
+        assert edit.call_args.args[0] == texts.DOCTOR_PATIENTS
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert labels(markup) == [
+            f"Пациент {300_000 + index}" for index in range(5)
+        ] + [texts.BTN_SHOW_MORE.format(count=5), texts.BTN_BACK]
+        assert "doc:patients:10" in datas(markup)
+
+    async def test_large_next_pages(self, edit, cb_answer, session) -> None:
+        """10 → «Показать ещё 2» → 15: всё показано, кнопки «ещё» нет."""
+        doctor = await make_doctor(session)
+        session.add(UserModel(telegram_id=DOC_TG, ui_large=True))
+        await session.commit()
+        await add_patients(session, doctor, 12)
+        await call(doctor_menu.cb_patients, callback=make_callback("doc:patients:10"), session=session)
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert labels(markup) == [
+            f"Пациент {300_000 + index}" for index in range(10)
+        ] + [texts.BTN_SHOW_MORE.format(count=2), texts.BTN_BACK]
+        assert "doc:patients:15" in datas(markup)
+        await call(doctor_menu.cb_patients, callback=make_callback("doc:patients:15"), session=session)
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert labels(markup) == [
+            f"Пациент {300_000 + index}" for index in range(12)
+        ] + [texts.BTN_BACK]
+        assert not any(d.startswith("doc:patients:") for d in datas(markup))
+
+    async def test_normal_shows_all(self, edit, cb_answer, session) -> None:
+        """Обычный режим — весь список сразу, `limit` игнорируется (UI13)."""
+        doctor = await make_doctor(session)
+        await add_patients(session, doctor, 12)
+        await call(doctor_menu.cb_patients, callback=make_callback("doc:patients"), session=session)
+        markup = edit.call_args.kwargs["reply_markup"]
+        assert labels(markup) == [
+            f"Пациент {300_000 + index}" for index in range(12)
+        ] + [texts.BTN_BACK]
+        await call(doctor_menu.cb_patients, callback=make_callback("doc:patients:5"), session=session)
+        assert labels(edit.call_args.kwargs["reply_markup"]) == labels(markup)
+
+    @pytest.mark.parametrize("data", ["doc:patients:abc", "doc:patients:0", "doc:patients:-1"])
+    async def test_musor_limit(self, edit, cb_answer, session, data) -> None:
+        """Мусорный `limit` — «устарело», экран не перерисовывается (§8)."""
+        doctor = await make_doctor(session)
+        await add_patients(session, doctor, 2)
+        await call(doctor_menu.cb_patients, callback=make_callback(data), session=session)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        edit.assert_not_awaited()

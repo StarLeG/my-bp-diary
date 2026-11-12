@@ -4,7 +4,8 @@
 внутри столбика САД и ДАД), пустой день — белое место, значение ниже базы —
 тонкая черта, расширение шкалы при значениях > 180 / > 110, средние по
 локальным суткам и дни без записей, пульс есть / нет, подписи значений только
-на коротком периоде, даты (каждая 5-я на длинном).
+на коротком периоде, даты (каждая 5-я на длинном), кегли крупного режима (UI11:
+словарь `FONT_SIZES` и fallback `large_tight` при переполнении подписи).
 """
 from __future__ import annotations
 
@@ -149,6 +150,97 @@ class TestRender:
     )
     def test_date_labels(self, index, total, expected) -> None:
         assert stats_chart._date_label(index, D0 + timedelta(index), total) == expected
+
+
+class TestFontSizes:
+    """Кегли крупного режима (UI11): словарь `FONT_SIZES` и переполнение подписи.
+
+    `large` — кегли +30% с округлением вверх до чётного; если подпись значения
+    шире столбика — `large_tight` (§13, ответы UI11).
+    """
+
+    def test_font_sizes_dictionary(self) -> None:
+        """Те же числа, что задаёт UI11: 44/40/26/38/36 и fallback 42/38/24/36/34."""
+        assert stats_chart.FONT_SIZES == {
+            "normal": {
+                "value": 34,
+                "pulse": 30,
+                "pulse_long": 20,
+                "date": 28,
+                "scale": 28,
+                "legend": 26,
+            },
+            "large": {
+                "value": 44,
+                "pulse": 40,
+                "pulse_long": 26,
+                "date": 38,
+                "scale": 38,
+                "legend": 36,
+            },
+            "large_tight": {
+                "value": 42,
+                "pulse": 38,
+                "pulse_long": 24,
+                "date": 36,
+                "scale": 36,
+                "legend": 34,
+            },
+        }
+        assert stats_chart.FONT_UNIT == 24  # единица измерения — вне пересчёта UI11
+
+    def _rendered_sizes(self, mocker, days, *, large: bool) -> dict[str, int]:
+        """Словарь кеглей, с которым реально отрендерен график (spy на `_legend`)."""
+        seen: list[dict[str, int]] = []
+        original = stats_chart._legend
+
+        def spy(draw, sizes):
+            seen.append(sizes)
+            return original(draw, sizes)
+
+        mocker.patch.object(stats_chart, "_legend", side_effect=spy)
+        stats_chart.render(days, large=large)
+        return seen[0]
+
+    def test_large_fallback_when_label_wider_than_bar(self, mocker) -> None:
+        """7 дней с САД=180: подпись при 44 px шире столбика — берётся `large_tight`."""
+        days = week(*[(180, 110, 70)] * 7)
+        top, bottom = stats_chart.scale_limits(days)
+        layout = stats_chart._layout(top, bottom, stats_chart.VALUE_LABEL_ROOM)
+        slot = (layout.plot_right - layout.plot_left) / len(days)
+        bar = max(4.0, slot * stats_chart.BAR_RATIO)
+        labels = [str(v) for d in days for v in (d.systolic, d.diastolic) if v is not None]
+        width = stats_chart._labels_width(
+            labels, stats_chart._font(stats_chart.FONT_SIZES["large"]["value"])
+        )
+        assert width > bar  # предусловие сценария: подпись шире столбика
+        assert self._rendered_sizes(mocker, days, large=True) == stats_chart.FONT_SIZES[
+            "large_tight"
+        ]
+
+    def test_large_keeps_sizes_when_labels_fit(self, mocker) -> None:
+        """7 дней с САД=90: подпись уже столбика — остаётся `large` без ужима."""
+        days = week(*[(90, 50, 60)] * 7)
+        top, bottom = stats_chart.scale_limits(days)
+        layout = stats_chart._layout(top, bottom, stats_chart.VALUE_LABEL_ROOM)
+        slot = (layout.plot_right - layout.plot_left) / len(days)
+        bar = max(4.0, slot * stats_chart.BAR_RATIO)
+        labels = [str(v) for d in days for v in (d.systolic, d.diastolic) if v is not None]
+        width = stats_chart._labels_width(
+            labels, stats_chart._font(stats_chart.FONT_SIZES["large"]["value"])
+        )
+        assert width <= bar  # предусловие сценария: подпись влезает
+        assert self._rendered_sizes(mocker, days, large=True) == stats_chart.FONT_SIZES["large"]
+
+    def test_fallback_only_with_value_labels(self, mocker) -> None:
+        """Переполнение проверяется только при подписях значений (≤ 7 дней)."""
+        month = [DayValues(D0 + timedelta(i), 180, 110, 70) for i in range(30)]
+        assert self._rendered_sizes(mocker, month, large=True) == stats_chart.FONT_SIZES["large"]
+
+    def test_normal_mode_ignores_fallback(self, mocker) -> None:
+        """Обычный режим не берёт `large_tight` даже при широких подписях."""
+        days = week(*[(180, 110, 70)] * 7)
+        assert self._rendered_sizes(mocker, days, large=False) == stats_chart.FONT_SIZES["normal"]
 
 
 class TestDailyValues:

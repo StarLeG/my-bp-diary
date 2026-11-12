@@ -11,7 +11,7 @@ from bot import keyboards, texts
 from bot.models import Medication
 
 #: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
-KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm", "ap"}
+KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm", "ap", "prof"}
 
 CALLBACK_RE = re.compile(r"^(?P<area>[a-z]+):(?P<action>[a-z0-9_-]+)(?::(?P<value>.*))?$")
 
@@ -130,6 +130,57 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("doctor_kb_pending", keyboards.doctor_kb([(1, "doc@example.org", "pending")])),
         ("doctor_kb_revoked", keyboards.doctor_kb([(1, "doc@example.org", "revoked")])),
         ("doctor_kb_empty", keyboards.doctor_kb([])),
+        # 0.5.10 (§11): крупный режим, шаг онбординга UI, визиты и пагинация.
+        ("keypad_kb_large", keyboards.keypad_kb("1", allow_skip=True, large=True)),
+        ("medication_taken_kb_large", keyboards.medication_taken_kb(large=True)),
+        ("feeling_kb_large", keyboards.feeling_kb(large=True)),
+        ("archive_date_kb_large", keyboards.archive_date_kb(large=True)),
+        ("archive_medication_taken_kb_large", keyboards.archive_medication_taken_kb(large=True)),
+        ("archive_feeling_kb_large", keyboards.archive_feeling_kb(large=True)),
+        ("stats_period_kb_large", keyboards.stats_period_kb(large=True)),
+        ("profile_sex_kb", keyboards.profile_sex_kb()),
+        ("profile_sex_kb_large", keyboards.profile_sex_kb(large=True)),
+        ("doctor_invite_kb_large", keyboards.doctor_invite_kb("A" * 22, large=True)),
+        ("doctor_registered_kb_large", keyboards.doctor_registered_kb(large=True)),
+        ("pause_kb_large", keyboards.pause_kb(False, large=True)),
+        ("dosage_kb_large", keyboards.dosage_kb(large=True)),
+        ("remeasure_kb_large", keyboards.remeasure_kb(5, large=True)),
+        ("onboarding_ui_kb", keyboards.onboarding_ui_kb()),
+        ("onboarding_ui_kb_selected", keyboards.onboarding_ui_kb("1")),
+        ("slot_message_kb_large", keyboards.slot_message_kb("morning", date(2026, 11, 10), True, "both", large=True)),
+        ("slot_message_kb_meds", keyboards.slot_message_kb("morning", date(2026, 11, 10), True, "meds")),
+        ("slot_message_kb_meds_large", keyboards.slot_message_kb("morning", date(2026, 11, 10), True, "meds", large=True)),
+        ("slot_message_kb_pressure", keyboards.slot_message_kb("morning", date(2026, 11, 10), False, "pressure")),
+        ("stats_days_kb_large", keyboards.stats_days_kb("7", large=True, total=12, limit=5)),
+        ("stats_days_kb_custom_large", keyboards.stats_days_kb("20261101:20261115", large=True, total=12, limit=5)),
+        ("doctor_patients_kb_large", keyboards.doctor_patients_kb([(1, "Пациент 1"), (2, "Пациент 2")], large=True, limit=5)),
+        ("stats_calendar_kb_large", keyboards.stats_calendar_kb(2026, 11, date(2026, 11, 10), large=True)),
+        ("ap_list_kb", keyboards.ap_list_kb([(1, "Терапевт")], has_past=True)),
+        ("ap_list_kb_large", keyboards.ap_list_kb([(1, "Терапевт"), (2, "Кардиолог")], has_past=True, large=True, limit=5)),
+        ("ap_past_kb", keyboards.ap_past_kb([(1, "Терапевт")])),
+        ("ap_past_kb_large", keyboards.ap_past_kb([(1, "Терапевт"), (2, "Кардиолог")], large=True, limit=5)),
+        ("ap_kind_kb", keyboards.ap_kind_kb()),
+        ("ap_title_kb", keyboards.ap_title_kb("doctor")),
+        ("ap_calendar_kb", keyboards.ap_calendar_kb(2026, 11, date(2026, 11, 10), date(2028, 11, 10), "ap:add")),
+        ("ap_calendar_kb_large", keyboards.ap_calendar_kb(2026, 11, date(2026, 11, 10), date(2028, 11, 10), "ap:add", large=True)),
+        ("ap_time_kb", keyboards.ap_time_kb("ap:add")),
+        ("ap_note_kb", keyboards.ap_note_kb("ap:add")),
+        ("ap_note_kb_clear", keyboards.ap_note_kb("ap:add", clear_id=3)),
+        ("ap_back_kb", keyboards.ap_back_kb()),
+        ("ap_done_kb", keyboards.ap_done_kb()),
+        ("ap_done_kb_large", keyboards.ap_done_kb(large=True)),
+        ("ap_after_kb", keyboards.ap_after_kb(5, "doctor")),
+        ("ap_after_kb_large", keyboards.ap_after_kb(5, "lab", large=True)),
+        ("ap_notice_kb_doctor", keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True)),
+        ("ap_notice_kb_doctor_large", keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True, large=True)),
+        ("ap_notice_kb_lab", keyboards.ap_notice_kb(5, "lab", "soon")),
+        ("ap_notice_kb_after", keyboards.ap_notice_kb(5, "exam", "after")),
+        ("ap_card_kb", keyboards.ap_card_kb(5, "doctor", "upcoming", "ap:list")),
+        ("ap_edit_kb", keyboards.ap_edit_kb(5)),
+        ("ap_confirm_kb", keyboards.ap_confirm_kb("Да, удалить", "ap:del:5:ok", "ap:open:5")),
+        ("ap_confirm_kb_large", keyboards.ap_confirm_kb("Да, удалить", "ap:del:5:ok", "ap:open:5", large=True)),
+        ("ap_next_kb", keyboards.ap_next_kb(5)),
+        ("ap_next_kb_large", keyboards.ap_next_kb(5, large=True)),
     ]
 
 
@@ -454,6 +505,7 @@ class TestSettingsKeyboards:
     def test_settings_menu_items(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.settings_kb())}
         assert data == {
+            "set:ui:1",
             "set:targets",
             "set:reminders",
             "set:meds",
@@ -467,6 +519,18 @@ class TestSettingsKeyboards:
             "set:delete",
             "menu:back",
         }
+
+    def test_ui_mode_toggle_first_row(self) -> None:
+        """Переключатель «👁 Крупный режим» — первая строка настроек (§6.6, UI7)."""
+        for ui_large, state, callback in (
+            (False, texts.UI_MODE_OFF, "set:ui:1"),
+            (True, texts.UI_MODE_ON, "set:ui:0"),
+        ):
+            markup = keyboards.settings_kb(ui_large)
+            first = markup.inline_keyboard[0]
+            assert len(first) == 1
+            assert first[0].callback_data == callback
+            assert first[0].text == texts.BTN_UI_MODE.format(state=state)
 
     def test_targets_presets(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.targets_kb())}
@@ -878,18 +942,24 @@ class TestStatsCalendar:
         assert days == [str(d) for d in range(1, 31)]
         # Будущие дни кликабельны (проверка — на сервере).
         assert any(b.callback_data == "stats:day:20261130" for week in weeks for b in week)
-        # Текущий месяц: только «◀».
-        assert [(b.text, b.callback_data) for b in rows[-2]] == [("◀", "stats:cal:202610")]
+        # Текущий месяц: только «◀» (навигация — `stats:cal:m:`, UI12).
+        assert [(b.text, b.callback_data) for b in rows[-2]] == [("◀", "stats:cal:m:202610")]
         assert rows[-1][0].callback_data == "stats:periods"
 
     def test_past_month_has_next(self) -> None:
         rows = self.rows(keyboards.stats_calendar_kb(2026, 1, self.TODAY))
-        assert [b.callback_data for b in rows[-2]] == ["stats:cal:202512", "stats:cal:202602"]
+        assert [b.callback_data for b in rows[-2]] == [
+            "stats:cal:m:202512",
+            "stats:cal:m:202602",
+        ]
         assert rows[0][0].text == "Январь 2026"
 
     def test_december_next_is_january(self) -> None:
         rows = self.rows(keyboards.stats_calendar_kb(2025, 12, self.TODAY))
-        assert [b.callback_data for b in rows[-2]] == ["stats:cal:202511", "stats:cal:202601"]
+        assert [b.callback_data for b in rows[-2]] == [
+            "stats:cal:m:202511",
+            "stats:cal:m:202601",
+        ]
 
     def test_step2_marks_start_and_keeps_it(self) -> None:
         start = date(2026, 10, 3)
@@ -899,8 +969,8 @@ class TestStatsCalendar:
         assert days["15"] == "stats:day:20261003:20261015"
         assert "3" not in days
         assert [b.callback_data for b in rows[-2]] == [
-            "stats:cal:202609:20261003",
-            "stats:cal:202611:20261003",
+            "stats:cal:m:202609:20261003",
+            "stats:cal:m:202611:20261003",
         ]
 
     def test_step2_other_month_no_mark(self) -> None:
@@ -977,3 +1047,282 @@ class TestReminderSettings056:
         assert free == ["set:rem:pause:1", "set:rem:pause:3", "set:rem:pause:7", "set:reminders"]
         paused = [b.callback_data for row in keyboards.pause_kb(True).inline_keyboard for b in row]
         assert "set:rem:pause:off" in paused
+
+
+# ─────────────── Канон §11 (0.5.10): пары, сетки, пагинация ───────────────
+
+
+def _pair_case_list() -> list[tuple[str, InlineKeyboardMarkup, InlineKeyboardMarkup, tuple[tuple[str, str], ...]]]:
+    """Словарь пар §11: (имя, обычный, крупный, пары подписей).
+
+    Слот-сообщения, повтор замера и уведомления о визите — со всеми
+    ветками режимов/типов из §11.
+    """
+    day = date(2026, 11, 10)
+    return [
+        (
+            "Да/Нет (лекарство)",
+            keyboards.medication_taken_kb(),
+            keyboards.medication_taken_kb(large=True),
+            ((texts.BTN_MED_YES, texts.BTN_MED_NO),),
+        ),
+        (
+            "Да/Нет (архив)",
+            keyboards.archive_medication_taken_kb(),
+            keyboards.archive_medication_taken_kb(large=True),
+            ((texts.BTN_MED_YES, texts.BTN_MED_NO),),
+        ),
+        (
+            "Да/Нет (подтверждение)",
+            keyboards.ap_confirm_kb("Да, удалить", "ap:del:5:ok", "ap:open:5"),
+            keyboards.ap_confirm_kb("Да, удалить", "ap:del:5:ok", "ap:open:5", large=True),
+            (("Да, удалить", texts.BTN_AP_NO),),
+        ),
+        (
+            "Готово/Пропустить (калькулятор)",
+            keyboards.keypad_kb("", allow_skip=True),
+            keyboards.keypad_kb("", allow_skip=True, large=True),
+            ((texts.BTN_DONE, texts.BTN_SKIP),),
+        ),
+        (
+            "Мужской/Женский",
+            keyboards.profile_sex_kb(),
+            keyboards.profile_sex_kb(large=True),
+            ((texts.BTN_SEX_MALE, texts.BTN_SEX_FEMALE),),
+        ),
+        (
+            "Принять/Отклонить",
+            keyboards.doctor_invite_kb("code"),
+            keyboards.doctor_invite_kb("code", large=True),
+            ((texts.BTN_ACCEPT, texts.BTN_DECLINE),),
+        ),
+        (
+            "7 дней/30 дней",
+            keyboards.stats_period_kb(),
+            keyboards.stats_period_kb(large=True),
+            ((texts.BTN_7_DAYS, texts.BTN_30_DAYS),),
+        ),
+        (
+            "Слот-сообщение (давление и лекарства)",
+            keyboards.slot_message_kb("morning", day, True, "both"),
+            keyboards.slot_message_kb("morning", day, True, "both", large=True),
+            ((texts.BTN_MEASURE, texts.BTN_TAKE_ALL), (texts.BTN_PARTIAL, texts.BTN_SNOOZE_30)),
+        ),
+        (
+            "Слот-сообщение (только лекарства)",
+            keyboards.slot_message_kb("morning", day, True, "meds"),
+            keyboards.slot_message_kb("morning", day, True, "meds", large=True),
+            ((texts.BTN_TAKE_ALL, texts.BTN_PARTIAL),),
+        ),
+        (
+            "Повтор замера 2+1",
+            keyboards.remeasure_kb(5),
+            keyboards.remeasure_kb(5, large=True),
+            ((texts.BTN_REMEASURE_NOW, texts.BTN_SNOOZE_30),),
+        ),
+        (
+            "Уведомление о визите (doctor)",
+            keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True),
+            keyboards.ap_notice_kb(5, "doctor", "eve", with_doctor=True, large=True),
+            ((texts.BTN_AP_SEEN, texts.BTN_AP_MOVE), (texts.BTN_AP_CANCEL["doctor"], texts.BTN_AP_REPORT)),
+        ),
+        (
+            "Уведомление об анализах (lab)",
+            keyboards.ap_notice_kb(5, "lab", "soon"),
+            keyboards.ap_notice_kb(5, "lab", "soon", large=True),
+            ((texts.BTN_AP_SEEN, texts.BTN_AP_MOVE),),
+        ),
+    ]
+
+
+class TestPairsDictionary11:
+    """Пары из словаря §11: в обычном режиме в ряд, в крупном разъезжаются (UI6.1)."""
+
+    @staticmethod
+    def _rows(markup: InlineKeyboardMarkup) -> list[list[str]]:
+        return [[button.text for button in row] for row in markup.inline_keyboard]
+
+    @pytest.mark.parametrize(
+        ("name", "regular", "large", "pairs"),
+        _pair_case_list(),
+        ids=lambda value: value if isinstance(value, str) else "",
+    )
+    def test_pairs_row_regular_single_large(
+        self,
+        name: str,
+        regular: InlineKeyboardMarkup,
+        large: InlineKeyboardMarkup,
+        pairs: tuple[tuple[str, str], ...],
+    ) -> None:
+        regular_rows, large_rows = self._rows(regular), self._rows(large)
+        for first, second in pairs:
+            left = next(row for row in regular_rows if first in row)
+            right = next(row for row in regular_rows if second in row)
+            assert left is right and len(left) == 2, f"{name}: пара {first!r}/{second!r} не в одном ряду"
+            big_left = next(row for row in large_rows if first in row)
+            big_right = next(row for row in large_rows if second in row)
+            assert big_left is not big_right, f"{name}: пара не разъехалась в крупном"
+            assert len(big_left) == len(big_right) == 1, f"{name}: кнопка не одна в строке"
+
+    def test_remeasure_alone_button(self) -> None:
+        """«Больше не напоминать» — отдельной строкой в обоих режимах (2+1, §11)."""
+        for markup in (keyboards.remeasure_kb(5), keyboards.remeasure_kb(5, large=True)):
+            row = next(row for row in self._rows(markup) if texts.BTN_REMEASURE_OFF in row)
+            assert len(row) == 1
+
+    def test_slot_skip_alone_button(self) -> None:
+        """«Пропускаю сегодня» — отдельно от пар (мокап 2.4)."""
+        day = date(2026, 11, 10)
+        for markup in (
+            keyboards.slot_message_kb("morning", day, True, "both"),
+            keyboards.slot_message_kb("morning", day, True, "meds"),
+        ):
+            row = next(row for row in self._rows(markup) if texts.BTN_SKIP_SLOT in row)
+            assert len(row) == 1
+
+
+class TestLayoutExceptions11:
+    """Исключения §11: калькулятор, календари и сетки времени не схлопываются."""
+
+    def test_keypad_columns_both_modes(self) -> None:
+        regular = keyboards.keypad_kb("", allow_skip=False)
+        assert [len(row) for row in regular.inline_keyboard[:4]] == [3, 3, 3, 3]
+        large = keyboards.keypad_kb("", allow_skip=False, large=True)
+        assert [len(row) for row in large.inline_keyboard[:6]] == [2, 2, 2, 2, 2, 2]
+
+    def test_time_grids_keep_columns(self) -> None:
+        """Сетки времени — 3–4 кнопки в ряд, правилу «по одной» не подчиняются."""
+        ap_rows = keyboards.ap_time_kb("ap:add").inline_keyboard
+        assert [len(row) for row in ap_rows[:3]] == [4, 4, 4]  # 07:00…18:00
+        assert len(keyboards.slot_time_kb("morning").inline_keyboard[0]) == 3
+        assert len(keyboards.archive_time_kb().inline_keyboard[0]) == 3
+
+    def test_calendars_keep_week_grid(self) -> None:
+        """Сетка месяца — 7 колонок (обычный режим, §6.5/§6.13)."""
+        stats = keyboards.stats_calendar_kb(2026, 11, date(2026, 11, 10)).inline_keyboard
+        assert len(stats[1]) == 7  # «Пн»…«Вс»
+        assert all(len(row) == 7 for row in stats[2:-2])
+        ap = keyboards.ap_calendar_kb(
+            2026, 11, date(2026, 11, 10), date(2028, 11, 10), "ap:add"
+        ).inline_keyboard
+        assert len(ap[1]) == 7
+        assert all(len(row) == 7 for row in ap[2:-2])
+
+
+class TestShowMoreLabel11:
+    """Подпись «Показать ещё {min(5, N − limit)}» (UI13, §8)."""
+
+    @pytest.mark.parametrize(
+        ("total", "limit", "expected"),
+        [(12, 5, "Показать ещё 5"), (7, 5, "Показать ещё 2"), (6, 5, "Показать ещё 1")],
+    )
+    def test_label_is_min(self, total: int, limit: int, expected: str) -> None:
+        more = keyboards.show_more_button("x:10", total, limit)
+        assert more is not None and more.text == expected
+
+    def test_absent_when_shown_all(self) -> None:
+        assert keyboards.show_more_button("x:10", 10, 10) is None
+        assert keyboards.show_more_button("x:10", 3, 5) is None
+
+    @pytest.mark.parametrize(
+        ("markup", "expected_data"),
+        [
+            (keyboards.stats_days_kb("7", large=True, total=12, limit=5), "stats:days:7:10"),
+            (
+                keyboards.stats_days_kb("20261101:20261115", large=True, total=12, limit=5),
+                "stats:days:20261101:20261115:10",
+            ),
+            (
+                keyboards.doctor_patients_kb(
+                    [(index, f"Пациент {index}") for index in range(1, 13)], large=True, limit=5
+                ),
+                "doc:patients:10",
+            ),
+            (
+                keyboards.ap_list_kb(
+                    [(index, f"Визит {index}") for index in range(1, 13)],
+                    has_past=True,
+                    large=True,
+                    limit=5,
+                ),
+                "ap:list:10",
+            ),
+            (
+                keyboards.ap_past_kb(
+                    [(index, f"Визит {index}") for index in range(1, 21)], large=True, limit=15
+                ),
+                "ap:past:20",
+            ),
+        ],
+    )
+    def test_builders_carry_next_limit(
+        self, markup: InlineKeyboardMarkup, expected_data: str
+    ) -> None:
+        more = [
+            button
+            for row in markup.inline_keyboard
+            for button in row
+            if button.text.startswith("Показать ещё")
+        ]
+        assert len(more) == 1
+        assert more[0].callback_data == expected_data
+
+    def test_regular_mode_without_show_more(self) -> None:
+        items = [(index, f"Визит {index}") for index in range(1, 13)]
+        for markup in (
+            keyboards.stats_days_kb("7", total=12, limit=5),
+            keyboards.doctor_patients_kb(items, limit=5),
+            keyboards.ap_list_kb(items, has_past=True, limit=5),
+        ):
+            assert not any(
+                button.text.startswith("Показать ещё")
+                for row in markup.inline_keyboard
+                for button in row
+            )
+
+
+class TestCallbackData0510:
+    """callback_data новых клавиатур 0.5.10: ≤ 64 байт, длиннейшая — `stats:days:…`."""
+
+    def test_pagination_callbacks_fit(self) -> None:
+        # Длиннейшая callback_data пагинации 0.5.10 (§13) — 30 байт из 64.
+        longest = "stats:days:20261101:20261115:10"
+        assert len(longest.encode("utf-8")) <= keyboards.CALLBACK_DATA_LIMIT
+
+    def test_longest_of_pagination_family(self) -> None:
+        family = [
+            keyboards.stats_days_kb("7", large=True, total=12, limit=5),
+            keyboards.stats_days_kb("20261101:20261115", large=True, total=12, limit=5),
+            keyboards.doctor_patients_kb(
+                [(index, f"Пациент {index}") for index in range(1, 13)], large=True, limit=5
+            ),
+            keyboards.ap_list_kb(
+                [(index, f"Визит {index}") for index in range(1, 13)],
+                has_past=True,
+                large=True,
+                limit=5,
+            ),
+            keyboards.ap_past_kb(
+                [(index, f"Визит {index}") for index in range(1, 21)], large=True, limit=15
+            ),
+        ]
+        data = [
+            button.callback_data
+            for markup in family
+            for row in markup.inline_keyboard
+            for button in row
+            if button.callback_data
+        ]
+        assert max(data, key=len) == "stats:days:20261101:20261115:10"
+
+    @pytest.mark.parametrize(
+        ("name", "markup"),
+        all_keyboards(),
+        ids=lambda value: value if isinstance(value, str) else "",
+    )
+    def test_all_new_keyboards_fit_limit(self, name: str, markup: InlineKeyboardMarkup) -> None:
+        for button in callback_buttons(markup):
+            assert button.callback_data is not None
+            assert (
+                len(button.callback_data.encode("utf-8")) <= keyboards.CALLBACK_DATA_LIMIT
+            ), f"{name}: слишком длинная callback_data {button.callback_data!r}"

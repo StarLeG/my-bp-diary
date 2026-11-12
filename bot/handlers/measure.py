@@ -131,17 +131,33 @@ def _buf_add(buf: str, digit: str) -> str:
 
 
 async def _send(
-    message: Message, text: str, markup: InlineKeyboardMarkup, *, via_message: bool
+    message: Message,
+    text: str,
+    markup: InlineKeyboardMarkup,
+    *,
+    via_message: bool,
+    html: bool = False,
 ) -> None:
-    """Отправить экран: свободный ввод — новым сообщением, кнопки — редактированием."""
+    """Отправить экран: свободный ввод — новым сообщением, кнопки — редактированием.
+
+    `html` — в тексте есть теги (шапки, `<b>` значений в крупном): parse mode
+    точечный (UI5), обычный режим остаётся plain text.
+    """
+    parse_mode = "HTML" if html else None
     if via_message:
-        await message.answer(text, reply_markup=markup)
+        await message.answer(text, reply_markup=markup, parse_mode=parse_mode)
     else:
-        await message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+        await message.edit_text(  # type: ignore[union-attr]
+            text, reply_markup=markup, parse_mode=parse_mode
+        )
 
 
 async def _show_keypad(
-    message: Message, state: FSMContext, *, via_message: bool = False
+    message: Message,
+    state: FSMContext,
+    *,
+    via_message: bool = False,
+    large: bool = False,
 ) -> None:
     """Показать экран текущего шага с текущим буфером (§6.3)."""
     current = await state.get_state()
@@ -151,7 +167,7 @@ async def _show_keypad(
     await _send(
         message,
         texts.fmt_keypad_prompt(field.question, buf),
-        keyboards.keypad_kb(buf, allow_skip=field.allow_skip),
+        keyboards.keypad_kb(buf, allow_skip=field.allow_skip, large=large),
         via_message=via_message,
     )
 
@@ -163,30 +179,47 @@ def _saved_markup(data: dict[str, Any]) -> InlineKeyboardMarkup:
     return keyboards.saved_kb()
 
 
-def _summary_screen(data: dict[str, Any]) -> tuple[str, InlineKeyboardMarkup]:
+def _summary_screen(
+    data: dict[str, Any], *, large: bool = False
+) -> tuple[str, InlineKeyboardMarkup]:
     """Экран сводки: обычный режим или архив (§6.3, §6.10).
 
     Архив (`M_ARCH_TS`) — заголовок «✅ Записано за …» и кнопки `m:arch:*`;
     правка (`M_EDIT_ID`) — «✅ Обновлено»; у архивной правки остаются кнопки
-    архива («➕ Ещё запись» и «В меню» — свои).
+    архива («➕ Ещё запись» и «В меню» — свои). В крупном — значения `<b>`
+    (UI4, мокап 2.3).
     """
     is_archive = data.get(M_ARCH_TS) is not None
     markup = _saved_markup(data)
     if data.get(M_EDIT_ID) is not None:
-        text = texts.fmt_updated(data[M_SYS], data[M_DIA], data.get(M_PULSE))
+        text = texts.fmt_updated(
+            data[M_SYS], data[M_DIA], data.get(M_PULSE), large=large
+        )
     elif is_archive:
         text = texts.fmt_archive_saved(
-            data.get(M_ARCH_LABEL, ""), data[M_SYS], data[M_DIA], data.get(M_PULSE)
+            data.get(M_ARCH_LABEL, ""),
+            data[M_SYS],
+            data[M_DIA],
+            data.get(M_PULSE),
+            large=large,
         )
     else:
-        text = texts.fmt_saved(data[M_SYS], data[M_DIA], data.get(M_PULSE))
+        text = texts.fmt_saved(
+            data[M_SYS], data[M_DIA], data.get(M_PULSE), large=large
+        )
     return text, markup
 
 
-async def _hub(message: Message, data: dict[str, Any], *, via_message: bool = False) -> None:
+async def _hub(
+    message: Message,
+    data: dict[str, Any],
+    *,
+    via_message: bool = False,
+    large: bool = False,
+) -> None:
     """Вернуть сводку с кнопками опциональных шагов (повторное открытие)."""
-    text, markup = _summary_screen(data)
-    await _send(message, text, markup, via_message=via_message)
+    text, markup = _summary_screen(data, large=large)
+    await _send(message, text, markup, via_message=via_message, html=large)
 
 
 async def _to_menu(callback: CallbackQuery) -> None:
@@ -207,7 +240,9 @@ async def _measurement_id(callback: CallbackQuery, state: FSMContext) -> Optiona
     return measurement_id
 
 
-async def _archive_guard(callback: CallbackQuery, state: FSMContext) -> bool:
+async def _archive_guard(
+    callback: CallbackQuery, state: FSMContext, *, large: bool = False
+) -> bool:
     """Устаревшая кнопка обычной сводки при архивном черновике (§6.10).
 
     «Приняли лекарство?» обычной сводки планирует повторный замер и пишет
@@ -218,7 +253,7 @@ async def _archive_guard(callback: CallbackQuery, state: FSMContext) -> bool:
     data = await state.get_data()
     if data.get(M_ARCH_TS) is None:
         return False
-    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await _hub(callback.message, data, large=large)  # type: ignore[arg-type]
     await callback.answer()
     return True
 
@@ -254,15 +289,16 @@ async def _advance(
     telegram_id: int,
     *,
     via_message: bool = False,
+    large: bool = False,
 ) -> None:
     """После подтверждения значения: следующий шаг калькулятора или сохранение."""
     current = await state.get_state()
     if current == MeasureInput.sys_input.state:
         await state.set_state(MeasureInput.dia_input)
-        await _show_keypad(message, state, via_message=via_message)
+        await _show_keypad(message, state, via_message=via_message, large=large)
     elif current == MeasureInput.dia_input.state:
         await state.set_state(MeasureInput.pulse_input)
-        await _show_keypad(message, state, via_message=via_message)
+        await _show_keypad(message, state, via_message=via_message, large=large)
     else:  # pulse_input — сохранение сразу после пульса (§6.3)
         await state.set_state(None)
         await _save(message, state, session, telegram_id, via_message=via_message)
@@ -286,20 +322,22 @@ async def cb_measure_begin(
     напоминание слота: повтор «если не ответил» отменяется.
     """
     parts = (callback.data or "").split(":")
-    if (
-        len(parts) >= 3
-        and parts[1] == "write"
-        and parts[2] in keyboards.SLOT_ORDER
-        and session is not None
-        and reminders is not None
-    ):
+    large = False
+    if session is not None:
         user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-        await session.commit()
-        await reminders.cancel_followup(user.id, parts[2])
+        large = user.ui_large
+        if (
+            len(parts) >= 3
+            and parts[1] == "write"
+            and parts[2] in keyboards.SLOT_ORDER
+            and reminders is not None
+        ):
+            await session.commit()
+            await reminders.cancel_followup(user.id, parts[2])
     await state.clear()
     await state.set_state(MeasureInput.sys_input)
     await state.update_data(**{M_BUF: ""})
-    await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+    await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -335,7 +373,7 @@ async def cb_edit_begin(
     await state.update_data(
         **{M_EDIT_ID: measurement.id, M_ID: measurement.id, M_BUF: ""}
     )
-    await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+    await _show_keypad(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -360,19 +398,21 @@ async def cb_keypad(
     if field is None:
         await _to_menu(callback)  # устаревшие кнопки без черновика
         return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    large = user.ui_large
     data = await state.get_data()
     buf = data.get(M_BUF, "")
     if action.isdigit():
         buf = _buf_add(buf, action)
         await state.update_data(**{M_BUF: buf})
-        await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+        await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
     elif action == "bksp":
         buf = buf[:-1]
         await state.update_data(**{M_BUF: buf})
-        await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+        await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
     elif action == "clear":
         await state.update_data(**{M_BUF: ""})
-        await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+        await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
     elif action == "skip":
         if field.key != M_PULSE:
             await _to_menu(callback)  # «Пропустить» бывает только на пульсе
@@ -383,6 +423,7 @@ async def cb_keypad(
             state,
             session,
             callback.from_user.id,
+            large=large,
         )
     elif action == "ok":
         if not buf:
@@ -397,6 +438,7 @@ async def cb_keypad(
             state,
             session,
             callback.from_user.id,
+            large=large,
         )
     else:
         await _to_menu(callback)  # неизвестное действие — устаревшие кнопки
@@ -413,7 +455,8 @@ async def _msg_value(
         await message.answer(error)  # короткая ошибка, повтор ввода
         return
     tg_id = message.from_user.id  # type: ignore[union-attr]
-    await _advance(message, state, session, tg_id, via_message=True)
+    user = await measurements_service.get_or_create_user(session, tg_id)
+    await _advance(message, state, session, tg_id, via_message=True, large=user.ui_large)
 
 
 @router.message(MeasureInput.sys_input)
@@ -487,10 +530,10 @@ async def _save(
             return
     await session.commit()
     await state.update_data(**{M_ID: measurement.id, M_BUF: ""})
-    text, markup = _summary_screen(data)
+    text, markup = _summary_screen(data, large=user.ui_large)
     if arch_ts is None and (sys_v >= HIGH_SYSTOLIC or dia_v >= HIGH_DIASTOLIC):
         text = f"{text}\n{texts.HIGH_PRESSURE_WARNING}"
-    await _send(message, text, markup, via_message=via_message)
+    await _send(message, text, markup, via_message=via_message, html=user.ui_large)
 
 
 # ─────────────────────────── Заметка ───────────────────────────
@@ -528,14 +571,17 @@ async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -
 
 
 @router.callback_query(F.data == "m:med")
-async def cb_med(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_med(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     """«Приняли лекарство?» обычной сводки (§6.3); при архиве — сводка архива."""
-    if await _archive_guard(callback, state):
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if await _archive_guard(callback, state, large=user.ui_large):
         return
     if await _measurement_id(callback, state) is None:
         return
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MED_ASK, reply_markup=keyboards.medication_taken_kb()
+        texts.MED_ASK, reply_markup=keyboards.medication_taken_kb(user.ui_large)
     )
     await callback.answer()
 
@@ -556,13 +602,13 @@ async def cb_med_yes(
     настроенных лекарств — мягкая подсказка добавить их (один раз).
     Устаревшая кнопка при архивном черновике ничего не планирует (§6.10).
     """
-    if await _archive_guard(callback, state):
+    tg_id = callback.from_user.id
+    user = await measurements_service.get_or_create_user(session, tg_id)
+    if await _archive_guard(callback, state, large=user.ui_large):
         return
     measurement_id = await _measurement_id(callback, state)
     if measurement_id is None:
         return
-    tg_id = callback.from_user.id
-    user = await measurements_service.get_or_create_user(session, tg_id)
     await measurements_service.set_medication_taken(session, user, measurement_id, True)
     await session.commit()
     delay = user.med_remeasure_delay
@@ -619,7 +665,7 @@ async def cb_med_no(
     await measurements_service.set_medication_taken(session, user, measurement_id, False)
     await session.commit()
     data = await state.get_data()
-    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await _hub(callback.message, data, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -656,7 +702,9 @@ async def cb_med_pick(
     Чужой или удалённый id проверяется по владельцу и мягко отклоняется
     (§7.1); экран редактируется на каждое нажатие.
     """
-    if await _archive_guard(callback, state):
+    tg_id = callback.from_user.id
+    user = await measurements_service.get_or_create_user(session, tg_id)
+    if await _archive_guard(callback, state, large=user.ui_large):
         return
     data = await state.get_data()
     if M_ID not in data:
@@ -667,8 +715,6 @@ async def cb_med_pick(
         await _to_menu(callback)
         return
     med_id = int(value)
-    tg_id = callback.from_user.id
-    user = await measurements_service.get_or_create_user(session, tg_id)
     meds = await medications_service.list_medications(session, user)
     if not any(med.id == med_id for med in meds):
         await callback.answer(texts.NOT_YOUR_RECORD)  # чужой id — мягко, без деталей
@@ -702,7 +748,9 @@ async def cb_med_done(
     «💊 Принято: …» + кнопки сводки. При архивном черновике (устаревшая
     кнопка) `medication_logs` не создаются (§6.10).
     """
-    if await _archive_guard(callback, state):
+    tg_id = callback.from_user.id
+    user = await measurements_service.get_or_create_user(session, tg_id)
+    if await _archive_guard(callback, state, large=user.ui_large):
         return
     data = await state.get_data()
     if M_ID not in data:
@@ -712,8 +760,6 @@ async def cb_med_done(
     if not checked:
         await callback.answer(texts.MEDS_INTAKE_EMPTY)  # экран не меняется
         return
-    tg_id = callback.from_user.id
-    user = await measurements_service.get_or_create_user(session, tg_id)
     # Журнал и связи — одним захватом лока приёмов и одной транзакцией (T1, §7.2).
     result = await medications_service.record_manual_intake(
         session, user, data[M_ID], checked
@@ -724,19 +770,24 @@ async def cb_med_done(
         return
     await state.update_data(**{M_MED_CHECKED: []})
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.fmt_meds_intake(result.taken), reply_markup=keyboards.saved_kb()
+        texts.fmt_meds_intake(result.taken, large=user.ui_large),
+        reply_markup=keyboards.saved_kb(),
+        parse_mode="HTML",  # fmt_meds_intake экранирует имена (§11)
     )
     await callback.answer()
 
 
 @router.callback_query(F.data == "m:med:cancel")
-async def cb_med_cancel(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_med_cancel(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     """«Отмена» мультивыбора — назад к сводке без записей (§6.3)."""
     data = await state.get_data()
     if M_ID not in data:
         await _to_menu(callback)
         return
-    await _hub(callback.message, data)  # type: ignore[arg-type]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await _hub(callback.message, data, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -744,11 +795,14 @@ async def cb_med_cancel(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "m:feeling")
-async def cb_feeling(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_feeling(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     if await _measurement_id(callback, state) is None:
         return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.FEELING_ASK, reply_markup=keyboards.feeling_kb()
+        texts.FEELING_ASK, reply_markup=keyboards.feeling_kb(user.ui_large)
     )
     await callback.answer()
 
@@ -769,7 +823,7 @@ async def cb_feeling_set(
     user = await measurements_service.get_or_create_user(session, tg_id)
     await measurements_service.set_feeling(session, user, data[M_ID], feeling)  # type: ignore[arg-type]
     await session.commit()
-    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await _hub(callback.message, data, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -947,7 +1001,7 @@ async def _archive_set_moment(
             M_BUF: "",
         }
     )
-    await _show_keypad(message, state, via_message=via_message)
+    await _show_keypad(message, state, via_message=via_message, large=user.ui_large)
     return None
 
 
@@ -1049,7 +1103,9 @@ async def msg_archive_quick(
 
 
 @router.callback_query(F.data == "m:arch:edit")
-async def cb_arch_edit(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_arch_edit(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     """«✏️ Изменить» архива — правка только что созданной записи (§6.10).
 
     Цель правки — id из контекста сохранения (`M_ID`), а не «последняя» по
@@ -1060,6 +1116,7 @@ async def cb_arch_edit(callback: CallbackQuery, state: FSMContext) -> None:
     if measurement_id is None:
         await _to_menu(callback)
         return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await state.clear()
     await state.set_state(MeasureInput.sys_input)
     await state.update_data(
@@ -1071,7 +1128,7 @@ async def cb_arch_edit(callback: CallbackQuery, state: FSMContext) -> None:
             M_ARCH_LABEL: data.get(M_ARCH_LABEL),
         }
     )
-    await _show_keypad(callback.message, state)  # type: ignore[arg-type]
+    await _show_keypad(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -1088,12 +1145,15 @@ async def cb_arch_note(callback: CallbackQuery, state: FSMContext) -> None:
 
 
 @router.callback_query(F.data == "m:arch:med")
-async def cb_arch_med(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_arch_med(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     """«Приняли лекарство?» архива — только исторический флаг (§6.10)."""
     if await _measurement_id(callback, state) is None:
         return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MED_ASK, reply_markup=keyboards.archive_medication_taken_kb()
+        texts.MED_ASK, reply_markup=keyboards.archive_medication_taken_kb(user.ui_large)
     )
     await callback.answer()
 
@@ -1117,17 +1177,20 @@ async def cb_arch_med_set(
     await measurements_service.set_medication_taken(session, user, measurement_id, value)
     await session.commit()
     data = await state.get_data()
-    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await _hub(callback.message, data, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
 @router.callback_query(F.data == "m:arch:feel")
-async def cb_arch_feel(callback: CallbackQuery, state: FSMContext) -> None:
+async def cb_arch_feel(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
     """«Самочувствие» архива — тот же экран, что в §6.3 (кнопки `m:arch:feel:*`)."""
     if await _measurement_id(callback, state) is None:
         return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.FEELING_ASK, reply_markup=keyboards.archive_feeling_kb()
+        texts.FEELING_ASK, reply_markup=keyboards.archive_feeling_kb(user.ui_large)
     )
     await callback.answer()
 
@@ -1148,7 +1211,7 @@ async def cb_arch_feel_set(
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await measurements_service.set_feeling(session, user, data[M_ID], feeling)  # type: ignore[arg-type]
     await session.commit()
-    await _hub(callback.message, data)  # type: ignore[arg-type]
+    await _hub(callback.message, data, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 

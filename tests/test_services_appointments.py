@@ -360,7 +360,7 @@ class Telegram:
 
 
 def markup_for(calls):
-    def build(appt, notice, with_doctor):
+    def build(appt, notice, with_doctor, large=False):
         calls.append((appt.id, notice, with_doctor))
         return f"kb:{notice}"
     return build
@@ -381,6 +381,23 @@ class TestDeliver:
         row = await reload(session, appt.id)
         assert row.sent_eve_at == eve and row.last_message_id == 501
         assert await deliver(session_factory, tg, eve + timedelta(minutes=1)) == 0
+
+    async def test_markup_receives_ui_large(self, session, user, session_factory) -> None:
+        """Клавиатура уведомления получает `large` из `users.ui_large` (§11)."""
+        await session.execute(update(User).where(User.id == user.id).values(ui_large=True))
+        await session.commit()
+        await add(session, user, starts_on=TODAY + timedelta(days=1))
+        calls: list[bool] = []
+
+        def build(appt, notice, with_doctor, large=False):
+            calls.append(large)
+            return "kb"
+
+        assert (
+            await ap.deliver_due(session_factory, Telegram().send, build, None, now=utc(TODAY, 17, 1))
+            == 1
+        )
+        assert calls == [True]
 
     async def test_future_nothing(self, session, user, session_factory) -> None:
         await add(session, user, starts_on=TODAY + timedelta(days=1))
