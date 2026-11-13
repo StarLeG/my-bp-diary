@@ -48,7 +48,10 @@ Pydantic для валидации, python-dotenv для конфига. Код 
   expires_at — сессии кабинета на 7 дней), `appointments` (user_id, kind: doctor|lab|exam,
   title, starts_on — локальная дата, starts_at — локальное HH:MM или NULL, note,
   status: planned|done|moved|missed|cancelled, sent_eve_at, sent_soon_at, sent_morning_at,
-  sent_after_at, last_message_id, created_at — визиты и анализы, схема — поколение 8).
+  sent_after_at, last_message_id, created_at — визиты и анализы, схема — поколение 8),
+  `appointment_conclusions` (appointment_id FK CASCADE, text 1–4000 — вводит пользователь,
+  распознавания нет, photo_file_id — только Telegram `file_id`, файла на сервере нет,
+  created_at — заключения к визитам, до 5 на событие, схема — поколение 10).
   Расписание ежедневных напоминаний живёт только в `reminders` (слоты morning/noon/evening +
   med_remeasure; полей `users.reminder_*` нет); уведомления о визитах — по строкам
   `appointments`, без job'ов на событие.
