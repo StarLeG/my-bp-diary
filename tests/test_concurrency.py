@@ -1321,20 +1321,25 @@ class TestParallelConclusions:
             await session.commit()
 
     async def test_double_delete_conclusion(self, session_factory, user: DbUser) -> None:
-        """Двойное удаление заключения — одно (§7.2)."""
+        """Двойное удаление заключения — одно (§7.2).
+
+        Детерминированное чередование (приём проекта для гонок): обе сессии
+        читают строку до первого удаления — второе удаление возвращает False.
+        """
         appt_id = await self._appointment(session_factory, user)
         async with session_factory() as session:
             conc_id = await appointments_service.add_conclusion(session, appt_id, "Текст")
             await session.commit()
 
-        async def remove() -> bool:
-            async with session_factory() as session:
-                row = await session.get(AppointmentConclusion, conc_id)
-                user_row = await session.get(DbUser, user.id)
-                won = await appointments_service.remove_conclusion(session, user_row, row.id)
-                await session.commit()
-                return won
-
-        results = await asyncio.gather(remove(), remove())
-        assert sorted(results) == [False, True]
+        async with session_factory() as first, session_factory() as second:
+            user_a = await first.get(DbUser, user.id)
+            user_b = await second.get(DbUser, user.id)
+            row_a = await first.get(AppointmentConclusion, conc_id)
+            row_b = await second.get(AppointmentConclusion, conc_id)
+            assert row_a is not None and row_b is not None  # обе сессии видят строку
+            won_first = await appointments_service.remove_conclusion(first, user_a, row_a.id)
+            await first.commit()
+            won_second = await appointments_service.remove_conclusion(second, user_b, row_b.id)
+            await second.commit()
+        assert [won_first, won_second] == [True, False]
         assert await count(session_factory, AppointmentConclusion) == 0
