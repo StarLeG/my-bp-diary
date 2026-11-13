@@ -345,6 +345,14 @@ _TG_KEPT_BOTTOM = """
 """
 
 
+#: Хвост диалога для диагностики: тексты последних пузырей и подписи кнопок.
+_DUMP_LAST = """
+() => [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')]
+        .slice(-3)
+        .map(el => ({text: (el.innerText || '').slice(0, 60),
+                    buttons: [...el.querySelectorAll('.reply-markup-button')].map(b => (b.innerText || '').trim())}))
+"""
+
 #: Номер inline-кнопки последнего сообщения с подписью `label` (-1 — нет).
 _TG_BUTTON_INDEX = """
 (label) => {
@@ -359,6 +367,21 @@ _TG_BUTTON_INDEX = """
 }
 """
 
+#: Как `_TG_BUTTON_INDEX`, но поиск по вхождению подписи — для кнопок с
+#: динамической датой («🩺 Кардиолог · ДД.ММ»).
+_TG_BUTTON_INDEX_CONTAINS = """
+(label) => {
+  const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
+  const text = el => { const c = el.cloneNode(true);
+    c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
+    return strip(c.textContent); };
+  const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
+  if (!all.length) return -1;
+  const buttons = [...all[all.length - 1].querySelectorAll('.reply-markup-button')];
+  return buttons.findIndex(b => text(b).includes(strip(label)));
+}
+"""
+
 
 class TelegramDialog:
     """Диалог с тестовым ботом в Telegram Web K: отправка, нажатия, ожидание, кадр."""
@@ -370,10 +393,21 @@ class TelegramDialog:
         return self.page.locator("#column-center .bubbles-inner .bubble:not(.is-date)").last
 
     def wait_text(self, text: str, timeout: int = 30_000) -> None:
-        """Дождаться последнего пузыря с текстом (ответ бота или правка сообщения)."""
+        """Дождаться последнего пузыря с текстом (ответ бота или правка сообщения).
+
+        Сверка — по тексту с подстановкой `alt` картинок (эмодзи Telegram Web
+        рисует картинками, и «🗂 Прошедшие» в `innerText` выглядит как
+        «Прошедшие») и со схлопыванием пробелов — как у поиска кнопок.
+        """
         self.page.wait_for_function(
-            """(t) => { const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
-                        return all.length && all[all.length - 1].innerText.includes(t); }""",
+            """(t) => {
+                 const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
+                 const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
+                 if (!all.length) return false;
+                 const c = all[all.length - 1].cloneNode(true);
+                 c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
+                 return strip(c.textContent).includes(strip(t));
+               }""",
             arg=text, timeout=timeout,
             # Опрос раз в 0,5 с, а не на каждом кадре: за 10 минут ожидания
             # напоминания опрос по requestAnimationFrame ронял вкладку Telegram Web.
@@ -405,6 +439,38 @@ class TelegramDialog:
         if index < 0:
             raise AssertionError(f"нет кнопки {label!r} в последнем сообщении")
         self.last().locator(".reply-markup-button").nth(index).click()
+
+    def tap_contains(self, label: str) -> None:
+        """Нажать inline-кнопку последнего сообщения, содержащую `label`.
+
+        Для кнопок с динамической подписью («🩺 Кардиолог · ДД.ММ») точный
+        `tap` неприменим. Пауза перед нажатием — как у `tap` (антидребезг).
+        """
+        self.page.wait_for_timeout(1300)
+        index = -1
+        for _ in range(60):
+            index = self.page.evaluate(_TG_BUTTON_INDEX_CONTAINS, label)
+            if index >= 0:
+                break
+            self.page.wait_for_timeout(500)
+        if index < 0:
+            raise AssertionError(
+                f"нет кнопки с текстом {label!r} в последнем сообщении; "
+                f"хвост: {self.page.evaluate(_DUMP_LAST)}"
+            )
+        self.last().locator(".reply-markup-button").nth(index).click()
+
+    def bottom(self) -> None:
+        """К низу чата перед поиском кнопок.
+
+        Telegram Web виртуализует список сообщений: после `shot()` хвост может
+        выпасть из DOM, и поиск кнопок в последнем пузыре не найдёт ничего.
+        """
+        go_down = self.page.locator("#column-center .bubbles-go-down")
+        if go_down.count() and go_down.first.is_visible():
+            go_down.first.click()
+        self.page.evaluate(_TG_SCROLL_BOTTOM)
+        self.page.wait_for_timeout(1500)
 
     def shot(self, name: str, keep: int, gap: int = 28) -> None:
         """Кадр: шапка чата + последние `keep` пузырей, без поля ввода.
@@ -466,14 +532,45 @@ class TelegramDialog:
 CUSTOM_PERIOD_DAYS = 14
 
 
-def shoot_bot(bot_username: str, stats_only: bool = False, visits_only: bool = False) -> None:
+def _ensure_history(page) -> None:
+    """Дождаться загрузки истории диалога; застрявшую загрузку лечим перезагрузкой.
+
+    Telegram Web иногда зависает на спиннере истории на десятки минут (проверено
+    2026-11-14): `wait_for_function` кадров не дождётся. Перезагрузка страницы
+    помогает — сессия (`tg_state.json`) сохраняется.
+    """
+    for attempt in range(3):
+        for _ in range(24):
+            if page.evaluate(
+                "() => document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)').length"
+            ):
+                return
+            page.wait_for_timeout(5000)
+        print(f"  история не загрузилась (попытка {attempt + 1}) — перезагрузка…", flush=True)
+        page.reload()
+        page.wait_for_timeout(3000)
+        go_down = page.locator("#column-center .bubbles-go-down")
+        if go_down.count() and go_down.first.is_visible():
+            go_down.first.click()
+            page.wait_for_timeout(1000)
+    raise AssertionError("Telegram Web не загрузил историю диалога")
+
+
+def shoot_bot(
+    bot_username: str,
+    stats_only: bool = False,
+    visits_only: bool = False,
+    conclusion_only: bool = False,
+) -> None:
     """Кадры бота в Telegram Web (P1 А): узкое окно — только диалог.
 
     `stats_only` — только статистика: сводка, «По дням», календарь своего
     периода (без ожидания напоминания и записи давления).
-    `visits_only` — только «Визиты и анализы» (0.5.8): напоминание накануне и
-    список (демо-БД собрана с `demo_data --visits`, eve-напоминание приходит
-    ближайшим тиком бота после запуска).
+    `visits_only` — «Визиты и анализы» (0.5.8): напоминание накануне, список и
+    «Заключение врача» (демо-БД собрана с `demo_data --visits`, eve-напоминание
+    приходит ближайшим тиком бота после запуска).
+    `conclusion_only` — только «Заключение врача» (0.5.11), без ожидания
+    напоминания (для повторных прогонов кадра).
     """
     from datetime import datetime, timedelta
     from zoneinfo import ZoneInfo
@@ -505,8 +602,39 @@ def shoot_bot(bot_username: str, stats_only: bool = False, visits_only: bool = F
         # истории в DOM не подгружен и wait_text не видит уже пришедшее сообщение.
         page.evaluate(_TG_SCROLL_BOTTOM)
         page.wait_for_timeout(2000)
+        _ensure_history(page)
         dialog = TelegramDialog(page)
         print("Бот:")
+
+        def conclusion_frame() -> None:
+            """Кадр «Заключение врача» (0.5.11): Прошедшие → карточка → заключения.
+
+            Скриншот снимается из любого состояния чата: сначала навигация до
+            списка «Скоро» (`/start` → «Визиты и анализы»). Перед каждым
+            нажатием — к низу чата: Web виртуализует список, и после `shot()`
+            хвост сообщений может выпасть из DOM.
+            """
+            dialog.send("/start")
+            dialog.wait_text(texts.BTN_MEASURE)
+            dialog.tap(texts.BTN_APPOINTMENTS)
+            dialog.wait_text(texts.AP_SOON)
+            dialog.bottom()
+            dialog.tap_contains("Прошедшие")
+            dialog.wait_text(texts.AP_PAST_HEADER)
+            dialog.bottom()
+            dialog.tap_contains("Кардиолог · ")
+            dialog.wait_text("Статус: был(а)")
+            dialog.bottom()
+            dialog.tap_contains("Заключение врача")
+            dialog.wait_text("1. «")
+            dialog.shot("bot-conclusion", keep=1)
+
+        if conclusion_only:
+            # Только «Заключение врача» — без ожидания напоминания и без
+            # кадров «Визиты и анализы» (требует свежей демо-БД с `--visits`).
+            conclusion_frame()
+            browser.close()
+            return
 
         if visits_only:
             # Напоминание накануне — первым: тик бота шлёт его в любую минуту
@@ -521,6 +649,7 @@ def shoot_bot(bot_username: str, stats_only: bool = False, visits_only: bool = F
             dialog.tap(texts.BTN_APPOINTMENTS)
             dialog.wait_text(texts.AP_SOON)  # эмодзи заголовка в Telegram Web — картинка
             dialog.shot("bot-visits", keep=1)
+            conclusion_frame()
             browser.close()
             return
 
@@ -627,6 +756,10 @@ def main() -> None:
         help="только «Визиты и анализы» (0.5.8): напоминание накануне и список "
              "(демо-БД собрана с `demo_data --visits`)",
     )
+    bot.add_argument(
+        "--conclusion-only", action="store_true",
+        help="только «Заключение врача» (0.5.11) — без ожидания напоминания",
+    )
     args = parser.parse_args()
     if args.cmd == "tg-login":
         tg_login()
@@ -634,7 +767,12 @@ def main() -> None:
         username = os.environ.get(BOT_USERNAME_ENV, "").strip().lstrip("@")
         if not username:
             raise SystemExit(f"{BOT_USERNAME_ENV} не задан: username тестового бота")
-        shoot_bot(username, stats_only=args.stats_only, visits_only=args.visits_only)
+        shoot_bot(
+            username,
+            stats_only=args.stats_only,
+            visits_only=args.visits_only,
+            conclusion_only=args.conclusion_only,
+        )
     elif args.cmd == "cabinet":
         secret = os.environ.get("WEB_SECRET_KEY", "")
         if not secret:
