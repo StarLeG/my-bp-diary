@@ -37,6 +37,7 @@ from zoneinfo import ZoneInfo
 from bot.db import create_engine, create_session_factory, init_db
 from bot.models import (
     Appointment,
+    AppointmentConclusion,
     Doctor,
     DoctorNote,
     DoctorPatient,
@@ -90,6 +91,13 @@ APPOINTMENTS = (
 )
 #: Прошедшее событие — кнопка «🗂 Прошедшие» в списке (статус «done», без тика).
 APPOINTMENT_PAST = ("lab", "Биохимия", -6, "08:30", "холестерин и глюкоза")
+
+#: Прошедший визит к врачу с заключениями (кадр «Заключение врача», 0.5.11).
+APPOINTMENT_DONE = ("doctor", "Кардиолог", -2, "10:00", "поликлиника № 5, каб. 212")
+CONCLUSIONS = (
+    "Рекомендовано продолжить приём препарата в прежней дозе. Контроль АД дважды в день, дневник давления — через 2 недели.",
+    "ЭКГ и биохимия — через 3 месяца, результаты принести на приём.",
+)
 
 DOCTOR_NOTE = (
     "Давление снижается — продолжайте Лозартан утром и Амлодипин вечером. "
@@ -156,6 +164,19 @@ async def _visits(session, user: User, now: datetime) -> None:
             note=note, status="done", created_at=now,
         )
     )
+    # Прошедший визит к врачу с заключениями — кадр «Заключение врача» (0.5.11).
+    kind, title, offset, hhmm, note = APPOINTMENT_DONE
+    doctor_visit = Appointment(
+        user_id=user.id, kind=kind, title=title,
+        starts_on=today + timedelta(days=offset), starts_at=hhmm,
+        note=note, status="done", created_at=now,
+    )
+    session.add(doctor_visit)
+    await session.flush()
+    for text_value in CONCLUSIONS:
+        session.add(
+            AppointmentConclusion(appointment_id=doctor_visit.id, text=text_value, created_at=now)
+        )
     await session.flush()
 
 

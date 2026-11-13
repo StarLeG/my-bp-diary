@@ -169,6 +169,7 @@ SCREENS = {
     "bot-reminder-settings": "Настройка напоминаний",
     "bot-visits": "Визиты и анализы",
     "bot-visit-reminder": "Напоминание о визите",
+    "bot-conclusion": "Заключение врача",
     "bot-meds": "Какие лекарства приняли",
     "bot-diary": "Лекарства за сегодня",
     "bot-stats": "Статистика за 7 дней",
