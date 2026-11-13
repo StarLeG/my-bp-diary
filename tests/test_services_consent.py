@@ -256,3 +256,10 @@ class TestAccess:
         await session.commit()
         assert not await consent.doctor_can_see(session, doctor, user.id)
         assert await consent.visible_patients(session, doctor) == []
+
+
+def test_consent_version_0511() -> None:
+    """Новая редакция 0.5.11 (В35-Б): дата выпуска в формате ГГГГ-ММ-ДД (§6.11)."""
+    assert consent.CONSENT_VERSION == "2026-11-14"
+    assert consent.POLICY_DATE == "2026-11-14"
+    assert consent.DOCTOR_CONSENT_VERSION == "2026-11-11"  # врач — не меняется
