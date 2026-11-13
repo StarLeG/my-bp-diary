@@ -161,7 +161,7 @@ class TestJsonLd:
             for item in graph["FAQPage"]["mainEntity"]
         ]
         assert ld == visible
-        assert len(ld) == 5  # с 0.5.8 — «Напомнит ли бот о приёме у врача?» (§16.1)
+        assert len(ld) == 7  # с 0.5.11 — «Как отметить, что визит состоялся?» и «Можно ли сохранить заключение врача?» (В38)
 
 
 class TestTexts:

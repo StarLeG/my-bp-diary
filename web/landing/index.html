@@ -107,6 +107,22 @@
           },
           {
             "@type": "Question",
+            "name": "Как отметить, что визит состоялся?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Откройте «📅 Визиты и анализы», выберите событие и нажмите «✓ Был(а)» — для анализов «✓ Сдал(а)». Кнопки отметки появляются в день события и остаются потом: отметить визит можно и через неделю. Событие также можно перенести или отметить, что вы не были."
+            }
+          },
+          {
+            "@type": "Question",
+            "name": "Можно ли сохранить заключение врача?",
+            "acceptedAnswer": {
+              "@type": "Answer",
+              "text": "Да. В карточке события нажмите «📝 Заключение врача» и введите текст одним сообщением — до 4000 символов; к событию можно добавить до пяти заключений и прикрепить к каждому фото оригинала. Фото хранится в Telegram, текст — в боте; заключения включаются в «📄 Отчёт для врача». Видите их только вы."
+            }
+          },
+          {
+            "@type": "Question",
             "name": "Это медицинское изделие?",
             "acceptedAnswer": {
               "@type": "Answer",
@@ -438,6 +454,33 @@
 
           <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
             <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
+              Как отметить, что визит состоялся?
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">
+              Откройте «📅 Визиты и анализы», выберите событие и нажмите «✓ Был(а)» —
+              для анализов «✓ Сдал(а)». Кнопки отметки появляются в день события и
+              остаются потом: отметить визит можно и через неделю. Событие также
+              можно перенести или отметить, что вы не были.
+            </p>
+          </details>
+
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
+              Можно ли сохранить заключение врача?
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <p class="px-6 pb-5 text-slate-600 leading-relaxed">
+              Да. В карточке события нажмите «📝 Заключение врача» и введите текст
+              одним сообщением — до 4000 символов; к событию можно добавить до пяти
+              заключений и прикрепить к каждому фото оригинала. Фото хранится в
+              Telegram, текст — в боте; заключения включаются в «📄 Отчёт для врача».
+              Видите их только вы.
+            </p>
+          </details>
+
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5 font-semibold text-slate-900 hover:text-blue-700 transition">
               Это медицинское изделие?
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
@@ -472,6 +515,7 @@
           <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-record">✍️ Запись давления</a>
           <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-reminders">⏰ Напоминания</a>
           <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-visits">📅 Визиты и анализы</a>
+          <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-conclusion">📝 Заключение врача</a>
           <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-meds">💊 Лекарства</a>
           <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-stats">📊 Дневник и статистика</a>
           <a class="inline-flex items-center gap-1.5 bg-white border border-slate-200 rounded-full px-4 py-2 text-sm font-medium text-slate-700 shadow-sm hover:border-blue-300 hover:text-blue-700 hover:shadow transition" href="#docs-cabinet">💻 Личный кабинет</a>
@@ -590,6 +634,26 @@
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>После события бот спросит, как всё прошло, и предложит записать следующий визит — через месяц, 3 месяца, полгода или год.</span></li>
               </ul>
               <p>Ближайший визит виден в «Дневнике за сегодня», а весь список можно вести и в личном кабинете. Пауза напоминаний на визиты не действует. Подготовку к анализам бот не подсказывает — он показывает только вашу заметку. Визиты и анализы видите только вы: врачу они не показываются.</p>
+            </div>
+          </details>
+
+          <!-- 3б. Заключение врача (0.5.11) -->
+          <details class="group bg-white rounded-2xl border border-slate-100 shadow-sm overflow-hidden" id="docs-conclusion">
+            <summary class="flex items-center justify-between gap-4 cursor-pointer list-none px-6 py-5">
+              <span class="flex items-center gap-4">
+                <span class="flex-shrink-0 w-11 h-11 rounded-2xl bg-blue-600 text-white flex items-center justify-center text-xl shadow-lg shadow-blue-600/30" aria-hidden="true">📝</span>
+                <span class="font-semibold text-slate-900 group-hover:text-blue-700 transition">Заключение врача</span>
+              </span>
+              <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
+            </summary>
+            <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
+              <p>После приёма откройте событие в разделе <b class="text-slate-800">«📅 Визиты и анализы»</b> — там же, где отмечают, что визит состоялся (<b class="text-slate-800">«✓ Был(а)»</b>, для анализов — <b class="text-slate-800">«✓ Сдал(а)»</b>). Кнопка <b class="text-slate-800">«📝 Заключение врача»</b> есть у визита, <b class="text-slate-800">«📝 Результаты анализов»</b> — у анализов, <b class="text-slate-800">«📝 Протокол обследования»</b> — у обследования.</p>
+              <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Напишите текст заключения одним сообщением — до 4000 символов. Текст вводите сами: фото бот не распознаёт.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>К заключению можно прикрепить фото оригинала — оно хранится в Telegram и доступно только вам.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>К одному событию — до пяти заключений; каждое можно исправить или удалить.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Заключения включаются в <b class="text-slate-800">«📄 Отчёт для врача»</b> — вы скачиваете его сами и показываете, кому считаете нужным; врачу через бота заключения не уходят.</span></li>
+              </ul>
             </div>
           </details>
 

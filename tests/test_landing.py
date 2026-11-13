@@ -82,6 +82,7 @@ class TestSections:
             "docs-record",
             "docs-reminders",
             "docs-visits",
+            "docs-conclusion",
             "docs-meds",
             "docs-stats",
             "docs-cabinet",
@@ -136,6 +137,9 @@ class TestManualSync:
             "👤 Мои данные",  # BTN_PROFILE (§6.12)
             "Согласие на обработку данных",  # BTN_CONSENT_SETTINGS (§6.11)
             "privacy.html#consent",  # согласие — до первых вопросов (§6.1)
+            "📝 Заключение врача",  # BTN_AP_CONC_BUTTON[doctor] (0.5.11, В27)
+            "Как отметить, что визит состоялся?",  # FAQ (0.5.11, В38)
+            "Можно ли сохранить заключение врача?",  # FAQ (0.5.11, В38)
         ],
     )
     def test_marker_present(self, html: str, marker: str) -> None:
