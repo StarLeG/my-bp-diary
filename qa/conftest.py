@@ -169,6 +169,12 @@ class QaDb:
         self._conn.commit()
 
     def _reset_for_user(self, user_id: int) -> None:
+        self._conn.execute(
+            "DELETE FROM appointment_conclusions WHERE appointment_id IN"
+            " (SELECT id FROM appointments WHERE user_id = ?)",
+            (user_id,),
+        )
+        self._conn.execute("DELETE FROM appointments WHERE user_id = ?", (user_id,))
         for table in (
             "medication_logs",
             "medications",
@@ -288,8 +294,20 @@ class QaDb:
     def delete_appointments(self, telegram_id: int) -> None:
         user = self.user(telegram_id)
         if user is not None:
+            self._conn.execute(
+                "DELETE FROM appointment_conclusions WHERE appointment_id IN"
+                " (SELECT id FROM appointments WHERE user_id = ?)",
+                (user["id"],),
+            )
             self._conn.execute("DELETE FROM appointments WHERE user_id = ?", (user["id"],))
             self._conn.commit()
+
+    def conclusions(self, appointment_id: int) -> list[sqlite3.Row]:
+        """Заключения события (§4.17), по порядку добавления."""
+        return self._conn.execute(
+            "SELECT * FROM appointment_conclusions WHERE appointment_id = ? ORDER BY id",
+            (appointment_id,),
+        ).fetchall()
 
     def ensure_patient_consents(self, telegram_id: int) -> None:
         """Согласия пациента для сценария (§6.11): основное и на врачей активных связей.
@@ -312,6 +330,14 @@ class QaDb:
                 " VALUES (?, 'processing', ?, 'bot', ?)",
                 (user["id"], CONSENT_VERSION, now),
             )
+        else:
+            # Новая редакция согласия (например, 0.5.11): старая версия не годится —
+            # бот снова покажет Б1, поэтому открытая запись обновляется до текущей.
+            self._conn.execute(
+                "UPDATE consents SET version = ? WHERE user_id = ? AND kind = 'processing'"
+                " AND withdrawn_at IS NULL",
+                (CONSENT_VERSION, user["id"]),
+            )
         for row in self._conn.execute(
             "SELECT doctor_id FROM doctor_patients WHERE user_id = ? AND status IN ('pending', 'active')",
             (user["id"],),
@@ -321,6 +347,11 @@ class QaDb:
                 " SELECT ?, 'doctor', ?, ?, 'bot', ? WHERE NOT EXISTS (SELECT 1 FROM consents"
                 " WHERE user_id = ? AND kind = 'doctor' AND doctor_id = ? AND withdrawn_at IS NULL)",
                 (user["id"], row["doctor_id"], CONSENT_VERSION, now, user["id"], row["doctor_id"]),
+            )
+            self._conn.execute(
+                "UPDATE consents SET version = ? WHERE user_id = ? AND kind = 'doctor'"
+                " AND doctor_id = ? AND withdrawn_at IS NULL",
+                (CONSENT_VERSION, user["id"], row["doctor_id"]),
             )
         self._conn.execute(
             "UPDATE users SET profile_prompted_at = COALESCE(profile_prompted_at, ?) WHERE id = ?",
@@ -445,6 +476,15 @@ class BotDialog:
             lambda message: message.id not in known and not message.out,
             timeout=timeout,
         )
+
+    def send_input(self, text: str) -> None:
+        """Отправить текст без ожидания нового сообщения.
+
+        Бот мог ответить **правкой** экрана (заключения, §6.13: «одно
+        редактируемое сообщение») — тогда нового сообщения не будет и `send`
+        упал бы по таймауту. Дожидаться экрана — отдельным `wait_screen`.
+        """
+        self._loop.run(self._client.send_message(self._chat, text))
 
     def press(self, data: str, *, contains=None, timeout: float = 25.0, message=None):
         """Нажать inline-кнопку с callback_data `data` в последнем сообщении.

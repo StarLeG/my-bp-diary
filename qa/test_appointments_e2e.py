@@ -1,9 +1,10 @@
-"""E2E «Визиты и анализы» через Telethon (SPEC.md, §6.13; 0.5.8).
+"""E2E «Визиты и анализы» через Telethon (SPEC.md, §6.13; 0.5.8, 0.5.11).
 
 Добавление кнопками (тип → подсказка → календарь → время → «Пропустить»),
 уведомление «за 2 часа» от тика (событие ставится в БД стенда на «через 2 ч
-1 мин», тик раз в минуту), «Как прошёл визит?» из карточки — «✓ Был(а)» →
-«Записать следующий» → «Через 3 мес». События сценария удаляются после теста.
+1 мин», тик раз в минуту), отметка из карточки (`ap:mark`, без окна — 0.5.11)
+→ «Записать следующий» → «Через 3 мес», заключение текстом (`ap:conc:*`).
+События сценария удаляются после теста.
 """
 from __future__ import annotations
 
@@ -66,8 +67,28 @@ class TestVisits:
         dialog.send("/visits")
         dialog.press("ap:past", contains=texts.AP_PAST_HEADER)
         dialog.press(f"ap:open:{appt_id}", contains="QA-ЭКГ")
-        dialog.press(f"ap:after:{appt_id}:done", contains="Записать следующий?")
+        screen = dialog.press(f"ap:mark:{appt_id}:done", contains="Записать следующий?")
+        assert f"ap:conc:{appt_id}:add" in {b.data.decode() for row in screen.buttons for b in row}  # Р8
         screen = dialog.press(f"ap:next:{appt_id}:3", contains=texts.AP_SAVED)
         assert "QA-ЭКГ" in (screen.text or "")
         old, new = db.appointments(tg_me.id)
         assert old["status"] == "done" and new["status"] == "planned"
+
+    def test_mark_and_conclusion(self, dialog, db, tg_me, visits) -> None:
+        """Отметка из карточки без окна (`ap:mark`) и заключение текстом (0.5.11)."""
+        yesterday = _local_now(db, tg_me).date() - timedelta(days=1)
+        appt_id = db.add_appointment(tg_me.id, yesterday.isoformat(), "10:00", title="QA-Кардиолог")
+        dialog.send("/visits")
+        dialog.press("ap:past", contains=texts.AP_PAST_HEADER)
+        dialog.press(f"ap:open:{appt_id}", contains="QA-Кардиолог")
+        dialog.press(f"ap:conc:{appt_id}", contains=texts.AP_CONC_EMPTY)
+        dialog.press(f"ap:conc:{appt_id}:add", contains=texts.AP_CONC_PROMPT)
+        dialog.send_input("  Рекомендовано продолжить приём  ")  # ответ — правка экрана
+        screen = dialog.wait_screen(texts.AP_CONC_SAVED)
+        assert "Рекомендовано продолжить приём" in (screen.text or "")
+        assert db.conclusions(appt_id)[0]["text"] == "Рекомендовано продолжить приём"
+        dialog.press(f"ap:open:{appt_id}", contains="QA-Кардиолог")  # «Назад» — карточка
+        dialog.press(f"ap:conc:{appt_id}", contains="Рекомендовано продолжить")  # список из карточки
+        dialog.press(f"ap:open:{appt_id}", contains="QA-Кардиолог")  # «Назад» — карточка
+        dialog.press(f"ap:mark:{appt_id}:done", contains="Записать следующий?")
+        assert db.appointments(tg_me.id)[0]["status"] == "done"
