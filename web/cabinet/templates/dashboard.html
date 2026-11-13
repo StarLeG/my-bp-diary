@@ -53,6 +53,12 @@
       <p class="alert alert-error">Запланировано уже 30 событий. Удалите ненужные, чтобы добавить новое.</p>
     {% elif error == "medication_missing" %}
       <p class="alert alert-error">Лекарство не найдено.</p>
+    {% elif error == "conc_empty" %}
+      <p class="alert alert-error">Напишите текст заключения.</p>
+    {% elif error == "conc_long" %}
+      <p class="alert alert-error">Слишком длинно — до 4000 символов.</p>
+    {% elif error == "conc_limit" %}
+      <p class="alert alert-error">Заключений уже 5. Удалите ненужные, чтобы добавить новое.</p>
     {% elif saved == "profile" %}
       <p class="alert alert-ok">Профиль сохранён.</p>
     {% elif saved == "medication" %}
@@ -543,6 +549,19 @@
           <p>Удалить «{{ confirm_delete_ap.title }} — {{ confirm_delete_ap.starts_on.strftime('%d.%m') }}»? Это действие нельзя отменить.</p>
           <div class="row">
             <form method="post" action="/appointments/{{ confirm_delete_ap.id }}/delete" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <button type="submit" class="btn btn-danger">Удалить</button>
+            </form>
+            <a class="btn btn-ghost" href="/#appointments">Отмена</a>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if confirm_delete_conc %}
+        <div class="alert alert-error">
+          <p>Удалить «{{ conclusion_preview(confirm_delete_conc.text) }}»? Это действие нельзя отменить.</p>
+          <div class="row">
+            <form method="post" action="/conclusions/{{ confirm_delete_conc.id }}/delete" class="inline">
               <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
               <button type="submit" class="btn btn-danger">Удалить</button>
             </form>

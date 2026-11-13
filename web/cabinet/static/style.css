@@ -631,6 +631,47 @@ td.actions {
   border-radius: var(--radius);
 }
 
+/* Заключения к событиям (0.5.11, §6.13, §16.2): превью и блок «📝 …». */
+.event-conc-line {
+  margin: 6px 0 0;
+  overflow-wrap: anywhere;
+}
+
+.event-conc {
+  margin-top: 10px;
+  padding-top: 10px;
+  border-top: 1px solid var(--color-border);
+}
+
+.event-conc > summary {
+  cursor: pointer;
+  font-weight: 600;
+  user-select: none;
+}
+
+.conc-item {
+  margin-top: 10px;
+  padding: 10px 12px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius);
+}
+
+.conc-text {
+  margin: 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.conc-item .row {
+  margin-top: 8px;
+  align-items: center;
+}
+
+.event-conc > .btn {
+  margin-top: 10px;
+}
+
 /* «Прошедшие»: «Ждёт отметки» сверху вне групп, ниже — аккордеон месяцев. */
 .awaiting-head {
   margin: 16px 0 8px;

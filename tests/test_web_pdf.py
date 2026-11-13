@@ -252,3 +252,43 @@ class TestDoctorPdf:
         response = client.get(f"/doctor/patient/{other_id}/export.pdf")
         assert response.status_code == 303
         assert response.headers["location"] == "/doctor?error=denied"
+
+
+class TestConclusionsSection:
+    """«Заключения врачей» в PDF: у пациента есть, у врача нет (0.5.11, У2-А)."""
+
+    def _seed(self, settings: Settings, user_id: int) -> None:
+        _add(settings, user_id, 128)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        _sql(
+            settings,
+            "INSERT INTO appointments (user_id, kind, title, starts_on, starts_at, note, status, created_at)"
+            " VALUES (?, 'doctor', 'Кардиолог', ?, '10:00', '', 'done', '2026-01-01 00:00:00')",
+            (user_id, today),
+        )
+        _sql(
+            settings,
+            "INSERT INTO appointment_conclusions (appointment_id, text, created_at)"
+            " VALUES ((SELECT MAX(id) FROM appointments), 'Продолжить приём', '2026-01-01 00:00:00')",
+        )
+
+    def test_patient_pdf_includes_conclusions(self, app_client, settings) -> None:
+        client, user_id, *_ = app_client
+        _register(client)
+        self._seed(settings, user_id)
+        response = client.get("/export/report.pdf?days=7")
+        assert response.status_code == 200
+        text = _text(response.content)
+        assert "Заключения врачей" in text and "Продолжить приём" in text
+
+    def test_doctor_pdf_has_no_conclusions(self, app_client, settings) -> None:
+        client, user_id, _, doctor_id = app_client
+        _register(client)
+        self._seed(settings, user_id)
+        _link(settings, doctor_id, user_id)
+        client.cookies.delete(DOCTOR_COOKIE)
+        _login_doctor(client, doctor_id)
+        response = client.get(f"/doctor/patient/{user_id}/export.pdf?days=7")
+        assert response.status_code == 200
+        text = _text(response.content)
+        assert "Заключения врачей" not in text and "Продолжить приём" not in text

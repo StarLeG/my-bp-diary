@@ -1,8 +1,10 @@
-{# Карточка события «Визитов и анализов» (§16.2, 0.5.9).
+{# Карточка события «Визитов и анализов» (§16.2, 0.5.9; заключения — 0.5.11).
    mode: "upcoming" — «Скоро»: «✏️ Изменить» раскрывает форму под карточкой,
          «⋯» — отмена по типу (В7а, только у planned) и «🗑 Удалить…»;
          "awaiting" — «Ждёт отметки»: отметка, «Перенесли на…», «🗑 Удалить…»;
-         "past" — «Прошедшие»: статус и «🗑 Удалить…». #}
+         "past" — «Прошедшие»: статус и «🗑 Удалить…».
+   Заключения (превью, блок «📝 …», формы) — только пациенту, как действия
+   истории (`history_can_edit`): у врача их нет (§21, В34). #}
 <article class="event-card">
   <div class="event-head">
     <span class="event-kind">{{ ap_kinds[ap.kind] }}</span>
@@ -11,6 +13,10 @@
   </div>
   <h4 class="event-title">{{ ap.title }}</h4>
   {% if ap.note %}<p class="event-note">{{ ap.note }}</p>{% endif %}
+  {% if history_can_edit and ap_conc_lines.get(ap.id) %}
+    {# Строка-превью без типа (одно) или счётчик (несколько) — §6.13. #}
+    <p class="event-conc-line">{{ ap_conc_lines[ap.id] }}</p>
+  {% endif %}
 
   {% if mode == "awaiting" %}
     <div class="event-actions">
@@ -49,6 +55,24 @@
       </details>
     </div>
   {% endif %}
+
+  {% if history_can_edit and ap.id in ap_conc_open %}
+    {# Заключения (0.5.11, §6.13, §4.17): блок с дня события, подписи по типу
+       (В27); текст каждой целиком, правка и удаление — блоком подтверждения. #}
+    <details class="event-conc">
+      <summary>{{ ap_conc_buttons[ap.kind] }}</summary>
+      {% for item in ap_conclusions[ap.id] %}
+        <div class="conc-item">
+          <p class="conc-text">{{ item.text }}</p>
+          <div class="row">
+            <a class="btn btn-ghost" href="/?edit_conc={{ item.id }}#appointments">✏️ Изменить</a>
+            <a class="btn btn-ghost event-menu-del" href="/?confirm_delete_conc={{ item.id }}#appointments">🗑 Удалить…</a>
+          </div>
+        </div>
+      {% endfor %}
+      <a class="btn btn-ghost" href="/?add_conc={{ ap.id }}#appointments">➕ Добавить</a>
+    </details>
+  {% endif %}
 </article>
 
 {% if mode == "upcoming" and edit_ap_id == ap.id %}
@@ -85,6 +109,38 @@
       <button type="submit" class="btn">Сохранить</button>
       <a class="btn btn-ghost" href="/#appointments">Отмена</a>
       <a class="btn btn-danger-ghost" href="/?confirm_delete_ap={{ ap.id }}#appointments">🗑 Удалить</a>
+    </div>
+  </form>
+{% endif %}
+
+{% if history_can_edit and add_conc_ap == ap.id %}
+  {# Форма заключения (0.5.11, §16.2): `?add_conc={id}`, textarea ≤ 4000. #}
+  <h4 class="event-edit-title">Добавить заключение</h4>
+  <form method="post" action="/appointments/{{ ap.id }}/conclusions" class="stack form-narrow event-edit-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      Текст заключения
+      <textarea name="text" maxlength="4000" rows="6" required></textarea>
+    </label>
+    <div class="row">
+      <button type="submit" class="btn">Сохранить</button>
+      <a class="btn btn-ghost" href="/#appointments">Отмена</a>
+    </div>
+  </form>
+{% endif %}
+
+{% if history_can_edit and edit_conc and edit_conc.appointment_id == ap.id %}
+  {# Правка заключения (0.5.11, §16.2): `?edit_conc={cid}`, та же форма. #}
+  <h4 class="event-edit-title">Изменить заключение</h4>
+  <form method="post" action="/conclusions/{{ edit_conc.id }}" class="stack form-narrow event-edit-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>
+      Текст заключения
+      <textarea name="text" maxlength="4000" rows="6" required>{{ edit_conc.text }}</textarea>
+    </label>
+    <div class="row">
+      <button type="submit" class="btn">Сохранить</button>
+      <a class="btn btn-ghost" href="/#appointments">Отмена</a>
     </div>
   </form>
 {% endif %}

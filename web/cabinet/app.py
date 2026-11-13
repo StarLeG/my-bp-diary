@@ -8,9 +8,10 @@ HTTPS-доступе — по схеме запроса или `CABINET_URL`. П
 HTTP-запрос (`Depends`); модели — из `bot/models.py` (SPEC.md, раздел 16.3).
 
 Содержимое: личная карточка, история с фильтрами, сводка с графиком и CSV,
-CRUD лекарств, настройки напоминаний, добавление/правка/удаление записей и
-импорт CSV архива (§16.2). Платёжных данных нет — только ссылка на внешнюю
-страницу поддержки из бота.
+CRUD лекарств, настройки напоминаний, добавление/правка/удаление записей,
+импорт CSV архива (§16.2) и заключения к «Визитам и анализам» (0.5.11,
+§6.13, §4.17 — текст, до 5 на событие; фото только в Telegram). Платёжных
+данных нет — только ссылка на внешнюю страницу поддержки из бота.
 """
 from __future__ import annotations
 
@@ -35,7 +36,17 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from bot import schemas, texts
 from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
-from bot.models import Doctor, Measurement, Medication, Reminder, User, WebSession, WebUser
+from bot.models import (
+    Appointment,
+    AppointmentConclusion,
+    Doctor,
+    Measurement,
+    Medication,
+    Reminder,
+    User,
+    WebSession,
+    WebUser,
+)
 from bot.services import consent as consent_service
 from bot.services import csv_export
 from bot.services import doctor as doctor_service
@@ -86,6 +97,8 @@ _templates.env.globals["history_zone_legend"] = table_legend()
 _templates.env.globals["patient_list_label"] = profile_service.list_label
 _templates.env.globals["patient_card_title"] = profile_service.card_title
 _templates.env.globals["patient_card_details"] = profile_service.card_details
+# Превью заключения в подтверждении удаления (0.5.11, §16.2).
+_templates.env.globals["conclusion_preview"] = appointments_service.conclusion_preview
 
 
 # ─────────────────────────── Вспомогательное ───────────────────────────
@@ -137,17 +150,20 @@ async def _pdf_report_response(
     back_url: str,
     period: Mapping[str, str],
     file_stem: Optional[str] = None,
+    include_conclusions: bool = False,
 ) -> Response:
     """PDF-отчёт за период — общий для ЛК и кабинета врача (§10.1).
 
     Пустой период и лимит — файл не формируется: редирект на страницу
     (`back_url`) с тем же периодом и `error=empty` / `error=too_many`.
     Транзакция чтения закрывается до генерации; сам PDF рисуется в thread
-    pool, чтобы не стоял весь кабинет (§7.2 п.7).
+    pool, чтобы не стоял весь кабинет (§7.2 п.7). Раздел «Заключения врачей» —
+    только у пациента (У2-А): у врача `include_conclusions=False`.
     """
     try:
         data = await pdf_report.collect_report(
-            db, user, start_day, end_day, subject=subject, file_stem=file_stem
+            db, user, start_day, end_day, subject=subject, file_stem=file_stem,
+            include_conclusions=include_conclusions,
         )
     except (pdf_report.ReportEmptyError, pdf_report.ReportTooLargeError) as exc:
         error = "empty" if isinstance(exc, pdf_report.ReportEmptyError) else "too_many"
@@ -194,6 +210,24 @@ AP_CANCEL_LABELS = {
     "lab": "Отменить сдачу",
     "exam": "Отменить обследование",
 }
+
+
+def _conc_block_visible(appt: Appointment, current: date, has_conclusions: bool) -> bool:
+    """Блок и формы заключений в карточке события (0.5.11, §6.13; Р2, Р3).
+
+    С дня события включительно (`planned`); у закрытых — как кнопка
+    «{Подпись заключения}» в боте: `done`/`moved` — всегда, `missed`/
+    `cancelled` — только если заключения уже есть. До события блока и форм нет.
+    """
+    if appt.status != "planned":
+        return appt.status in ("done", "moved") or has_conclusions
+    return appt.starts_on <= current
+
+
+async def _conc_visible(db: AsyncSession, appt: Appointment, user: User) -> bool:
+    """Доступны ли заключения события сейчас (та же ветка, что блок в карточке)."""
+    has_conclusions = await appointments_service.count_conclusions(db, appt.id) > 0
+    return _conc_block_visible(appt, appointments_service.today(user), has_conclusions)
 
 
 def _plural(count: int, one: str, few: str, many: str) -> str:
@@ -986,6 +1020,22 @@ def create_app(
             month["count_text"] = f"{count} {_plural(count, 'событие', 'события', 'событий')}"
             month["current"] = month["key"] == current_month
             del month["key"]
+        # Заключения событий (0.5.11, §6.13, §16.2): превью в карточке и блок
+        # «📝 …» — с дня события (список — по порядку добавления, сервис §4.17).
+        ap_conclusions: dict[int, list[AppointmentConclusion]] = {}
+        ap_conc_lines: dict[int, str] = {}
+        ap_conc_open: set[int] = set()
+        ap_cards = list(ap_upcoming) + [item[0] for item in ap_awaiting] + [
+            item[0] for month in ap_months for item in month["items"]
+        ]
+        for appt in ap_cards:
+            items = await appointments_service.list_conclusions(db, appt.id)
+            ap_conclusions[appt.id] = items
+            line = appointments_service.fmt_conclusion_line(items)
+            if line:
+                ap_conc_lines[appt.id] = line
+            if _conc_block_visible(appt, now_local.date(), bool(items)):
+                ap_conc_open.add(appt.id)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
         consent = await consent_service.current_processing(db, user.id)
         personal_messages = {
@@ -1060,6 +1110,10 @@ def create_app(
             "ap_max_day": appointments_service.max_day(now_local.date()),
             "ap_after_buttons": texts.AP_AFTER_BUTTONS,
             "ap_cancel_labels": AP_CANCEL_LABELS,
+            "ap_conc_buttons": texts.AP_CONC_BUTTON,
+            "ap_conclusions": ap_conclusions,
+            "ap_conc_lines": ap_conc_lines,
+            "ap_conc_open": ap_conc_open,
             "chart": _chart_payload(measurements, user.timezone),
             "chart_zones": CHART_ZONES,
             "days": days,
@@ -1090,6 +1144,10 @@ def create_app(
             "edit_ap_id": None,
             "confirm_delete_ap": None,
             "confirm_cancel_ap": None,
+            # заключения к событиям (0.5.11, §16.2): формы и подтверждение
+            "add_conc_ap": None,
+            "edit_conc": None,
+            "confirm_delete_conc": None,
         }
         if extra:
             context.update(extra)
@@ -1139,6 +1197,9 @@ def create_app(
         confirm_delete_med: str = Query(""),
         confirm_delete_ap: str = Query(""),
         confirm_cancel_ap: str = Query(""),
+        add_conc: str = Query(""),
+        edit_conc: str = Query(""),
+        confirm_delete_conc: str = Query(""),
         shown: str = Query(""),
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
@@ -1151,7 +1212,10 @@ def create_app(
         — форма «Изменить лекарство», `?edit_ap={id}` — форма правки события,
         `?confirm_delete_med` / `?confirm_delete_ap` / `?confirm_cancel_ap` —
         блоки подтверждения (не `js confirm()`), `?shown=N` — глубина истории
-        по дням («Показать ещё 30 дней»).
+        по дням («Показать ещё 30 дней»). С 0.5.11 (§16.2): `?add_conc={id}` —
+        форма добавления заключения к событию, `?edit_conc={id}` — форма правки
+        заключения (`?edit={id}` занят правкой измерения), `?confirm_delete_conc`
+        — подтверждение удаления заключения; всё — с дня события.
         """
         user = await load_user(db, web_user)
         extra: dict = {}
@@ -1189,6 +1253,17 @@ def create_app(
                 appt = await appointments_service.get_owned(db, user, int(raw))
                 if appt is not None:
                     extra[key] = appt.id if key == "edit_ap_id" else appt
+        if add_conc.isdigit():
+            appt = await appointments_service.get_owned(db, user, int(add_conc))
+            if appt is not None and await _conc_visible(db, appt, user):
+                extra["add_conc_ap"] = appt.id
+        for raw, key in ((edit_conc, "edit_conc"), (confirm_delete_conc, "confirm_delete_conc")):
+            if raw.isdigit():
+                conc = await appointments_service.get_owned_conclusion(db, user, int(raw))
+                if conc is not None:
+                    owner = await appointments_service.get_owned(db, user, conc.appointment_id)
+                    if owner is not None and await _conc_visible(db, owner, user):
+                        extra[key] = conc
         return await _dashboard_response(
             request, db, web_user, days, date_from, date_to, error, saved, extra,
             user=user, shown=shown,
@@ -1512,6 +1587,93 @@ def create_app(
         await _owned_appointment(db, user, appointment_id)
         await appointments_service.remove(db, user, appointment_id)
         return _ap_redirect("saved")
+
+    # ───────────────────── Заключения к событиям (0.5.11) ─────────────────────
+
+    def _conc_redirect(kind: str, *, add_id: Optional[int] = None, edit_id: Optional[int] = None) -> Response:
+        """Назад к форме заключения с ошибкой или с отметкой обновления (§16.2)."""
+        if kind == "saved":
+            return _ap_redirect("saved")
+        anchor = f"/?error={kind}#appointments"
+        if add_id is not None:
+            anchor = f"/?add_conc={add_id}&error={kind}#appointments"
+        elif edit_id is not None:
+            anchor = f"/?edit_conc={edit_id}&error={kind}#appointments"
+        return RedirectResponse(url=anchor, status_code=303)
+
+    @app.post("/appointments/{appointment_id}/conclusions")
+    async def conclusion_add(
+        appointment_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Добавить заключение к событию (§16.2, §4.17): текст 1–4000, лимит 5.
+
+        Условная вставка сервиса (§7.2) держит общий с ботом лимит 5 даже
+        при гонке вкладок; форма доступна с дня события (Р3). Фото в ЛК не
+        загружается — `photo_file_id` существует только в Telegram.
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        appt = await _owned_appointment(db, user, appointment_id)
+        if not await _conc_visible(db, appt, user):
+            return _ap_redirect("appointment")
+        raw = str(form.get("text", ""))
+        text_value = appointments_service.valid_conclusion_text(raw)
+        if text_value is None:
+            code = "conc_empty" if not raw.strip() else "conc_long"
+            return _conc_redirect(code, add_id=appointment_id)
+        new_id = await appointments_service.add_conclusion(db, appointment_id, text_value)
+        if new_id is None:
+            return _conc_redirect("conc_limit", add_id=appointment_id)
+        return _conc_redirect("saved")
+
+    @app.post("/conclusions/{conclusion_id}")
+    async def conclusion_update(
+        conclusion_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Изменить текст заключения (§16.2): та же форма и проверки, что при добавлении."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        conc = await appointments_service.get_owned_conclusion(db, user, conclusion_id)
+        if conc is None:
+            raise HTTPException(status_code=404)
+        appt = await _owned_appointment(db, user, conc.appointment_id)
+        if not await _conc_visible(db, appt, user):
+            return _ap_redirect("appointment")
+        raw = str(form.get("text", ""))
+        text_value = appointments_service.valid_conclusion_text(raw)
+        if text_value is None:
+            code = "conc_empty" if not raw.strip() else "conc_long"
+            return _conc_redirect(code, edit_id=conclusion_id)
+        await appointments_service.set_conclusion_text(db, user, conclusion_id, text_value)
+        return _conc_redirect("saved")
+
+    @app.post("/conclusions/{conclusion_id}/delete")
+    async def conclusion_delete(
+        conclusion_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Удалить заключение (§16.2): только после подтверждения блоком на странице."""
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        conc = await appointments_service.get_owned_conclusion(db, user, conclusion_id)
+        if conc is None:
+            raise HTTPException(status_code=404)
+        appt = await _owned_appointment(db, user, conc.appointment_id)
+        if not await _conc_visible(db, appt, user):
+            return _ap_redirect("appointment")
+        await appointments_service.remove_conclusion(db, user, conclusion_id)
+        return _conc_redirect("saved")
 
     # ───────────────────── Записи измерений ─────────────────────
 
@@ -1880,6 +2042,7 @@ def create_app(
             subject=pdf_report.patient_subject(user),
             back_url="/",
             period={"days": days, "date_from": date_from, "date_to": date_to},
+            include_conclusions=True,
         )
 
     # ───────────────────── Кабинет врача (SPEC.md, раздел 21) ─────────────────────
