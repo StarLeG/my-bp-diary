@@ -14,7 +14,7 @@ from aiogram.fsm.context import FSMContext
 from aiogram.fsm.storage.base import StorageKey
 from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.methods import EditMessageReplyMarkup
-from aiogram.types import CallbackQuery, Chat, Message, User
+from aiogram.types import CallbackQuery, Chat, Message, PhotoSize, User
 from sqlalchemy import select, update
 
 from bot import keyboards, texts
@@ -386,19 +386,35 @@ class TestBack:
 
 class TestCard:
     async def test_states(self, session, user, edit, cb_answer, state) -> None:
-        up = await add(session, user)
+        up = await add(session, user)  # дата впереди: без отметки и заключения
         await press(h.cb_open, f"ap:open:{up.id}", session, state)
         assert labels(edit.call_args.kwargs["reply_markup"]) == [
             texts.BTN_AP_REPORT, texts.BTN_AP_EDIT, "Отменить визит", texts.BTN_AP_DELETE, texts.BTN_BACK,
+        ]
+        today_row = await add(session, user, starts_on=TODAY, starts_at=None)
+        await press(h.cb_open, f"ap:open:{today_row.id}", session, state)
+        assert labels(edit.call_args.kwargs["reply_markup"]) == [
+            "✓ Был(а)", "Перенёс(ла)", "Не был(а)",
+            texts.BTN_AP_REPORT, texts.AP_CONC_BUTTON["doctor"],
+            texts.BTN_AP_EDIT, "Отменить визит", texts.BTN_AP_DELETE, texts.BTN_BACK,
         ]
         waiting = await past_row(session, user, days_ago=1, kind="lab", title="Биохимия")
         await press(h.cb_open, f"ap:open:{waiting.id}", session, state)
         assert labels(edit.call_args.kwargs["reply_markup"])[:3] == ["✓ Сдал(а)", "Перенёс(ла)", "Не сдал(а)"]
         assert datas(edit.call_args.kwargs["reply_markup"])[-1] == "ap:past"
-        closed = await past_row(session, user, days_ago=10)
-        await press(h.cb_open, f"ap:open:{closed.id}", session, state)
-        assert labels(edit.call_args.kwargs["reply_markup"]) == [texts.BTN_AP_DELETE, texts.BTN_BACK]
+        assert texts.AP_CONC_BUTTON["lab"] in labels(edit.call_args.kwargs["reply_markup"])
+        unmarked = await past_row(session, user, days_ago=10)  # «без отметки», но отметить можно (В26-А)
+        await press(h.cb_open, f"ap:open:{unmarked.id}", session, state)
+        assert labels(edit.call_args.kwargs["reply_markup"])[:3] == ["✓ Был(а)", "Перенёс(ла)", "Не был(а)"]
         assert edit.call_args.args[0].endswith("Статус: без отметки")
+        missed = await past_row(session, user, days_ago=2, status="missed")  # без заключений — без кнопки
+        await press(h.cb_open, f"ap:open:{missed.id}", session, state)
+        assert labels(edit.call_args.kwargs["reply_markup"]) == [texts.BTN_AP_DELETE, texts.BTN_BACK]
+        done = await past_row(session, user, days_ago=2, status="done")
+        await press(h.cb_open, f"ap:open:{done.id}", session, state)
+        assert labels(edit.call_args.kwargs["reply_markup"]) == [
+            texts.AP_CONC_BUTTON["doctor"], texts.BTN_AP_DELETE, texts.BTN_BACK,
+        ]
 
     async def test_foreign_stale(self, session, user, edit, cb_answer, state) -> None:
         other = UserModel(telegram_id=222, timezone="Europe/Minsk")
@@ -546,6 +562,7 @@ class TestNoticeButtons:
         assert edit.call_args.args[0] == texts.AP_DONE
         assert labels(edit.call_args.kwargs["reply_markup"]) == [
             "Через месяц", "Через 3 мес", "Через полгода", "Через год", "Не нужно",
+            texts.AP_CONC_BUTTON["doctor"],
         ]
         await press(h.cb_next, f"ap:next:{appt.id}:3", session, state)
         assert edit.call_args.args[0].startswith("Готово ✓\n🩺 Кардиолог — ср 10.02, 10:00")
@@ -761,8 +778,16 @@ class TestEdges:
         cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
 
     def test_card_keyboards(self) -> None:
-        assert labels(keyboards.ap_card_kb(1, "lab", "upcoming", "ap:list")) == [
+        assert labels(keyboards.ap_card_kb(1, "lab", "future", "ap:list")) == [
             texts.BTN_AP_EDIT, "Отменить", texts.BTN_AP_DELETE, texts.BTN_BACK,
+        ]
+        assert labels(keyboards.ap_card_kb(1, "doctor", "today", "ap:list", with_conclusion=True)) == [
+            "✓ Был(а)", "Перенёс(ла)", "Не был(а)", texts.BTN_AP_REPORT,
+            texts.AP_CONC_BUTTON["doctor"], texts.BTN_AP_EDIT, "Отменить визит",
+            texts.BTN_AP_DELETE, texts.BTN_BACK,
+        ]
+        assert labels(keyboards.ap_card_kb(2, "exam", "closed", "ap:past", with_conclusion=True)) == [
+            texts.AP_CONC_BUTTON["exam"], texts.BTN_AP_DELETE, texts.BTN_BACK,
         ]
         assert labels(keyboards.ap_notice_kb(2, "doctor", "soon")) == [
             texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить визит", texts.BTN_AP_REPORT,
@@ -977,3 +1002,223 @@ class TestPagination:
         assert len([d for d in datas(markup) if d.startswith("ap:open:")]) == 5
         assert texts.BTN_SHOW_MORE.format(count=5) in labels(markup)
         assert "ap:list:10" in datas(markup)
+
+
+# ─────────── Отметка из карточки и заключения (0.5.11) ───────────
+
+
+def make_photo_message(user_id: int = TG_ID) -> Message:
+    return Message(
+        message_id=7,
+        date=NOW,
+        chat=Chat(id=user_id, type="private"),
+        from_user=User(id=user_id, is_bot=False, first_name="Тест"),
+        photo=[PhotoSize(file_id="photo-1", file_unique_id="u1", width=10, height=10)],
+    )
+
+
+def make_callback_with(data: str, message: Message) -> CallbackQuery:
+    return CallbackQuery(
+        id="q1",
+        from_user=User(id=TG_ID, is_bot=False, first_name="Тест"),
+        chat_instance="ci",
+        data=data,
+        message=message,
+    )
+
+
+class TestMark:
+    """`ap:mark:{id}:{…}` — отметка из карточки без окна (В25-Б, В26-А, У1-А)."""
+
+    async def test_done_and_next(self, session, user, edit, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=0)  # день события
+        await press(h.cb_mark, f"ap:mark:{appt.id}:done", session, state)
+        assert edit.call_args.args[0] == texts.AP_DONE
+        assert labels(edit.call_args.kwargs["reply_markup"])[-1] == texts.AP_CONC_BUTTON["doctor"]
+        assert (await rows(session, user))[0].status == "done"
+
+    async def test_missed(self, session, user, edit, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=1)
+        await press(h.cb_mark, f"ap:mark:{appt.id}:missed", session, state)
+        assert edit.call_args.args[0] == texts.AP_MISSED
+        assert labels(edit.call_args.kwargs["reply_markup"]) == [texts.BTN_AP_LIST, texts.BTN_IN_MENU]
+        assert (await rows(session, user))[0].status == "missed"
+
+    async def test_moved(self, session, user, edit, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=2, kind="exam", title="ЭКГ")
+        await press(h.cb_mark, f"ap:mark:{appt.id}:moved", session, state)
+        assert edit.call_args.args[0] == texts.AP_DAY_ASK
+        await press(h.cb_day, "ap:day:20261118", session, state)
+        await press(h.cb_time, "ap:time:0900", session, state)
+        old, new = await rows(session, user)
+        assert old.status == "moved" and (new.starts_on, new.status) == (date(2026, 11, 18), "planned")
+
+    async def test_no_window_unlike_after(self, session, user, edit, cb_answer, state) -> None:
+        """В26-А: карточка отмечает и через две недели; `ap:after` — только 3 дня."""
+        appt = await past_row(session, user, days_ago=14)
+        await press(h.cb_after, f"ap:after:{appt.id}:done", session, state)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        cb_answer.reset_mock()
+        await press(h.cb_mark, f"ap:mark:{appt.id}:done", session, state)
+        assert edit.call_args.args[0] == texts.AP_DONE
+        assert (await rows(session, user))[0].status == "done"
+
+    async def test_future_and_repeat_stale(self, session, user, edit, cb_answer, state) -> None:
+        up = await add(session, user)  # дата впереди — отметить нельзя
+        await press(h.cb_mark, f"ap:mark:{up.id}:done", session, state)
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        done_row = await past_row(session, user, days_ago=1, status="done")
+        cb_answer.reset_mock()
+        await press(h.cb_mark, f"ap:mark:{done_row.id}:done", session, state)  # повтор
+        cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+
+    async def test_foreign_and_bad(self, session, user, edit, cb_answer, state) -> None:
+        other = UserModel(telegram_id=222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.commit()
+        foreign = await add(session, other, starts_on=TODAY)
+        appt = await add(session, user, starts_on=TODAY)
+        for data in (f"ap:mark:{foreign.id}:done", f"ap:mark:{appt.id}:unknown", "ap:mark:abc:done", "ap:mark:1"):
+            cb_answer.reset_mock()
+            await press(h.cb_mark, data, session, state)
+            cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+
+
+class TestConclusions:
+    """`ap:conc:*` и FSM заключений (§6.13, 0.5.11)."""
+
+    async def test_list_empty_and_items(self, session, user, edit, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        await press(h.cb_conc, f"ap:conc:{appt.id}", session, state)
+        assert edit.call_args.args[0].startswith("📝 Заключение врача — Кардиолог 10.11")
+        assert texts.AP_CONC_EMPTY in edit.call_args.args[0]
+        await ap.add_conclusion(session, appt.id, "Первое заключение")
+        await ap.add_conclusion(session, appt.id, "Второе")
+        await session.commit()
+        await press(h.cb_conc, f"ap:conc:{appt.id}", session, state)
+        shown = edit.call_args.args[0]
+        assert "1. «Первое заключение»" in shown and "2. «Второе»" in shown
+        assert labels(edit.call_args.kwargs["reply_markup"]) == [
+            texts.BTN_AP_CONC_TEXT, texts.BTN_AP_CONC_PHOTO, texts.BTN_AP_DELETE,
+            texts.BTN_AP_CONC_TEXT, texts.BTN_AP_CONC_PHOTO, texts.BTN_AP_DELETE,
+            texts.BTN_AP_ADD, texts.BTN_BACK,
+        ]
+
+    async def test_add_flow(self, session, user, edit, answer, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        await press(h.cb_conc, f"ap:conc:{appt.id}:add", session, state)
+        assert edit.call_args.args[0] == texts.AP_CONC_PROMPT
+        await send(h.msg_conc_text, "   ", session, state)  # пустое после trim
+        answer.assert_awaited_with(texts.AP_CONC_EMPTY_INPUT)
+        await send(h.msg_conc_text, "х" * 4001, session, state)
+        answer.assert_awaited_with(texts.AP_CONC_TOO_LONG)
+        await send(h.msg_conc_text, "  Рекомендовано продолжить  ", session, state)
+        assert answer.call_args.args[0] == f"{texts.AP_CONC_SAVED}\n\n«Рекомендовано продолжить»"
+        [item] = await ap.list_conclusions(session, appt.id)
+        assert item.text == "Рекомендовано продолжить"
+
+    async def test_limit(self, session, user, edit, answer, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        for index in range(ap.CONCLUSION_LIMIT):
+            await ap.add_conclusion(session, appt.id, f"З-{index}")
+        await session.commit()
+        await press(h.cb_conc, f"ap:conc:{appt.id}:add", session, state)  # лимит на входе
+        cb_answer.assert_awaited_with(texts.AP_CONC_LIMIT)
+        # и на сохранении (условная вставка) — черновик задан напрямую
+        await state.set_state(h.AppointmentConclusion.text)
+        await state.update_data({h.K_CONC_ID: appt.id, h.K_CONC_CID: None, h.K_CONC_MSG: 1})
+        await send(h.msg_conc_text, "Лишнее", session, state)
+        answer.assert_awaited_with(texts.AP_CONC_LIMIT)
+
+    async def test_edit_text(self, session, user, edit, answer, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        cid = await ap.add_conclusion(session, appt.id, "Было")
+        await session.commit()
+        await press(h.cb_conc, f"ap:conc:{appt.id}:{cid}:text", session, state)
+        assert edit.call_args.args[0] == texts.AP_CONC_PROMPT
+        await send(h.msg_conc_text, "Стало", session, state)
+        assert answer.call_args.args[0].startswith("📝 Заключение врача")  # экран заключений
+        assert (await ap.list_conclusions(session, appt.id))[0].text == "Стало"
+
+    async def test_photo_flow(self, session, user, edit, answer, cb_answer, state, mocker) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        cid = await ap.add_conclusion(session, appt.id, "Текст")
+        await session.commit()
+        await press(h.cb_conc, f"ap:conc:{appt.id}:{cid}:photo", session, state)  # фото нет
+        assert edit.call_args.args[0] == texts.AP_CONC_PHOTO_PROMPT
+        await call(h.msg_conc_photo, message=make_message("документ"), session=session, state=state)
+        answer.assert_awaited_with(texts.AP_CONC_PHOTO_NOT_PHOTO)
+        await call(h.msg_conc_photo, message=make_photo_message(), session=session, state=state)
+        assert (await ap.list_conclusions(session, appt.id))[0].photo_file_id == "photo-1"
+        # показ фото — новым сообщением (временным)
+        answer_photo = mocker.patch.object(Message, "answer_photo", new_callable=mocker.AsyncMock)
+        delete = mocker.patch.object(Message, "delete", new_callable=mocker.AsyncMock)
+        await press(h.cb_conc, f"ap:conc:{appt.id}:{cid}:photo", session, state)
+        answer_photo.assert_awaited()
+        # «Убрать фото» с фото-сообщения: сообщение удаляется, фото снимается
+        photo_cb = make_callback_with(f"ap:conc:{appt.id}:{cid}:photo:rm", make_photo_message())
+        await call(h.cb_conc, callback=photo_cb, session=session, state=state)
+        delete.assert_awaited()
+        assert (await ap.list_conclusions(session, appt.id))[0].photo_file_id is None
+
+    async def test_photo_replace(self, session, user, edit, answer, cb_answer, state, mocker) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        cid = await ap.add_conclusion(session, appt.id, "Текст", photo_file_id="photo-1")
+        await session.commit()
+        delete = mocker.patch.object(Message, "delete", new_callable=mocker.AsyncMock)
+        answer_photo = mocker.patch.object(Message, "answer_photo", new_callable=mocker.AsyncMock)
+        await press(h.cb_conc, f"ap:conc:{appt.id}:{cid}:photo", session, state)  # показ
+        answer_photo.assert_awaited()
+        put_cb = make_callback_with(f"ap:conc:{appt.id}:{cid}:photo:put", make_photo_message())
+        await call(h.cb_conc, callback=put_cb, session=session, state=state)
+        delete.assert_awaited()  # фото-сообщение удалено
+        assert edit.call_args.args[0] == texts.AP_CONC_PHOTO_PROMPT
+        await call(h.msg_conc_photo, message=make_photo_message(), session=session, state=state)
+        assert (await ap.list_conclusions(session, appt.id))[0].photo_file_id == "photo-1"
+
+    async def test_delete(self, session, user, edit, cb_answer, state) -> None:
+        appt = await past_row(session, user, days_ago=1, status="done")
+        cid = await ap.add_conclusion(session, appt.id, "Рекомендовано продолжить")
+        await session.commit()
+        await press(h.cb_conc, f"ap:conc:{appt.id}:{cid}:del", session, state)
+        assert edit.call_args.args[0] == texts.AP_CONC_DELETE_ASK.format(preview="Рекомендовано продолжить")
+        assert labels(edit.call_args.kwargs["reply_markup"]) == [texts.BTN_AP_DELETE_YES, texts.BTN_AP_NO]
+        await press(h.cb_conc, f"ap:conc:{appt.id}:{cid}:del:ok", session, state)
+        assert texts.AP_CONC_EMPTY in edit.call_args.args[0]
+        assert await ap.list_conclusions(session, appt.id) == []
+
+    async def test_show_at_edits_source(self, session, user, edit, answer, state, mocker) -> None:
+        """Ответ FSM правит исходное сообщение (`K_CONC_MSG`), если оно не текущее."""
+        appt = await past_row(session, user, days_ago=1, status="done")
+        await state.set_state(h.AppointmentConclusion.text)
+        await state.update_data({h.K_CONC_ID: appt.id, h.K_CONC_CID: None, h.K_CONC_MSG: 100})
+        bot_mock = mocker.AsyncMock()
+        message = make_message("Рекомендовано продолжить")
+        message.as_(bot_mock)
+        await call(h.msg_conc_text, message=message, session=session, state=state)
+        bot_mock.edit_message_text.assert_awaited()
+        assert (await ap.list_conclusions(session, appt.id))[0].text == "Рекомендовано продолжить"
+
+    async def test_stale_foreign_and_photo_back(self, session, user, edit, cb_answer, state, mocker) -> None:
+        other = UserModel(telegram_id=222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.commit()
+        foreign_appt = await past_row(session, other, days_ago=1, status="done")
+        appt = await past_row(session, user, days_ago=1, status="done")
+        foreign_cid = await ap.add_conclusion(session, foreign_appt.id, "Чужое")
+        cid = await ap.add_conclusion(session, appt.id, "Своё")
+        await session.commit()
+        for data in (
+            f"ap:conc:{foreign_appt.id}",
+            f"ap:conc:{appt.id}:{foreign_cid}:text",
+            f"ap:conc:{appt.id}:xyz",
+            f"ap:conc:{appt.id}:{cid}:unknown",
+            "ap:conc:abc",
+        ):
+            cb_answer.reset_mock()
+            await press(h.cb_conc, data, session, state)
+            cb_answer.assert_awaited_with(texts.STALE_MESSAGE)
+        delete = mocker.patch.object(Message, "delete", new_callable=mocker.AsyncMock)
+        photo_cb = make_callback_with(f"ap:conc:{appt.id}", make_photo_message())
+        await call(h.cb_conc, callback=photo_cb, session=session, state=state)
+        delete.assert_awaited()  # «Назад» с фото-сообщения: удалить, список не трогать

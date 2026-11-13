@@ -12,7 +12,7 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import Appointment, Consent, Doctor, DoctorPatient, User
+from bot.models import Appointment, AppointmentConclusion, Consent, Doctor, DoctorPatient, User
 from bot.services import appointments as ap
 
 UTC = timezone.utc
@@ -520,3 +520,146 @@ class TestAccountDeletion:
         await session.delete(user)
         await session.commit()
         assert (await session.execute(select(Appointment))).scalars().all() == []
+
+
+# ─────────────────────────── Заключения (0.5.11, §4.17) ───────────────────────────
+
+
+class TestConclusionText:
+    def test_trim(self) -> None:
+        assert ap.valid_conclusion_text("  Рекомендовано  ") == "Рекомендовано"
+
+    def test_empty_and_whitespace(self) -> None:
+        assert ap.valid_conclusion_text("") is None
+        assert ap.valid_conclusion_text("   \n\t ") is None
+
+    def test_bounds(self) -> None:
+        assert ap.valid_conclusion_text("х") == "х"
+        assert ap.valid_conclusion_text("х" * 4000) == "х" * 4000
+        assert ap.valid_conclusion_text("х" * 4001) is None
+
+    def test_preview(self) -> None:
+        assert ap.conclusion_preview("Коротко") == "Коротко"
+        long = "х" * 70
+        assert ap.conclusion_preview(long) == "х" * 60 + "…"
+        assert ap.conclusion_preview("два\n  слова") == "два слова"
+
+    def test_fmt_conclusion_line(self) -> None:
+        one = AppointmentConclusion(id=1, appointment_id=1, text="Рекомендовано продолжить")
+        many = [one, AppointmentConclusion(id=2, appointment_id=1, text="Контроль")]
+        assert ap.fmt_conclusion_line([]) == ""
+        assert ap.fmt_conclusion_line([one]) == texts.AP_CONC_PREVIEW.format(preview="Рекомендовано продолжить")
+        assert ap.fmt_conclusion_line(many) == texts.AP_CONC_PREVIEW_MANY.format(count=2)
+
+
+class TestConclusionCrud:
+    async def test_add_list_count(self, session, user) -> None:
+        appt = await add(session, user)
+        first = await ap.add_conclusion(session, appt.id, "Первое", "file-1", now=NOW)
+        second = await ap.add_conclusion(session, appt.id, "Второе", now=NOW)
+        assert first is not None and second is not None and first != second
+        items = await ap.list_conclusions(session, appt.id)
+        assert [item.text for item in items] == ["Первое", "Второе"]
+        assert [item.photo_file_id for item in items] == ["file-1", None]
+        assert await ap.count_conclusions(session, appt.id) == 2
+
+    async def test_limit_conditional_insert(self, session, user) -> None:
+        appt = await add(session, user)
+        for index in range(ap.CONCLUSION_LIMIT):
+            assert await ap.add_conclusion(session, appt.id, f"Заключение {index}", now=NOW) is not None
+        assert await ap.add_conclusion(session, appt.id, "Лишнее", now=NOW) is None
+        assert await ap.count_conclusions(session, appt.id) == ap.CONCLUSION_LIMIT
+
+    async def test_limit_is_per_event(self, session, user) -> None:
+        first = await add(session, user, title="Кардиолог")
+        second = await add(session, user, title="Эндокринолог")
+        for index in range(ap.CONCLUSION_LIMIT):
+            await ap.add_conclusion(session, first.id, f"З-{index}", now=NOW)
+        assert await ap.add_conclusion(session, second.id, "Своё", now=NOW) is not None
+
+    async def test_owned(self, session, user) -> None:
+        appt = await add(session, user)
+        cid = await ap.add_conclusion(session, appt.id, "Текст", now=NOW)
+        assert (await ap.get_owned_conclusion(session, user, cid)).text == "Текст"
+        other = User(telegram_id=222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.commit()
+        assert await ap.get_owned_conclusion(session, other, cid) is None
+
+    async def test_set_text_and_photo(self, session, user) -> None:
+        appt = await add(session, user)
+        cid = await ap.add_conclusion(session, appt.id, "Было", now=NOW)
+        assert await ap.set_conclusion_text(session, user, cid, "Стало")
+        assert await ap.set_conclusion_photo(session, user, cid, "file-9")
+        item = await ap.get_owned_conclusion(session, user, cid)
+        assert (item.text, item.photo_file_id) == ("Стало", "file-9")
+        assert await ap.set_conclusion_photo(session, user, cid, None)  # «Убрать фото»
+        assert (await ap.get_owned_conclusion(session, user, cid)).photo_file_id is None
+
+    async def test_foreign_writes_rejected(self, session, user) -> None:
+        appt = await add(session, user)
+        cid = await ap.add_conclusion(session, appt.id, "Текст", now=NOW)
+        other = User(telegram_id=222, timezone="Europe/Minsk")
+        session.add(other)
+        await session.commit()
+        assert not await ap.set_conclusion_text(session, other, cid, "Чужое")
+        assert not await ap.set_conclusion_photo(session, other, cid, "file")
+        assert not await ap.remove_conclusion(session, other, cid)
+        assert (await ap.get_owned_conclusion(session, user, cid)).text == "Текст"
+
+    async def test_remove(self, session, user) -> None:
+        appt = await add(session, user)
+        cid = await ap.add_conclusion(session, appt.id, "Текст", now=NOW)
+        assert await ap.remove_conclusion(session, user, cid)
+        assert not await ap.remove_conclusion(session, user, cid)  # повторно — False
+        assert await ap.list_conclusions(session, appt.id) == []
+
+    async def test_cascade_with_event(self, session, user) -> None:
+        appt = await add(session, user)
+        await ap.add_conclusion(session, appt.id, "Текст", now=NOW)
+        await ap.remove(session, user, appt.id)
+        await session.commit()
+        assert (await session.execute(select(AppointmentConclusion))).scalars().all() == []
+
+    async def test_cascade_with_account(self, session, user) -> None:
+        appt = await add(session, user)
+        await ap.add_conclusion(session, appt.id, "Текст", now=NOW)
+        await session.delete(user)
+        await session.commit()
+        assert (await session.execute(select(AppointmentConclusion))).scalars().all() == []
+
+
+class TestConclusionsInPeriod:
+    async def test_filter_by_event_date(self, session, user) -> None:
+        inside = await add(session, user, title="Кардиолог", starts_on=TODAY - timedelta(days=1))
+        outside = await add(session, user, title="ЭКГ", starts_on=TODAY - timedelta(days=40))
+        await ap.add_conclusion(session, inside.id, "Внутри", now=NOW)
+        await ap.add_conclusion(session, outside.id, "Снаружи", now=NOW)
+        start, end = TODAY - timedelta(days=7), TODAY
+        pairs = await ap.conclusions_in_period(session, user, start, end)
+        assert [(appt.title, [i.text for i in items]) for appt, items in pairs] == [
+            ("Кардиолог", ["Внутри"]),
+        ]
+
+    async def test_sorted_and_only_with_conclusions(self, session, user) -> None:
+        later = await add(session, user, title="Поздний", starts_on=TODAY - timedelta(days=1))
+        earlier = await add(session, user, title="Ранний", starts_on=TODAY - timedelta(days=5))
+        without = await add(session, user, title="Без заключения", starts_on=TODAY - timedelta(days=3))
+        await ap.add_conclusion(session, later.id, "П", now=NOW)
+        await ap.add_conclusion(session, earlier.id, "Р", now=NOW)
+        pairs = await ap.conclusions_in_period(session, user, TODAY - timedelta(days=7), TODAY)
+        assert [appt.title for appt, _ in pairs] == ["Ранний", "Поздний"]
+        assert without not in [appt for appt, _ in pairs]
+
+
+class TestMarkingAllowed:
+    def test_window(self, user) -> None:
+        future = make(starts_on=TODAY + timedelta(days=1))
+        today_row = make(starts_on=TODAY)
+        past = make(starts_on=TODAY - timedelta(days=20))
+        done = make(starts_on=TODAY - timedelta(days=1), status="done")
+        assert not ap.marking_allowed(future, TODAY)
+        assert ap.marking_allowed(today_row, TODAY)
+        assert ap.marking_allowed(past, TODAY)  # «без отметки» — окна нет (В26-А)
+        assert not ap.marking_allowed(done, TODAY)
+        assert not ap.awaiting_answer(past, TODAY)  # окно 3 дня — только у уведомления

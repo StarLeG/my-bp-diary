@@ -29,7 +29,7 @@ from sqlalchemy import and_, delete, func, or_, select, text, update
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot import texts
-from bot.models import Appointment, User
+from bot.models import Appointment, AppointmentConclusion, User
 
 logger = logging.getLogger(__name__)
 
@@ -221,6 +221,14 @@ def awaiting_answer(appt: Appointment, current: date) -> bool:
     )
 
 
+def marking_allowed(appt: Appointment, current: date) -> bool:
+    """Отметка из карточки (В26-А, У1-А): `planned`, дата наступила — без окна в 3 дня.
+
+    Окно 3 дня (`awaiting_answer`) — только для кнопок уведомления `ap:after`.
+    """
+    return appt.status == "planned" and appt.starts_on <= current
+
+
 def is_upcoming(appt: Appointment, current: date) -> bool:
     """В «Скоро»: `planned` и дата не прошла (сегодняшнее — до полуночи, Н2)."""
     return appt.status == "planned" and appt.starts_on >= current
@@ -260,8 +268,13 @@ def fmt_event_block(appt: Appointment, icon: bool = True) -> str:
     return "\n".join(lines)
 
 
-def fmt_card(appt: Appointment, user: User, now: Optional[datetime] = None) -> str:
-    """Карточка события (§6.13)."""
+def fmt_card(
+    appt: Appointment,
+    user: User,
+    now: Optional[datetime] = None,
+    conclusions: Sequence[AppointmentConclusion] = (),
+) -> str:
+    """Карточка события (§6.13); строка заключения — превью без типа (0.5.11)."""
     moment = now or datetime.now(timezone.utc)
     current = today(user, moment)
     when = f"{texts.AP_WEEKDAYS[appt.starts_on.weekday()]} {appt.starts_on:%d.%m.%Y}"
@@ -271,11 +284,12 @@ def fmt_card(appt: Appointment, user: User, now: Optional[datetime] = None) -> s
     ]
     if appt.note:
         lines.append(appt.note)
+    lines.append(fmt_conclusion_line(conclusions))
     if is_upcoming(appt, current):
         lines.append(schedule_line(appt.starts_on, appt.starts_at, user.timezone, moment))
     else:
         lines.append(texts.AP_STATUS_LINE.format(status=status_label(appt, current)))
-    return "\n".join(lines)
+    return "\n".join(line for line in lines if line)
 
 
 def fmt_saved(appt: Appointment, user: User, now: Optional[datetime] = None) -> str:
@@ -746,3 +760,188 @@ async def deliver_due(
             except Exception:
                 logger.info("Кнопки прежнего уведомления события %s не сняты", notice.appointment_id)
     return sent
+
+
+# ─────────────────────────── Заключения (0.5.11) ───────────────────────────
+
+#: Заключений на событие (В36-А) — общий лимит для бота и ЛК.
+CONCLUSION_LIMIT = 5
+#: Длина текста заключения (В36-А); пустой (после `trim()`) отклоняется.
+CONCLUSION_TEXT_MAX = 4000
+#: Длина превью в списке, карточке и подтверждении удаления.
+CONCLUSION_PREVIEW = 60
+
+
+def valid_conclusion_text(raw: str) -> Optional[str]:
+    """Текст заключения: убраны краевые пробелы, 1–4000 символов; иначе None (§4.17)."""
+    cleaned = (raw or "").strip()
+    return cleaned if 1 <= len(cleaned) <= CONCLUSION_TEXT_MAX else None
+
+
+def conclusion_preview(value: str, size: int = CONCLUSION_PREVIEW) -> str:
+    """Превью одной строкой: первые 60 символов + «…», если длиннее (§6.13)."""
+    one_line = " ".join(value.split())
+    return one_line if len(one_line) <= size else one_line[:size] + "…"
+
+
+def fmt_conclusion_line(conclusions: Sequence[AppointmentConclusion]) -> str:
+    """Строка заключения в карточке: превью без типа (одно) или счётчик (несколько)."""
+    if not conclusions:
+        return ""
+    if len(conclusions) == 1:
+        return texts.AP_CONC_PREVIEW.format(preview=conclusion_preview(conclusions[0].text))
+    return texts.AP_CONC_PREVIEW_MANY.format(count=len(conclusions))
+
+
+_INSERT_CONCLUSION_LIMITED = text(
+    """
+    INSERT INTO appointment_conclusions (appointment_id, text, photo_file_id, created_at)
+    SELECT :appointment_id, :text, :photo_file_id, :created_at
+    WHERE (
+        SELECT COUNT(*) FROM appointment_conclusions WHERE appointment_id = :appointment_id
+    ) < :limit
+    """
+)
+
+
+async def list_conclusions(
+    session: AsyncSession, appointment_id: int
+) -> list[AppointmentConclusion]:
+    """Заключения события по порядку добавления (§6.13)."""
+    result = await session.execute(
+        select(AppointmentConclusion)
+        .where(AppointmentConclusion.appointment_id == appointment_id)
+        .order_by(AppointmentConclusion.created_at, AppointmentConclusion.id)
+    )
+    return list(result.scalars())
+
+
+async def count_conclusions(session: AsyncSession, appointment_id: int) -> int:
+    """Число заключений события (правило кнопки «📝 …», §6.13)."""
+    return int(
+        (
+            await session.execute(
+                select(func.count())
+                .select_from(AppointmentConclusion)
+                .where(AppointmentConclusion.appointment_id == appointment_id)
+            )
+        ).scalar_one()
+    )
+
+
+async def get_owned_conclusion(
+    session: AsyncSession, user: User, conclusion_id: int
+) -> Optional[AppointmentConclusion]:
+    """Заключение текущего пользователя — через владельца события (§7.1)."""
+    result = await session.execute(
+        select(AppointmentConclusion)
+        .join(Appointment, Appointment.id == AppointmentConclusion.appointment_id)
+        .where(AppointmentConclusion.id == conclusion_id, Appointment.user_id == user.id)
+    )
+    return result.scalars().first()
+
+
+async def add_conclusion(
+    session: AsyncSession,
+    appointment_id: int,
+    text_value: str,
+    photo_file_id: Optional[str] = None,
+    now: Optional[datetime] = None,
+) -> Optional[int]:
+    """Условная вставка: лимит 5 на событие; переполнение — None (§7.2, В36-А)."""
+    result = await session.execute(
+        _INSERT_CONCLUSION_LIMITED,
+        {
+            "appointment_id": appointment_id,
+            "text": text_value,
+            "photo_file_id": photo_file_id,
+            "created_at": _db_time(now or datetime.now(timezone.utc)),
+            "limit": CONCLUSION_LIMIT,
+        },
+    )
+    return result.lastrowid if result.rowcount == 1 else None
+
+
+async def set_conclusion_text(
+    session: AsyncSession, user: User, conclusion_id: int, text_value: str
+) -> bool:
+    """Заменить текст заключения (чужое — False, §7.1)."""
+    result = await session.execute(
+        update(AppointmentConclusion)
+        .where(
+            AppointmentConclusion.id == conclusion_id,
+            AppointmentConclusion.appointment_id.in_(
+                select(Appointment.id).where(Appointment.user_id == user.id)
+            ),
+        )
+        .values(text=text_value)
+        .execution_options(synchronize_session="fetch")
+    )
+    return bool(result.rowcount)
+
+
+async def set_conclusion_photo(
+    session: AsyncSession,
+    user: User,
+    conclusion_id: int,
+    photo_file_id: Optional[str],
+) -> bool:
+    """Установить, заменить или убрать (`None`) фото заключения (чужое — False)."""
+    result = await session.execute(
+        update(AppointmentConclusion)
+        .where(
+            AppointmentConclusion.id == conclusion_id,
+            AppointmentConclusion.appointment_id.in_(
+                select(Appointment.id).where(Appointment.user_id == user.id)
+            ),
+        )
+        .values(photo_file_id=photo_file_id)
+        .execution_options(synchronize_session="fetch")
+    )
+    return bool(result.rowcount)
+
+
+async def remove_conclusion(
+    session: AsyncSession, user: User, conclusion_id: int
+) -> bool:
+    """Удалить заключение (чужое — False); событие не трогается."""
+    result = await session.execute(
+        delete(AppointmentConclusion).where(
+            AppointmentConclusion.id == conclusion_id,
+            AppointmentConclusion.appointment_id.in_(
+                select(Appointment.id).where(Appointment.user_id == user.id)
+            ),
+        )
+    )
+    return bool(result.rowcount)
+
+
+async def conclusions_in_period(
+    session: AsyncSession, user: User, start_day: date, end_day: date
+) -> list[tuple[Appointment, list[AppointmentConclusion]]]:
+    """События периода, у которых есть заключения, по дате события (§10.1, Р7).
+
+    Фильтр — по `starts_on` события, не по `created_at` заключения; сортировка
+    по возрастанию (как таблица отчёта).
+    """
+    appts = (
+        (
+            await session.execute(
+                select(Appointment)
+                .where(
+                    Appointment.user_id == user.id,
+                    Appointment.starts_on >= start_day,
+                    Appointment.starts_on <= end_day,
+                )
+                .order_by(Appointment.starts_on, Appointment.starts_at, Appointment.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    result: list[tuple[Appointment, list[AppointmentConclusion]]] = []
+    for appt in appts:
+        items = await list_conclusions(session, appt.id)
+        if items:
+            result.append((appt, items))
+    return result

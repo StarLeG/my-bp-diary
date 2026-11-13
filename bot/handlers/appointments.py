@@ -1,8 +1,12 @@
-"""«📅 Визиты и анализы» (SPEC.md, §6.13; 0.5.8).
+"""«📅 Визиты и анализы» (SPEC.md, §6.13; 0.5.8, заключения и отметка — 0.5.11).
 
 Список, добавление в пять шагов, карточка, правка по полям, отмена и удаление
 с подтверждением, кнопки уведомлений («✓ Помню», «Перенести», «📄 Отчёт для
 врача», «Отправить врачу»), «Как прошёл визит?» и «Записать следующий?».
+
+С 0.5.11: отметка из карточки (`ap:mark:{id}:{…}` — без окна в 3 дня, в отличие
+от `ap:after`; ответ — редактированием карточки) и заключения (`ap:conc:*`:
+список, ручной ввод текста, фото — только Telegram `file_id`, удаление).
 
 Экраны — без FSM: черновик шагов лежит в FSM-data (`ap_*`), состояние
 ставится только на шагах свободного ввода (название «Другой…», «Другое
@@ -18,7 +22,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import date, datetime, timedelta
-from typing import Optional, Union
+from typing import Optional, Sequence, Union
 
 from aiogram import Bot, F, Router
 from aiogram.exceptions import TelegramBadRequest
@@ -29,7 +33,7 @@ from aiogram.types import BufferedInputFile, CallbackQuery, Message
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, texts
-from bot.models import Appointment, User
+from bot.models import Appointment, AppointmentConclusion as Conclusion, User
 from bot.services import appointments as ap
 from bot.services import measurements as measurements_service
 from bot.services import pdf_report
@@ -55,6 +59,20 @@ class AppointmentInput(StatesGroup):
     title = State()
     time = State()
     note = State()
+
+
+class AppointmentConclusion(StatesGroup):
+    """Заключение (0.5.11): текст (добавление / правка) и ожидание фото."""
+
+    text = State()
+    photo = State()
+
+
+#: Ключи черновика заключений: событие, запись, текст замены, id экрана.
+K_CONC_ID, K_CONC_CID, K_CONC_TEXT, K_CONC_MSG = (
+    "ap_conc_id", "ap_conc_cid", "ap_conc_text", "ap_conc_msg",
+)
+CONC_DRAFT_KEYS = (K_CONC_ID, K_CONC_CID, K_CONC_TEXT, K_CONC_MSG)
 
 
 Target = Union[CallbackQuery, Message]
@@ -114,6 +132,25 @@ async def _start_draft(state: FSMContext, **values) -> None:
 
 async def _clear_draft(state: FSMContext) -> None:
     data = {k: v for k, v in (await state.get_data()).items() if k not in DRAFT_KEYS}
+    await state.set_state(None)
+    await state.set_data(data)
+
+
+async def _conc_draft(state: FSMContext) -> dict:
+    data = await state.get_data()
+    return {key: data.get(key) for key in CONC_DRAFT_KEYS}
+
+
+async def _start_conc_draft(state: FSMContext, fsm_state, **values) -> None:
+    """Черновик заключения: прежние ключи `ap_conc_*` сбрасываются."""
+    data = {k: v for k, v in (await state.get_data()).items() if k not in CONC_DRAFT_KEYS}
+    data.update(values)
+    await state.set_state(fsm_state)
+    await state.set_data(data)
+
+
+async def _clear_conc_draft(state: FSMContext) -> None:
+    data = {k: v for k, v in (await state.get_data()).items() if k not in CONC_DRAFT_KEYS}
     await state.set_state(None)
     await state.set_data(data)
 
@@ -178,16 +215,28 @@ async def _past_screen(
     return "\n".join(lines), keyboards.ap_past_kb(items, large=user.ui_large, limit=limit)
 
 
-def _card(appt: Appointment, user: User) -> tuple[str, object]:
+def _card(
+    appt: Appointment, user: User, conclusions: Sequence[Conclusion] = ()
+) -> tuple[str, object]:
+    """Карточка: ветки `ap_card_kb` — future / today / past / closed (0.5.11, Р2)."""
     current = ap.today(user)
-    if ap.is_upcoming(appt, current):
-        card_state, back = "upcoming", "ap:list"
-    elif ap.awaiting_answer(appt, current):
-        card_state, back = "waiting", "ap:past"
-    else:
+    if appt.status != "planned":
         card_state, back = "closed", "ap:past"
-    return ap.fmt_card(appt, user), keyboards.ap_card_kb(
-        appt.id, appt.kind, card_state, back, large=user.ui_large
+    elif appt.starts_on > current:
+        card_state, back = "future", "ap:list"
+    elif appt.starts_on == current:
+        card_state, back = "today", "ap:list"
+    else:
+        card_state, back = "past", "ap:past"
+    if card_state in ("today", "past"):
+        with_conclusion = True
+    elif card_state == "closed":
+        # `done`/`moved` — всегда; `missed`/`cancelled` — только если заключения уже есть.
+        with_conclusion = appt.status in ("done", "moved") or bool(conclusions)
+    else:
+        with_conclusion = False
+    return ap.fmt_card(appt, user, conclusions=conclusions), keyboards.ap_card_kb(
+        appt.id, appt.kind, card_state, back, large=user.ui_large, with_conclusion=with_conclusion
     )
 
 
@@ -244,9 +293,13 @@ async def _title_step(target: Target, state: FSMContext, kind: str) -> None:
     await _show(target, texts.AP_TITLE_ASK[kind], keyboards.ap_title_kb(kind, back="ap:back"))
 
 
-async def _show_card(target: Target, state: FSMContext, appt: Appointment, user: User) -> None:
+async def _show_card(
+    target: Target, state: FSMContext, session: AsyncSession, appt: Appointment, user: User
+) -> None:
     await _clear_draft(state)
-    text, markup = _card(appt, user)
+    await _clear_conc_draft(state)
+    conclusions = await ap.list_conclusions(session, appt.id)
+    text, markup = _card(appt, user, conclusions)
     await _show(target, text, markup)
 
 
@@ -335,7 +388,7 @@ async def _title_chosen(target: Target, state: FSMContext, session: AsyncSession
             return False
         await ap.set_title(session, appt, title)
         await session.commit()
-        await _show_card(target, state, appt, user)
+        await _show_card(target, state, session, appt, user)
         return True
     if draft[K_MODE] != "add":
         return False
@@ -539,7 +592,7 @@ async def _note_chosen(target: Target, state: FSMContext, session: AsyncSession,
         if note is not None:
             await ap.set_note(session, appt, note)
             await session.commit()
-        await _show_card(target, state, appt, user)
+        await _show_card(target, state, session, appt, user)
         return None
     if draft[K_MODE] != "add" or not (draft[K_KIND] and draft[K_TITLE] and draft[K_DAY]):
         return texts.STALE_MESSAGE
@@ -620,7 +673,7 @@ async def cb_back(callback: CallbackQuery, state: FSMContext, session: AsyncSess
         await _clear_draft(state)
         await _stale(callback)
         return
-    await _show_card(callback, state, appt, user)  # первый шаг правки / «Перенёс(ла)» — карточка
+    await _show_card(callback, state, session, appt, user)  # первый шаг правки / «Перенёс(ла)» — карточка
     await callback.answer()
 
 
@@ -634,7 +687,7 @@ async def cb_open(callback: CallbackQuery, state: FSMContext, session: AsyncSess
     if appt is None:
         await _stale(callback)
         return
-    await _show_card(callback, state, appt, user)
+    await _show_card(callback, state, session, appt, user)
     await callback.answer()
 
 
@@ -663,7 +716,7 @@ async def cb_edit(callback: CallbackQuery, state: FSMContext, session: AsyncSess
     elif action == "note:clear":
         await ap.set_note(session, appt, "")
         await session.commit()
-        await _show_card(callback, state, appt, user)
+        await _show_card(callback, state, session, appt, user)
     else:
         await _stale(callback)
         return
@@ -781,7 +834,11 @@ async def cb_after(callback: CallbackQuery, state: FSMContext, session: AsyncSes
         return
     await session.commit()
     if answer == "done":
-        await _show(callback, texts.AP_DONE, keyboards.ap_next_kb(appt.id, user.ui_large))
+        await _show(
+            callback,
+            texts.AP_DONE,
+            keyboards.ap_next_kb(appt.id, user.ui_large, kind=appt.kind),
+        )
     else:
         await _show(callback, texts.AP_MISSED, keyboards.ap_done_kb(user.ui_large))
     await callback.answer()
@@ -832,7 +889,8 @@ async def cb_report(callback: CallbackQuery, session: AsyncSession) -> None:
         start = end - timedelta(days=REPORT_DAYS - 1)
         try:
             data = await pdf_report.collect_report(
-                session, user, start, end, subject=pdf_report.patient_subject(user)
+                session, user, start, end, subject=pdf_report.patient_subject(user),
+                include_conclusions=True,
             )
         except pdf_report.ReportEmptyError:
             await session.commit()
@@ -869,5 +927,306 @@ async def cb_send(callback: CallbackQuery, session: AsyncSession, bot: Bot) -> N
         text, reply_markup=keyboards.back_to_menu(), link_preview_options=keyboards.NO_LINK_PREVIEW
     )
     await callback.answer()
+
+
+# ─────────────────────────── Отметка из карточки (0.5.11) ───────────────────────────
+
+
+@router.callback_query(F.data.startswith("ap:mark:"))
+async def cb_mark(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Отметка из карточки (В25-Б, В26-А, У1-А): `ap:mark:{id}:{done|moved|missed}`.
+
+    Окно без ограничения (в отличие от `ap:after` — там 3 дня); поток общий
+    (В10, Н1, В11) и всегда редактированием карточки; повторное нажатие —
+    «Это сообщение устарело» (U8).
+    """
+    parts = (callback.data or "").split(":")
+    user = await _user(session, callback)
+    appt = await _owned(session, user, parts[2]) if len(parts) == 4 else None
+    answer = parts[3] if len(parts) == 4 else ""
+    if (
+        appt is None
+        or answer not in ("done", "moved", "missed")
+        or not ap.marking_allowed(appt, ap.today(user))
+    ):
+        await _stale(callback)
+        return
+    if answer == "moved":
+        await _start_draft(state, **{K_MODE: "moved", K_ID: appt.id})
+        await _calendar(callback, state, user)
+        await callback.answer()
+        return
+    if not await ap.set_status(session, appt, answer):
+        await _stale(callback)
+        return
+    await session.commit()
+    if answer == "done":
+        await _show(
+            callback,
+            texts.AP_DONE,
+            keyboards.ap_next_kb(appt.id, user.ui_large, kind=appt.kind),
+        )
+    else:
+        await _show(callback, texts.AP_MISSED, keyboards.ap_done_kb(user.ui_large))
+    await callback.answer()
+
+
+# ─────────────────────────── Заключения (0.5.11) ───────────────────────────
+
+
+def _conc_screen(
+    appt: Appointment, conclusions: Sequence[Conclusion], user: User
+) -> tuple[str, object]:
+    """Экран заключений: заголовок, превью записей (или «Пока пусто»), кнопки (§6.13)."""
+    header = texts.AP_CONC_HEADER.format(
+        button=texts.AP_CONC_BUTTON[appt.kind], title=appt.title, day=f"{appt.starts_on:%d.%m}"
+    )
+    lines = [header, ""]
+    if conclusions:
+        lines.extend(
+            texts.AP_CONC_ITEM.format(n=index, preview=ap.conclusion_preview(item.text))
+            for index, item in enumerate(conclusions, 1)
+        )
+    else:
+        lines.append(texts.AP_CONC_EMPTY)
+    return "\n".join(lines), keyboards.ap_conc_kb(
+        appt.id, [item.id for item in conclusions], large=user.ui_large
+    )
+
+
+async def _show_at(
+    source: Union[CallbackQuery, Message],
+    msg_id: Optional[int],
+    text: str,
+    markup,
+) -> None:
+    """Экран заключений: правкой исходного сообщения (`msg_id`), иначе ответом.
+
+    Фото-сообщение не редактируется (Telegram не превращает медиа в текст):
+    если править нельзя — ответ новым сообщением.
+    """
+    message = source.message if isinstance(source, CallbackQuery) else source
+    bot = getattr(message, "bot", None) if isinstance(message, Message) else None
+    if bot is not None and msg_id is not None and msg_id != message.message_id:
+        try:
+            await bot.edit_message_text(  # type: ignore[union-attr]
+                text, chat_id=message.chat.id, message_id=msg_id, reply_markup=markup
+            )
+            return
+        except TelegramBadRequest as error:
+            if "message is not modified" not in str(error):
+                await message.answer(text, reply_markup=markup)
+            return
+    await _show(source, text, markup)
+
+
+@router.callback_query(F.data.startswith("ap:conc:"))
+async def cb_conc(callback: CallbackQuery, state: FSMContext, session: AsyncSession) -> None:
+    """Заключения (§6.13): `ap:conc:{id}[:add | :{cid}:{text|photo|del}[:put|rm|ok]]`.
+
+    `ap:conc:{id}` — список (и отмена FSM); `:add` — сразу FSM ввода, не список;
+    `:{cid}:text` — правка текста; `:{cid}:photo` — показ / приём фото (один
+    callback с ветвлением); `photo:put` / `photo:rm` — замена и удаление фото;
+    `del` / `del:ok` — удаление с подтверждением (канон бота). Экран заключений
+    живёт в одном текстовом сообщении; фото-сообщение временное и удаляется.
+    """
+    parts = (callback.data or "").split(":")
+    user = await _user(session, callback)
+    appt = await _owned(session, user, parts[2]) if len(parts) >= 3 else None
+    if appt is None:
+        await _stale(callback)
+        return
+    message = callback.message
+    is_photo_message = isinstance(message, Message) and bool(message.photo)
+
+    if len(parts) == 3:
+        await _clear_conc_draft(state)
+        if is_photo_message:
+            # «Назад» с фото-сообщения: оно удаляется, список под ним не меняется.
+            await message.delete()  # type: ignore[union-attr]
+            await callback.answer()
+            return
+        conclusions = await ap.list_conclusions(session, appt.id)
+        text, markup = _conc_screen(appt, conclusions, user)
+        await _show(callback, text, markup)
+        await callback.answer()
+        return
+
+    if len(parts) == 4 and parts[3] == "add":
+        if await ap.count_conclusions(session, appt.id) >= ap.CONCLUSION_LIMIT:
+            await callback.answer(texts.AP_CONC_LIMIT)
+            return
+        await _start_conc_draft(
+            state,
+            AppointmentConclusion.text,
+            **{K_CONC_ID: appt.id, K_CONC_MSG: message.message_id},  # type: ignore[union-attr]
+        )
+        await _show(callback, texts.AP_CONC_PROMPT, keyboards.ap_conc_cancel_kb(appt.id))
+        await callback.answer()
+        return
+
+    cid = _int(parts[3]) if len(parts) >= 5 else None
+    action = ":".join(parts[4:]) if len(parts) >= 5 else ""
+    conc = await ap.get_owned_conclusion(session, user, cid) if cid is not None else None
+    if conc is None or conc.appointment_id != appt.id:
+        await _stale(callback)
+        return
+
+    if action == "text":
+        await _start_conc_draft(
+            state,
+            AppointmentConclusion.text,
+            **{K_CONC_ID: appt.id, K_CONC_CID: conc.id, K_CONC_MSG: message.message_id},  # type: ignore[union-attr]
+        )
+        await _show(callback, texts.AP_CONC_PROMPT, keyboards.ap_conc_cancel_kb(appt.id))
+        await callback.answer()
+        return
+
+    if action == "photo":
+        caption = texts.AP_CONC_PHOTO_CAPTION.format(
+            button=texts.AP_CONC_BUTTON[appt.kind], title=appt.title, day=f"{appt.starts_on:%d.%m}"
+        )
+        if conc.photo_file_id is None:
+            await _start_conc_draft(
+                state,
+                AppointmentConclusion.photo,
+                **{K_CONC_ID: appt.id, K_CONC_CID: conc.id, K_CONC_MSG: message.message_id},  # type: ignore[union-attr]
+            )
+            await _show(callback, texts.AP_CONC_PHOTO_PROMPT, keyboards.ap_conc_cancel_kb(appt.id))
+        else:
+            # Показ новым (временным) сообщением; экран списка остаётся под ним.
+            await _start_conc_draft(
+                state,
+                None,
+                **{K_CONC_ID: appt.id, K_CONC_CID: conc.id, K_CONC_MSG: message.message_id},  # type: ignore[union-attr]
+            )
+            await message.answer_photo(  # type: ignore[union-attr]
+                conc.photo_file_id,
+                caption=caption,
+                reply_markup=keyboards.ap_photo_kb(appt.id, conc.id),
+            )
+        await callback.answer()
+        return
+
+    if action == "photo:put":
+        draft = await _conc_draft(state)
+        if is_photo_message:
+            await message.delete()  # type: ignore[union-attr]
+        await state.set_state(AppointmentConclusion.photo)
+        await _show_at(
+            callback,
+            draft.get(K_CONC_MSG),
+            texts.AP_CONC_PHOTO_PROMPT,
+            keyboards.ap_conc_cancel_kb(appt.id),
+        )
+        await callback.answer()
+        return
+
+    if action == "photo:rm":
+        draft = await _conc_draft(state)
+        if not await ap.set_conclusion_photo(session, user, conc.id, None):
+            await _stale(callback)
+            return
+        await session.commit()
+        if is_photo_message:
+            await message.delete()  # type: ignore[union-attr]
+        conclusions = await ap.list_conclusions(session, appt.id)
+        text, markup = _conc_screen(appt, conclusions, user)
+        await _show_at(callback, draft.get(K_CONC_MSG), text, markup)
+        await callback.answer()
+        return
+
+    if action == "del":
+        await _show(
+            callback,
+            texts.AP_CONC_DELETE_ASK.format(preview=ap.conclusion_preview(conc.text)),
+            keyboards.ap_conc_del_kb(appt.id, conc.id),
+        )
+        await callback.answer()
+        return
+
+    if action == "del:ok":
+        if not await ap.remove_conclusion(session, user, conc.id):
+            await _stale(callback)
+            return
+        await session.commit()
+        conclusions = await ap.list_conclusions(session, appt.id)
+        text, markup = _conc_screen(appt, conclusions, user)
+        await _show(callback, text, markup)
+        await callback.answer()
+        return
+
+    await _stale(callback)
+
+
+@router.message(AppointmentConclusion.text)
+async def msg_conc_text(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Текст заключения: добавление или правка (В29-А; пустое — после `trim()`)."""
+    draft = await _conc_draft(state)
+    value = ap.valid_conclusion_text(message.text or "")
+    if value is None:
+        error = (
+            texts.AP_CONC_EMPTY_INPUT
+            if not (message.text or "").strip()
+            else texts.AP_CONC_TOO_LONG
+        )
+        await message.answer(error)
+        return
+    user = await _user(session, message)
+    appt = await _owned(session, user, str(draft[K_CONC_ID])) if draft[K_CONC_ID] else None
+    if appt is None:
+        await _clear_conc_draft(state)
+        await message.answer(texts.STALE_MESSAGE)
+        return
+    if draft[K_CONC_CID] is None:
+        created = await ap.add_conclusion(session, appt.id, value)
+        await session.commit()
+        if created is None:
+            await message.answer(texts.AP_CONC_LIMIT)
+            return
+        result = f"{texts.AP_CONC_SAVED}\n\n«{value}»"
+    else:
+        if not await ap.set_conclusion_text(session, user, draft[K_CONC_CID], value):
+            await _clear_conc_draft(state)
+            await message.answer(texts.STALE_MESSAGE)
+            return
+        await session.commit()
+        result = None
+    await _clear_conc_draft(state)
+    conclusions = await ap.list_conclusions(session, appt.id)
+    text, markup = _conc_screen(appt, conclusions, user)
+    if result is not None:
+        # «Сохранил ✓» + текст; кнопки — экрана заключений.
+        text = result
+    await _show_at(message, draft[K_CONC_MSG], text, markup)
+
+
+@router.message(AppointmentConclusion.photo)
+async def msg_conc_photo(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Фото заключения: только `message.photo`; приём и замена затирают прежний `file_id`."""
+    draft = await _conc_draft(state)
+    user = await _user(session, message)
+    appt = await _owned(session, user, str(draft[K_CONC_ID])) if draft[K_CONC_ID] else None
+    conc = (
+        await ap.get_owned_conclusion(session, user, draft[K_CONC_CID])
+        if draft[K_CONC_CID] is not None
+        else None
+    )
+    if appt is None or conc is None:
+        await _clear_conc_draft(state)
+        await message.answer(texts.STALE_MESSAGE)
+        return
+    if not message.photo:
+        await message.answer(texts.AP_CONC_PHOTO_NOT_PHOTO)
+        return
+    if not await ap.set_conclusion_photo(session, user, conc.id, message.photo[-1].file_id):
+        await _clear_conc_draft(state)
+        await message.answer(texts.STALE_MESSAGE)
+        return
+    await session.commit()
+    await _clear_conc_draft(state)
+    conclusions = await ap.list_conclusions(session, appt.id)
+    text, markup = _conc_screen(appt, conclusions, user)
+    await _show_at(message, draft[K_CONC_MSG], text, markup)
 
 

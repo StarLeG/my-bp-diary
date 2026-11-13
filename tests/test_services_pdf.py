@@ -19,7 +19,7 @@ from pypdf import PdfReader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import Measurement, MeasurementMedication, Medication, User
+from bot.models import Appointment, AppointmentConclusion, Measurement, MeasurementMedication, Medication, User
 from bot.services import csv_export, pdf_report, stats
 from bot.services import medications as medications_service
 from web.cabinet.chart_zones import CHART_ZONES
@@ -388,3 +388,88 @@ class TestBuildPdf:
     def test_empty_rows_still_render(self) -> None:
         """Генератор не падает на пустой таблице (пустой период отсекается раньше)."""
         assert pdf_report.build_pdf(_data(rows=[])).startswith(b"%PDF")
+
+
+# ─────────────── Раздел «Заключения врачей» (0.5.11, В32-Г, У2-А) ───────────────
+
+
+async def _add_event(
+    session: AsyncSession, user: User, title: str, starts_on: date, conclusion: str = ""
+) -> Appointment:
+    appt = Appointment(
+        user_id=user.id, kind="doctor", title=title, starts_on=starts_on, starts_at="10:00", status="done"
+    )
+    session.add(appt)
+    await session.commit()
+    if conclusion:
+        session.add(AppointmentConclusion(appointment_id=appt.id, text=conclusion))
+        await session.commit()
+    return appt
+
+
+class TestConclusionsSection:
+    async def test_collect_included_for_patient(self, session, user) -> None:
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        await _add(session, user, NOW - timedelta(days=2))
+        await _add_event(session, user, "Кардиолог", today - timedelta(days=1), "Продолжить приём")
+        await _add_event(session, user, "ЭКГ", today - timedelta(days=3), "Ритм синусовый")
+        data = await pdf_report.collect_report(
+            session, user, today - timedelta(days=7), today,
+            subject=pdf_report.PATIENT_SUBJECT, now=NOW, include_conclusions=True,
+        )
+        assert [group.header for group in data.conclusions] == [
+            f"ЭКГ — {today - timedelta(days=3):%d.%m.%Y}",
+            f"Кардиолог — {today - timedelta(days=1):%d.%m.%Y}",
+        ]  # по дате события по возрастанию; иконки в PDF нет (DejaVu без эмодзи)
+        assert data.conclusions[1].items == ("Продолжить приём",)
+
+    async def test_collect_excludes_without_conclusions_and_outside_period(self, session, user) -> None:
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        await _add(session, user, NOW - timedelta(days=2))
+        await _add_event(session, user, "Без заключения", today - timedelta(days=1))
+        await _add_event(session, user, "Вне периода", today - timedelta(days=40), "Старое")
+        data = await pdf_report.collect_report(
+            session, user, today - timedelta(days=7), today,
+            subject="x", now=NOW, include_conclusions=True,
+        )
+        assert data.conclusions == ()  # фильтр по дате события, не по created_at
+
+    async def test_doctor_pdf_has_no_section(self, session, user) -> None:
+        """У2-А: у врача (и без флага) раздела нет."""
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        await _add(session, user, NOW - timedelta(days=2))
+        await _add_event(session, user, "Кардиолог", today - timedelta(days=1), "Продолжить")
+        data = await pdf_report.collect_report(
+            session, user, today - timedelta(days=7), today, subject="Пациент 111111", now=NOW
+        )
+        assert data.conclusions == ()
+        assert pdf_report.CONCLUSIONS_TITLE not in "".join(_pdf_text(pdf_report.build_pdf(data)))
+
+    def test_pdf_renders_grouping(self) -> None:
+        """Р7: одно заключение — текстом, несколько — списком 1., 2. (после таблицы, Р6)."""
+        data = pdf_report.ReportData(
+            subject=pdf_report.PATIENT_SUBJECT,
+            start_day=date(2026, 10, 1),
+            end_day=date(2026, 10, 30),
+            generated_at=NOW.astimezone(ZoneInfo(TZ)),
+            summary_lines=("Записей: 1",),
+            rows=(_row(),),
+            conclusions=(
+                pdf_report.ConclusionGroup(header="Кардиолог — 05.11.2026", items=("Продолжить приём",)),
+                pdf_report.ConclusionGroup(
+                    header="Биохимия — 06.11.2026", items=("Первый", "Второй"),
+                ),
+            ),
+        )
+        pages = _pdf_text(pdf_report.build_pdf(data))
+        text = "\n".join(pages)
+        assert pdf_report.CONCLUSIONS_TITLE in text
+        assert "Кардиолог — 05.11.2026" in text
+        assert "Продолжить приём" in text
+        assert "1. Первый" in text and "2. Второй" in text
+        # раздел — после таблицы: заголовок заключений встречается позже даты строки
+        assert text.index(pdf_report.CONCLUSIONS_TITLE) > text.index("01.11.2026")
+
+    def test_pdf_without_conclusions_has_no_section(self) -> None:
+        pages = _pdf_text(pdf_report.build_pdf(_data()))
+        assert pdf_report.CONCLUSIONS_TITLE not in "\n".join(pages)

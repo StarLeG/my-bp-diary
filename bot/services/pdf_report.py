@@ -28,7 +28,8 @@ from fpdf import FPDF
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import Measurement, User
+from bot.models import Appointment, Measurement, User
+from bot.services import appointments as appointments_service
 from bot.services import csv_export
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
@@ -52,6 +53,8 @@ FILE_KIND = "bp_diary"
 
 #: Заголовок отчёта.
 REPORT_TITLE = "Отчёт по давлению"
+#: Заголовок раздела заключений в PDF пациента (0.5.11, В32-Г, Р6).
+CONCLUSIONS_TITLE = "Заключения врачей"
 #: Подпись пациента в отчёте самого пациента (бот и ЛК): без telegram_id —
 #: файл могут переслать (§10.1).
 PATIENT_SUBJECT = "Дневник давления"
@@ -131,6 +134,17 @@ class ReportRow:
 
 
 @dataclass(frozen=True)
+class ConclusionGroup:
+    """Группа раздела «Заключения врачей»: заголовок события и тексты (Р7).
+
+    Фото (`photo_file_id`) и заметка события не включаются (§10.1).
+    """
+
+    header: str
+    items: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class ReportData:
     """Всё, что нужно `build_pdf`: значения, без объектов ORM (§7.2 п.7)."""
 
@@ -142,6 +156,8 @@ class ReportData:
     rows: tuple[ReportRow, ...]
     file_stem: Optional[str] = None
     """Начало имени файла врача: `Ivanov_I_I` (§10.1, 0.5.1); None — `bp_diary`."""
+    conclusions: tuple[ConclusionGroup, ...] = ()
+    """«Заключения врачей» — только в PDF пациента (У2-А); у врача пусто."""
 
     @property
     def file_name(self) -> str:
@@ -256,12 +272,14 @@ async def collect_report(
     limit: Optional[int] = None,
     now: Optional[datetime] = None,
     file_stem: Optional[str] = None,
+    include_conclusions: bool = False,
 ) -> ReportData:
     """Данные отчёта за период; `start_day=None` — «всё время» (§10.1).
 
     «Всё время» — от даты первой записи до сегодня (локальные сутки
     пациента). Нет записей — `ReportEmptyError`; больше `limit` (по
-    умолчанию `REPORT_LIMIT`) — `ReportTooLargeError`.
+    умолчанию `REPORT_LIMIT`) — `ReportTooLargeError`. `include_conclusions` —
+    раздел «Заключения врачей» (В32-Г): только у пациента (У2-А), у врача — False.
     """
     tz = ZoneInfo(user.timezone)
     generated_at = (now or measurements_service.utcnow()).astimezone(tz)
@@ -281,6 +299,9 @@ async def collect_report(
     assert start_day is not None  # есть записи → есть дата первой
     summary = await stats_service.summary(session, user, start_day, end_day)
     cells = await medications_service.medication_cells(session, user, measurements)
+    conclusions: tuple[ConclusionGroup, ...] = ()
+    if include_conclusions:
+        conclusions = await _conclusion_groups(session, user, start_day, end_day)
     return ReportData(
         subject=subject,
         start_day=start_day,
@@ -289,7 +310,27 @@ async def collect_report(
         summary_lines=summary_lines(summary),
         rows=report_rows(measurements, cells, user.timezone),
         file_stem=file_stem,
+        conclusions=conclusions,
     )
+
+
+async def _conclusion_groups(
+    session: AsyncSession, user: User, start_day: date, end_day: date
+) -> tuple[ConclusionGroup, ...]:
+    """«Заключения врачей» за период: группировка по событию (Р7), по дате события."""
+    groups = []
+    for appt, items in await appointments_service.conclusions_in_period(
+        session, user, start_day, end_day
+    ):
+        groups.append(
+            ConclusionGroup(
+                # Иконки (§10.1: «{иконка} {title} — {ДД.ММ.ГГГГ}») в PDF нет:
+                # DejaVuSans не содержит эмодзи — их место было бы пустым или «тофу».
+                header=f"{appt.title} — {appt.starts_on:%d.%m.%Y}",
+                items=tuple(item.text for item in items),
+            )
+        )
+    return tuple(groups)
 
 
 # ─────────────────────────── PDF ───────────────────────────
@@ -321,7 +362,34 @@ def build_pdf(data: ReportData) -> bytes:
     _draw_summary(pdf, data.summary_lines)
     _draw_legend(pdf)
     _draw_table(pdf, data.rows)
+    _draw_conclusions(pdf, data.conclusions)
     return bytes(pdf.output())
+
+
+def _draw_conclusions(pdf: FPDF, groups: Sequence[ConclusionGroup]) -> None:
+    """«Заключения врачей» после таблицы, в конце документа (Р6, У2-А)."""
+    if not groups:
+        return
+    pdf.ln(4)
+    pdf.set_font(FONT_FAMILY, "B", 12)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 7, text=CONCLUSIONS_TITLE)
+    for group in groups:
+        pdf.ln(1)
+        pdf.set_font(FONT_FAMILY, "B", 10)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 6, text=group.header)
+        pdf.set_font(FONT_FAMILY, "", 10)
+        if len(group.items) == 1:
+            numbered = (group.items[0],)
+        else:
+            numbered = tuple(f"{index}. {item}" for index, item in enumerate(group.items, 1))
+        for item in numbered:
+            pdf.set_x(pdf.l_margin)
+            for line in _wrap(pdf, item, pdf.epw):
+                pdf.set_x(pdf.l_margin)
+                pdf.multi_cell(0, 5, text=line)
+        pdf.ln(1)
 
 
 def _draw_header(pdf: FPDF, data: ReportData) -> None:

@@ -1822,21 +1822,124 @@ def ap_notice_kb(
     return builder.as_markup()
 
 
-def ap_card_kb(
-    appointment_id: int, kind: str, state: str, back: str, large: bool = False
-) -> InlineKeyboardMarkup:
-    """Карточка: `upcoming` — отчёт, правка, отмена; `waiting` — ответ; дальше — «Удалить», «Назад»."""
+def ap_mark_kb(appointment_id: int, kind: str, large: bool = False) -> InlineKeyboardMarkup:
+    """«✓ Был(а)» / «Перенёс(ла)» / «Не был(а)» из карточки (0.5.11, `ap:mark`, Р1).
+
+    Раскладка — как `ap_after_kb` (UI3): «✓ Был(а)» отдельно, пара
+    «Перенёс(ла)»/«Не был(а)»; крупный — по одной.
+    """
+    done, moved, missed = texts.AP_AFTER_BUTTONS[kind]
     builder = InlineKeyboardBuilder()
-    if state == "upcoming":
+    if large:
+        builder.row(_btn(done, f"ap:mark:{appointment_id}:done"))
+        builder.row(_btn(moved, f"ap:mark:{appointment_id}:moved"))
+        builder.row(_btn(missed, f"ap:mark:{appointment_id}:missed"))
+    else:
+        builder.row(_btn(done, f"ap:mark:{appointment_id}:done"))
+        builder.row(
+            _btn(moved, f"ap:mark:{appointment_id}:moved"),
+            _btn(missed, f"ap:mark:{appointment_id}:missed"),
+        )
+    return builder.as_markup()
+
+
+def ap_card_kb(
+    appointment_id: int,
+    kind: str,
+    state: str,
+    back: str,
+    large: bool = False,
+    with_conclusion: bool = False,
+) -> InlineKeyboardMarkup:
+    """Карточка события (§6.13, 0.5.11; Р1–Р4).
+
+    `state`: `future` — дата не наступила (без отметки и заключения); `today` —
+    день события; `past` — `planned` после прошедшей даты (бывш. `waiting` /
+    `unmarked`); `closed` — не `planned` (кнопка заключения — по `with_conclusion`:
+    у `done`/`moved` всегда, у `missed`/`cancelled` — только если заключения есть).
+    Статусные кнопки — `ap:mark` без окна; «{Подпись заключения}» — своей строкой,
+    не парой с «Отчётом» (Р4); раскладка карточки — по канону §11.
+    """
+    builder = InlineKeyboardBuilder()
+    if state == "future":
         if kind == "doctor":
             builder.row(_btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}"))
         builder.row(_btn(texts.BTN_AP_EDIT, f"ap:edit:{appointment_id}"))
         builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
-    elif state == "waiting":
-        for row in ap_after_kb(appointment_id, kind, large=large).inline_keyboard:
-            builder.row(*row)
+    else:
+        if state in ("today", "past"):
+            for row in ap_mark_kb(appointment_id, kind, large=large).inline_keyboard:
+                builder.row(*row)
+        if state == "today":
+            if kind == "doctor":
+                builder.row(_btn(texts.BTN_AP_REPORT, f"ap:report:{appointment_id}"))
+            if with_conclusion:
+                builder.row(_btn(texts.AP_CONC_BUTTON[kind], f"ap:conc:{appointment_id}"))
+            builder.row(_btn(texts.BTN_AP_EDIT, f"ap:edit:{appointment_id}"))
+            builder.row(_btn(texts.BTN_AP_CANCEL[kind], f"ap:cancel:{appointment_id}"))
+        elif with_conclusion:
+            builder.row(_btn(texts.AP_CONC_BUTTON[kind], f"ap:conc:{appointment_id}"))
     builder.row(_btn(texts.BTN_AP_DELETE, f"ap:del:{appointment_id}"))
     builder.row(_btn(texts.BTN_BACK, back))
+    return builder.as_markup()
+
+
+def ap_conc_kb(
+    appointment_id: int,
+    conclusion_ids: Sequence[int],
+    large: bool = False,
+) -> InlineKeyboardMarkup:
+    """Экран заключений (0.5.11): три кнопки на запись, «➕ Добавить» / «Назад».
+
+    Кнопки записи — по одной в строке (канон §11: пары — только короткие
+    альтернативы); «➕ Добавить»/«Назад» — пара, как «📅 К списку»/«В меню».
+    """
+    builder = InlineKeyboardBuilder()
+    for cid in conclusion_ids:
+        builder.row(_btn(texts.BTN_AP_CONC_TEXT, f"ap:conc:{appointment_id}:{cid}:text"))
+        builder.row(_btn(texts.BTN_AP_CONC_PHOTO, f"ap:conc:{appointment_id}:{cid}:photo"))
+        builder.row(_btn(texts.BTN_AP_DELETE, f"ap:conc:{appointment_id}:{cid}:del"))
+    _layout_rows(
+        builder,
+        (
+            (texts.BTN_AP_ADD, f"ap:conc:{appointment_id}:add"),
+            (texts.BTN_BACK, f"ap:open:{appointment_id}"),
+        ),
+        large=large,
+    )
+    return builder.as_markup()
+
+
+def ap_conc_cancel_kb(appointment_id: int) -> InlineKeyboardMarkup:
+    """Ожидание ввода (FSM текста и фото): «Отмена» — к списку заключений (§8)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(_btn(texts.BTN_AP_CONC_CANCEL, f"ap:conc:{appointment_id}"))
+    return builder.as_markup()
+
+
+def ap_conc_del_kb(appointment_id: int, conclusion_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение удаления заключения: «Да, удалить» / «Нет» (канон бота)."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn(texts.BTN_AP_DELETE_YES, f"ap:conc:{appointment_id}:{conclusion_id}:del:ok")
+    )
+    builder.row(_btn(texts.BTN_AP_NO, f"ap:conc:{appointment_id}"))
+    return builder.as_markup()
+
+
+def ap_photo_kb(appointment_id: int, conclusion_id: int) -> InlineKeyboardMarkup:
+    """Фото-сообщение (0.5.11): «Заменить» / «Убрать фото» / «Назад».
+
+    Фото-сообщение временное: любое действие его удаляет (§6.13).
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        _btn(texts.BTN_AP_CONC_REPLACE, f"ap:conc:{appointment_id}:{conclusion_id}:photo:put")
+    )
+    builder.row(
+        _btn(texts.BTN_AP_CONC_PHOTO_REMOVE, f"ap:conc:{appointment_id}:{conclusion_id}:photo:rm")
+    )
+    builder.row(_btn(texts.BTN_BACK, f"ap:conc:{appointment_id}"))
     return builder.as_markup()
 
 
@@ -1859,21 +1962,27 @@ def ap_confirm_kb(
     return builder.as_markup()
 
 
-def ap_next_kb(appointment_id: int, large: bool = False) -> InlineKeyboardMarkup:
+def ap_next_kb(
+    appointment_id: int, large: bool = False, kind: Optional[str] = None
+) -> InlineKeyboardMarkup:
     """«Записать следующий?» — через 1 / 3 / 6 / 12 месяцев, «Не нужно» (В11).
 
     Обычный — сетка 2+2+1 (зафиксированный канон, UI3); крупный — по одной.
+    С 0.5.11 (Р8), если задан `kind`, последней строкой — «{Подпись заключения}»
+    (`ap:conc:{id}:add`): сразу FSM ввода, не список.
     """
     builder = InlineKeyboardBuilder()
     if large:
         for months, label in texts.AP_NEXT_BUTTONS:
             builder.row(_btn(label, f"ap:next:{appointment_id}:{months}"))
-        return builder.as_markup()
-    choices = [
-        _btn(label, f"ap:next:{appointment_id}:{months}")
-        for months, label in texts.AP_NEXT_BUTTONS
-    ]
-    builder.row(*choices[:2])
-    builder.row(*choices[2:4])
-    builder.row(choices[4])
+    else:
+        choices = [
+            _btn(label, f"ap:next:{appointment_id}:{months}")
+            for months, label in texts.AP_NEXT_BUTTONS
+        ]
+        builder.row(*choices[:2])
+        builder.row(*choices[2:4])
+        builder.row(choices[4])
+    if kind is not None:
+        builder.row(_btn(texts.AP_CONC_BUTTON[kind], f"ap:conc:{appointment_id}:add"))
     return builder.as_markup()

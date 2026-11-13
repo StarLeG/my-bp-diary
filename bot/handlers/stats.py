@@ -600,7 +600,8 @@ async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
         problem: Optional[str] = None
         try:
             data = await pdf_report.collect_report(
-                session, user, start, end, subject=pdf_report.patient_subject(user)
+                session, user, start, end, subject=pdf_report.patient_subject(user),
+                include_conclusions=True,
             )
         except pdf_report.ReportEmptyError:
             problem = texts.PDF_EMPTY

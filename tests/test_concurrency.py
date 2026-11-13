@@ -24,6 +24,8 @@ from bot.handlers import support
 from bot.handlers.stats import _support_footer
 from bot.middlewares import DebounceMiddleware
 from bot.models import (
+    Appointment,
+    AppointmentConclusion,
     Measurement,
     MedicationLog,
     MeasurementMedication,
@@ -31,6 +33,7 @@ from bot.models import (
     User as DbUser,
     WebUser,
 )
+from bot.services import appointments as appointments_service
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services.reminders import RemindersService, next_slot_occurrence
@@ -1251,3 +1254,87 @@ class TestAppointmentsRaces:
         async with session_factory() as session:
             db_user = await session.get(DbUser, user.id)
             assert await ap.count_upcoming(session, db_user, date(2026, 11, 11)) == ap.UPCOMING_LIMIT
+
+
+class TestParallelConclusions:
+    """Заключения и отметка (0.5.11): гонки условной вставки и статусов (§7.2, §13)."""
+
+    async def _appointment(self, session_factory, user: DbUser, title: str = "Кардиолог") -> int:
+        async with session_factory() as session:
+            appt = Appointment(
+                user_id=user.id,
+                kind="doctor",
+                title=title,
+                starts_on=date.today() - timedelta(days=1),
+                starts_at="10:00",
+                status="planned",
+            )
+            session.add(appt)
+            await session.commit()
+            return appt.id
+
+    async def test_limit_race(self, session_factory, user: DbUser) -> None:
+        """Две вставки на границе лимита 5 — проходит ровно одна (условная вставка)."""
+        appt_id = await self._appointment(session_factory, user)
+        async with session_factory() as session:
+            for index in range(appointments_service.CONCLUSION_LIMIT - 1):
+                await appointments_service.add_conclusion(session, appt_id, f"З-{index}")
+            await session.commit()
+
+        async def save():
+            async with session_factory() as session:
+                created = await appointments_service.add_conclusion(session, appt_id, "Край")
+                await session.commit()
+                return created
+
+        results = await asyncio.gather(save(), save())
+        assert sorted(result is None for result in results) == [False, True]
+        assert await count(session_factory, AppointmentConclusion) == appointments_service.CONCLUSION_LIMIT
+
+    async def test_double_mark_idempotent(self, session_factory, user: DbUser) -> None:
+        """Двойное нажатие отметки — статус меняется один раз (§7.2)."""
+        appt_id = await self._appointment(session_factory, user)
+
+        async def mark() -> bool:
+            async with session_factory() as session:
+                row = await session.get(Appointment, appt_id)
+                won = await appointments_service.set_status(session, row, "done")
+                await session.commit()
+                return won
+
+        results = await asyncio.gather(mark(), mark())
+        assert sorted(results) == [False, True]
+        async with session_factory() as session:
+            assert (await session.get(Appointment, appt_id)).status == "done"
+
+    async def test_mark_blocks_after_notice(self, session_factory, user: DbUser) -> None:
+        """Отметка гасит «Как прошёл визит?»: захват тика после отметки — False (§6.13)."""
+        appt_id = await self._appointment(session_factory, user, title="Биохимия")
+        async with session_factory() as session:
+            row = await session.get(Appointment, appt_id)
+            assert await appointments_service.set_status(session, row, "missed")
+            await session.commit()
+        async with session_factory() as session:
+            assert not await appointments_service._claim(
+                session, appt_id, "after", datetime.now(timezone.utc)
+            )
+            await session.commit()
+
+    async def test_double_delete_conclusion(self, session_factory, user: DbUser) -> None:
+        """Двойное удаление заключения — одно (§7.2)."""
+        appt_id = await self._appointment(session_factory, user)
+        async with session_factory() as session:
+            conc_id = await appointments_service.add_conclusion(session, appt_id, "Текст")
+            await session.commit()
+
+        async def remove() -> bool:
+            async with session_factory() as session:
+                row = await session.get(AppointmentConclusion, conc_id)
+                user_row = await session.get(DbUser, user.id)
+                won = await appointments_service.remove_conclusion(session, user_row, row.id)
+                await session.commit()
+                return won
+
+        results = await asyncio.gather(remove(), remove())
+        assert sorted(results) == [False, True]
+        assert await count(session_factory, AppointmentConclusion) == 0

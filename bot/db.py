@@ -44,7 +44,9 @@ RETRY_BASE_DELAY = 0.05
 #:     `reminders.followup_at`, `users.followup_enabled`, `users.reminders_paused_until`.
 #: 8 — визиты и анализы: таблица `appointments` (§4.16, 0.5.8; `create_all`).
 #: 9 — «Крупный режим» бота: `users.ui_large` (§4.1, §6.6, 0.5.10).
-SCHEMA_VERSION = 9
+#: 10 — заключения к визитам: таблица `appointment_conclusions`
+#:     (§4.17, 0.5.11; `create_all`).
+SCHEMA_VERSION = 10
 
 #: Колонки поколений 4–7 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
 _ADDED_COLUMNS = (

@@ -602,3 +602,30 @@ class Appointment(Base):
         Index("ix_appointments_user_day", "user_id", "starts_on"),
         Index("ix_appointments_status_day", "status", "starts_on"),
     )
+
+
+class AppointmentConclusion(Base):
+    """Заключение врача / результаты / протокол события (SPEC.md, §4.17, §6.13; 0.5.11).
+
+    Текст пишет пользователь — распознавания фото нет. Фото — только Telegram
+    `file_id`, файл на сервере не хранится и в ЛК / PDF не попадает. До 5 записей
+    на событие (условная вставка, §7.2); пустой текст (после `trim()`) отклоняют
+    и сервис, и CHECK. Удаляется каскадом со событием (§19).
+    """
+
+    __tablename__ = "appointment_conclusions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    appointment_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("appointments.id", ondelete="CASCADE"), nullable=False
+    )
+    text: Mapped[str] = mapped_column(String(4000), nullable=False)
+    photo_file_id: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False, default=_utcnow)
+
+    __table_args__ = (
+        CheckConstraint(
+            "length(text) BETWEEN 1 AND 4000", name="ck_appointment_conclusions_text"
+        ),
+        Index("ix_appointment_conclusions_appointment", "appointment_id"),
+    )
