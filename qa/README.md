@@ -148,6 +148,7 @@ LOAD_TEST=1 uv run pytest qa/test_load_regression.py -v
 | Любой тест — `database is locked` | `failure_samples` в JSON, `qa-load.jsonl` | ожидание asyncio-лока с незакоммиченной записью SQLite (§7.2) — так нашлись T1, U1, U2 |
 | `test_load_bot` — не все строки / ошибки | `errors`, `rows_added` в JSON; `qa-load.jsonl` по `user_id` | исключение в хендлере, дедуп минуты (время виртуальных часов), debounce |
 | p95 (врач, Locust) выше порога | `p95_ms` и `calibration_ms.slowdown_vs_reference` в JSON, `locust_stats.csv`; время `test_load_bot` в том же прогоне | синхронная тяжёлая работа в event loop — или троттлинг машины (бот тоже вдвое медленнее обычного) |
+| `test_acceptance_volume` — окно конкуренции ≥ 2/3 с | `concurrency` в `acceptance_volume.json` | в контейнере на Windows p95 ~4 с — накладные Docker Desktop (принято 2026-11-14, `doc/LOAD-CRITERIA-QUESTIONS.md`, п. 7): замерять окно нативно; `test_acceptance_degradation` — зеркально, только контейнер (нативно троттлинг) |
 | `test_load_backup` — p95 пробы ≥ 1 с | `slow_probes`, `probe_p95_s`, `calibration_ms.slowdown_vs_reference` | массовая деградация записи под бэкапом; одиночные выбросы max допустимы |
 | `test_load_reminders` — дубли / недоставка | `duplicates`, `sent`, `timed_out` | атомарный захват `last_sent_date`, перепланировка job'ов |
 | Регрессия БД стенда | сообщение с `user_id` | стенд пересеян без `--clean` другим масштабом или Locust не тем паролем |

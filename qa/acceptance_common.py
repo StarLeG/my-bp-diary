@@ -68,7 +68,13 @@ def stand_db_path() -> Path:
 
 
 def copy_stand(dest: Path) -> Path:
-    """Копия стенда через Online Backup API SQLite (согласованная, не cp)."""
+    """Копия стенда через Online Backup API SQLite (согласованная, не cp).
+
+    Копия мигрируется до текущего поколения схемы (`init_db`, §4): проверки
+    открывают её напрямую через `create_engine`, минуя старт приложения, и
+    модели должны читаться из любой схемы стенда (0.6.0+: поколение 11,
+    `users.meds_ask_shown_at`, `diary_events`).
+    """
     source = stand_db_path()
     if not source.exists():
         raise AssertionError(f"нет БД стенда {source}: сначала `python -m qa.seed.seed_all --scale three-years`")
@@ -82,7 +88,19 @@ def copy_stand(dest: Path) -> Path:
             dst.close()
     finally:
         src.close()
+    asyncio.run(_migrate_copy(dest))
     return dest
+
+
+async def _migrate_copy(db: Path) -> None:
+    """Довести копию стенда до `SCHEMA_VERSION` тем же путём, что и бот (§4)."""
+    from bot.db import create_engine, init_db
+
+    engine = create_engine(str(db))
+    try:
+        await init_db(engine)
+    finally:
+        await engine.dispose()
 
 
 def require_volume(db: Path) -> int:
