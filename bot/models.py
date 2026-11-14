@@ -99,6 +99,8 @@ class User(Base):
     """«Имя фамилия» из Telegram — врач видит его, пока данные не заполнены (§6.12)."""
     profile_prompted_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
     """Предложение заполнить данные (П7) уже показано (§6.12)."""
+    meds_ask_shown_at: Mapped[Optional[datetime]] = mapped_column(UTCDateTime(), nullable=True)
+    """Подсказка «Напоминать, какие лекарства принимать?» показана (§6.3, K2; 0.6.0)."""
     followup_enabled: Mapped[bool] = mapped_column(
         Boolean, nullable=False, default=True, server_default=text("1")
     )
@@ -628,4 +630,47 @@ class AppointmentConclusion(Base):
             "length(text) BETWEEN 1 AND 4000", name="ck_appointment_conclusions_text"
         ),
         Index("ix_appointment_conclusions_appointment", "appointment_id"),
+    )
+
+
+class DiaryEvent(Base):
+    """Событие дневника: питание, стресс/самочувствие, сон, прогулка, заметка
+    (SPEC.md, §4.18, §6.14; 0.6.0).
+
+    Контекст вокруг измерений; давление — `measurements`, приёмы лекарств —
+    `medication_logs`: события их не дублируют. `payload` — JSON с полями типа
+    (§4.18 дословно): `food` — `marks` (отсортированный массив меток),
+    `stress` — `variant`, `sleep` — `rating`, `activity` — `duration_min`,
+    `note` — без полей. `measurement_id` — привязка «➕ Фактор» к измерению
+    (NULL — самостоятельное событие; удаление измерения снимает привязку).
+    Момент события — «сейчас» или уточнённый (последние 24 часа, §9).
+    """
+
+    __tablename__ = "diary_events"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    user_id: Mapped[int] = mapped_column(
+        Integer, ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    type: Mapped[str] = mapped_column(String(16), nullable=False)
+    moment: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
+    note: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    payload: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    measurement_id: Mapped[Optional[int]] = mapped_column(
+        Integer, ForeignKey("measurements.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        UTCDateTime(), nullable=False, default=_utcnow
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "type IN ('food', 'stress', 'sleep', 'activity', 'note')",
+            name="ck_diary_events_type",
+        ),
+        CheckConstraint(
+            "note IS NULL OR length(note) <= 500", name="ck_diary_events_note_length"
+        ),
+        Index("ix_diary_events_user_moment", "user_id", "moment"),
+        Index("ix_diary_events_measurement", "measurement_id"),
     )

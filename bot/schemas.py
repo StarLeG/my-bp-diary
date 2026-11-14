@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import date, datetime, time
+from datetime import date, datetime, time, timedelta
 from typing import Literal, Optional
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
@@ -32,6 +32,12 @@ _QUICK_RE = re.compile(
 )
 
 TIME_FORMAT_HINT = "Нужно время в формате ЧЧ:ММ (например, 08:30)"
+
+#: Подсказка быстрой строки давления (§6.3, §9; C7).
+PRESSURE_LINE_HINT = "Например: 120/80 72"
+
+#: Окно времени события: «сейчас» или уточнение в пределах последних 24 часов (§9, C13).
+EVENT_TIME_WINDOW = timedelta(hours=24)
 
 
 @dataclass(frozen=True)
@@ -170,6 +176,31 @@ def validate_pair(systolic: int, diastolic: int) -> None:
         raise ValueError(texts.DIA_NOT_LOWER)
 
 
+def parse_pressure_line(raw: str) -> tuple[int, int, Optional[int]]:
+    """Быстрая строка давления `САД/ДАД [пульс]` или `САД/ДАД/пульс` (§9, C12).
+
+    Позиции 1/2/3 — систолическое, диастолическое, пульс; сепараторы — `/`
+    и пробел (лишние пробелы и ведущие нули допустимы, R4 = Б: «120 / 80»,
+    «083» = 83). Точка и запятая — ошибка (I1): типичная опечатка не должна
+    молча превращаться в 120/80. Диапазоны и пара — как в калькуляторе (§9).
+
+    Исключения:
+        ValueError: не строка давления — `PRESSURE_LINE_HINT`; вне диапазона
+            или пара нарушена — сообщения валидации (§9).
+    """
+    text = str(raw).strip()
+    if not text or "." in text or "," in text:
+        raise ValueError(PRESSURE_LINE_HINT)
+    parts = [part for part in re.split(r"[/\s]+", text) if part]
+    if len(parts) not in (2, 3) or any(not part.isdigit() for part in parts):
+        raise ValueError(PRESSURE_LINE_HINT)
+    systolic = validate_int(parts[0], 70, 260, "систолическое")
+    diastolic = validate_int(parts[1], 40, 160, "диастолическое")
+    validate_pair(systolic, diastolic)
+    pulse = validate_int(parts[2], 30, 220, "пульс") if len(parts) == 3 else None
+    return systolic, diastolic, pulse
+
+
 def _clean_error(exc: ValidationError) -> str:
     """Человеческий текст первой ошибки валидации (без форматирования Pydantic)."""
     first = exc.errors()[0]
@@ -187,6 +218,28 @@ def validate_time(raw: str) -> time:
         return TimeInput(value=raw).value
     except ValidationError as exc:
         raise ValueError(_clean_error(exc)) from exc
+
+
+def resolve_event_moment(
+    moment_time: time, tz_name: str, *, now: Optional[datetime] = None
+) -> datetime:
+    """Момент события `ЧЧ:ММ` (§9, C13, I4): сегодня, если уже наступило, иначе вчера.
+
+    Скользящее окно `EVENT_TIME_WINDOW` (24 часа) обеспечено выбором даты: самый
+    старый возможный момент — вчера в минуту после текущего времени суток, самый
+    свежий — сейчас. Ночь через полночь покрывается: «23:00», введённое утром, —
+    вчерашнее. Осведомлённый момент — в таймзоне пользователя.
+    """
+    tz = ZoneInfo(tz_name)
+    current = now if now is not None else datetime.now(tz)
+    if current.tzinfo is None:
+        current = current.replace(tzinfo=tz)
+    else:
+        current = current.astimezone(tz)
+    moment = datetime.combine(current.date(), moment_time, tzinfo=tz)
+    if moment > current:
+        moment -= timedelta(days=1)
+    return moment
 
 
 def validate_timezone(raw: str) -> str:

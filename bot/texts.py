@@ -61,6 +61,7 @@ SCREEN_HEADERS: dict[str, str] = {
     "admin_health": "🩺 Здоровье системы",
     "admin_broadcast": "📢 Рассылка",
     "admin_search": "👤 Поиск пользователя",
+    "calculator": "🩺 Давление и пульс",
 }
 
 
@@ -99,6 +100,14 @@ BTN_TOOK_MED = "Приняли лекарство?"
 BTN_FEELING = "Самочувствие"
 BTN_EDIT = "✏️ Изменить"
 BTN_EDIT_LAST = "✏️ Изменить последнюю"
+
+# Кнопки сводки 0.6.0 (§6.3, R8)
+BTN_ADD_FACTOR = "➕ Фактор"
+BTN_MED_RECORD = "💊 Лекарство"
+BTN_NOTE_RECORD = "📝 Заметка"
+BTN_ADD_MORE = "➕ Добавить ещё"
+BTN_ADD_RECORD = "➕ Добавить запись"
+BTN_DELETE_EVENT = "🗑 Удалить"
 
 BTN_MED_YES = "Да"
 BTN_MED_NO = "Нет"
@@ -195,9 +204,10 @@ ASK_PULSE = "Пульс?"
 
 BTN_KEYPAD_BACKSPACE = "⌫"
 BTN_KEYPAD_CLEAR = "C"
+BTN_RESET = "Изменить"
 KEYPAD_ENTERED = "Введено: {value}"
 KEYPAD_ENTERED_EMPTY = "—"
-KEYPAD_HINT = "Можно также написать число сообщением."
+KEYPAD_HINT = "Можно также написать: 120/80 72"
 KEYPAD_EMPTY_INPUT = "Введите число"
 DIA_NOT_LOWER = (
     "Диастолическое (нижнее) должно быть ниже систолического (верхнего) — "
@@ -292,42 +302,40 @@ def fmt_measurement_short(systolic: int, diastolic: int, pulse: Optional[int] = 
     return result
 
 
-def _fmt_summary(
-    header_text: str,
+def _fmt_value_line(
     systolic: int,
     diastolic: int,
     pulse: Optional[int],
     *,
     large: bool = False,
 ) -> str:
-    """Сводка введённых данных: значения — каждый на своей строке (§6.3).
+    """«135/85, пульс 72» — итог одной строкой; без пульса — «135/85» (§6.3, R9).
 
-    В крупном режиме — пустая строка после шапки и значения жирным (UI4, мокап 2.3).
+    В крупном режиме значения — `<b>` (UI5).
     """
-    pulse_str = str(pulse) if pulse is not None else KEYPAD_ENTERED_EMPTY
-    lines = [
-        header_text,
-        SUMMARY_SYSTOLIC.format(value=_fmt_value(systolic, large)),
-        SUMMARY_DIASTOLIC.format(value=_fmt_value(diastolic, large)),
-        SUMMARY_PULSE.format(value=_fmt_value(pulse_str, large)),
-    ]
+    pair = f"{systolic}/{diastolic}"
     if large:
-        lines.insert(1, "")
-    return "\n".join(lines)
+        pair = f"<b>{pair}</b>"
+    if pulse is None:
+        return pair
+    return f"{pair}, пульс {_fmt_value(pulse, large)}"
 
 
 def fmt_saved(
     systolic: int, diastolic: int, pulse: Optional[int] = None, *, large: bool = False
 ) -> str:
-    """Сводка после сохранения измерения (SPEC.md, раздел 6.3)."""
-    return _fmt_summary(MEASUREMENT_SAVED, systolic, diastolic, pulse, large=large)
+    """Сводка после сохранения: «✅ 135/85, пульс 72» (§6.3, R9; 0.6.0)."""
+    return f"✅ {_fmt_value_line(systolic, diastolic, pulse, large=large)}"
 
 
 def fmt_updated(
     systolic: int, diastolic: int, pulse: Optional[int] = None, *, large: bool = False
 ) -> str:
-    """Сводка после обновления записи правки (SPEC.md, раздел 6.3)."""
-    return _fmt_summary(MEASUREMENT_UPDATED, systolic, diastolic, pulse, large=large)
+    """Сводка после правки: «✅ Обновлено: 135/85, пульс 72» (§6.3; 0.6.0)."""
+    return (
+        f"{MEASUREMENT_UPDATED}: "
+        f"{_fmt_value_line(systolic, diastolic, pulse, large=large)}"
+    )
 
 
 def fmt_archive_saved(
@@ -338,19 +346,47 @@ def fmt_archive_saved(
     *,
     large: bool = False,
 ) -> str:
-    """Сводка архивной записи: «✅ Записано за 12.03.2025, 08:00» (SPEC.md, §6.10).
+    """Сводка архива: «✅ 135/85, пульс 72 · за 12.03.2025, 08:00» (§6.3, C16).
 
     `moment` — уже отформатированный момент измерения («ДД.ММ.ГГГГ, ЧЧ:ММ»).
     """
-    return _fmt_summary(
-        ARCHIVE_SAVED.format(moment=esc(moment)), systolic, diastolic, pulse, large=large
+    return (
+        f"✅ {_fmt_value_line(systolic, diastolic, pulse, large=large)}"
+        f" · за {esc(moment)}"
     )
 
 
-def fmt_keypad_prompt(question: str, buffer: str) -> str:
-    """Экран калькулятора: вопрос, текущий набор и подсказка (SPEC.md, §6.3)."""
-    entered = buffer if buffer else KEYPAD_ENTERED_EMPTY
-    return f"{question}\n\n{KEYPAD_ENTERED.format(value=entered)}\n{KEYPAD_HINT}"
+def fmt_keypad_prompt(
+    systolic: Optional[int],
+    diastolic: Optional[int],
+    pulse: Optional[int],
+    *,
+    large: bool = False,
+) -> str:
+    """Экран калькулятора (§6.3, V3): шапка «🩺 Давление и пульс», поля и итог.
+
+    Пустое поле — «—»; в крупном режиме значения — `<b>` (UI5). Итог —
+    дословно по мокапу V3: «Введено: 135/85 · пульс —».
+    """
+
+    def _value(value: Optional[int]) -> str:
+        return _fmt_value(value if value is not None else KEYPAD_ENTERED_EMPTY, large)
+
+    entered = (
+        f"{_value(systolic)}/{_value(diastolic)}"
+        f" · пульс {_value(pulse)}"
+    )
+    lines = [
+        header("🩺", "Давление и пульс"),
+        "",
+        f"Систолическое: {_value(systolic)}",
+        f"Диастолическое: {_value(diastolic)}",
+        f"Пульс: {_value(pulse)}",
+        "",
+        KEYPAD_ENTERED.format(value=entered),
+        KEYPAD_HINT,
+    ]
+    return "\n".join(lines)
 
 
 def fmt_diary_line(
@@ -590,7 +626,158 @@ MEDS_EDIT_PICK = "Какое лекарство изменить?"
 MEDS_DEL_PICK = "Какое лекарство удалить?"
 MEDS_DELETED = "Лекарство удалено"
 MEDS_ASK_PROMPT = "Напоминать, какие лекарства принимать?"
+#: Фасад «Приём лекарства» (§6.7, B3): выбор приёма.
+MED_PICK_ASK = "Какой приём отметить?"
 MEDS_ASK_DISMISSED = "Хорошо. Добавить лекарства можно позже в настройках."
+#: Повторный вход в «💊 Лекарство» без настроенных лекарств (§6.3, K2, M1).
+MEDS_NONE_HINT = "Сначала добавьте лекарства в настройках"
+
+# ─────────────────── «➕ Фактор» (§6.3, 0.6.0) ───────────────────
+
+FACTOR_ASK = "Отметьте факторы"
+#: Подписи меток факторов (§4.18, §6.3): словарь дословный.
+FACTOR_LABELS = {
+    "salt": "Солёное",
+    "coffee": "Кофе",
+    "alcohol": "Алкоголь",
+    "stress": "Стресс",
+    "sleep": "Недосып",
+}
+FACTOR_DONE = "✅ Записано"
+FACTOR_EMPTY = "Отметьте, что выбрали"
+
+# ─────────────────── «➕ Добавить запись» (§6.14, 0.6.0) ───────────────────
+
+#: Типы записей меню дословно (§6.14, R2 = А).
+EVENT_TYPE_LABELS = {
+    "bp": "Давление и пульс",
+    "med": "Приём лекарства",
+    "walk": "Прогулка / активность",
+    "food": "Питание (соль / кофе / алкоголь)",
+    "stress": "Стресс / самочувствие",
+    "sleep": "Сон",
+    "note": "Заметка / другое",
+}
+EVENT_MENU_ASK = "Что добавить в дневник?"
+
+# Прогулка (R17 = Б): длительность, затем время
+WALK_DURATION_LABELS = {10: "10 минут", 20: "20 минут", 30: "30 минут", 60: "60 минут"}
+WALK_ASK = "Как долго гуляли?"
+
+# Стресс / самочувствие (R19 = Б, I7)
+STRESS_ASK = "Что чувствуете?"
+STRESS_VARIANT_LABELS = {
+    "stress": "Стресс",
+    "anxiety": "Тревога",
+    "headache": "Головная боль",
+    "weakness": "Слабость",
+    "dizziness": "Головокружение",
+    "other": "Другое",
+}
+EVENT_TEXT_PROMPT = "Коротко опишите — сохраню в заметку."
+EVENT_TEXT_REQUIRED = "Напишите, что чувствуете"
+
+# Сон (R20 = А)
+SLEEP_ASK = "Как спали?"
+SLEEP_RATING_LABELS = {"little": "Мало спал", "normal": "Нормально", "much": "Много"}
+
+# Заметка (R21, B4 = Б)
+NOTE_ASK = "Напишите заметку (до 500 символов)."
+
+# Время события (§6.14, C22)
+EVENT_TIME_NOW = "🕓 Сейчас"
+EVENT_TIME_OTHER = "🕓 Другое время"
+EVENT_TIME_ASK = "Во сколько?"
+EVENT_TIME_NEEDED = "Введите время"
+
+# ─────────────────── Лента «Дневник за сегодня» (§6.4, 0.6.0) ───────────────────
+
+#: Чипы-фильтры ленты (M2 + C11); «Все» — отсутствие выделенного чипа (M1).
+DIARY_FILTER_LABELS = {
+    "bp": "Давление",
+    "med": "Лекарства",
+    "fact": "Факторы",
+    "other": "Другое",
+}
+DIARY_FILTER_EMPTY = "В этой категории записей нет"
+#: Тап по строке приёма в ленте (M4).
+DIARY_MED_VIEW = "Только просмотр"
+#: Эмодзи типов событий (§6.4).
+EVENT_EMOJI = {"food": "🥗", "stress": "😐", "sleep": "😴", "activity": "🚶", "note": "📝"}
+#: Статусы приёма в строке ленты (B2, I2).
+MED_STATUS_MARKS = {"taken": "✓", "skipped": "✗", "partial": "~"}
+#: Заметка в строке ленты (M7): 45 символов — укладывается в лимит текста
+#: кнопки Telegram (64) вместе с «13:20 — 📝 »; полный текст — в карточке.
+DIARY_NOTE_LIMIT = 45
+
+
+def event_kind_line(type_: str, payload: Optional[dict]) -> str:
+    """Строка типа события: «Питание: солёное, кофе» (§6.4, M5).
+
+    Детали — строчными буквами (подписи кнопок — с заглавной, §6.3).
+    """
+    payload = payload or {}
+    if type_ == "food":
+        marks = ", ".join(FACTOR_LABELS[m].lower() for m in payload.get("marks", []))
+        return f"Питание: {marks}"
+    if type_ == "stress":
+        variant = payload.get("variant", "stress")
+        if variant == "stress":
+            return "Стресс"
+        label = STRESS_VARIANT_LABELS.get(variant, variant)
+        return f"Стресс · {label.lower()}"
+    if type_ == "sleep":
+        rating = payload.get("rating", "normal")
+        return f"Сон: {SLEEP_RATING_LABELS.get(rating, rating).lower()}"
+    if type_ == "activity":
+        return f"Прогулка: {payload.get('duration_min', 0)} минут"
+    return "Заметка"
+
+
+def fmt_diary_event_line(time_str: str, kind_line: str, emoji: str) -> str:
+    """Строка события ленты: «13:20 — 🥗 Питание: солёное, кофе» (§6.4)."""
+    return f"{time_str} — {emoji} {kind_line}"
+
+
+def fmt_diary_med_line(
+    time_str: str, name: str, dosage: str, slot: str, status: str
+) -> str:
+    """Строка приёма ленты: «08:20 — 💊 Лозартан 50 мг · утро ✓» (§6.4, I2, B2)."""
+    mark = MED_STATUS_MARKS.get(status, "")
+    return f"{time_str} — 💊 {fmt_intake_item(name, dosage, slot)} {mark}".rstrip()
+
+
+def fmt_diary_note_line(time_str: str, note: str) -> str:
+    """Строка заметки: «13:20 — 📝 {первые 60 символов}» (§6.4, M7)."""
+    short = note if len(note) <= DIARY_NOTE_LIMIT else note[:DIARY_NOTE_LIMIT] + "…"
+    return f"{time_str} — 📝 {short}"
+
+
+# Правка/удаление события (C3 = А)
+EVENT_DEL_CONFIRM = "Удалить запись?"
+EVENT_DELETED = "Запись удалена"
+EVENT_UPDATED = "✅ Обновлено"
+#: Шаг времени в правке события (V9): оставить прежний момент.
+EVENT_TIME_KEEP = "🕓 Оставить {moment}"
+
+
+def fmt_event_card(
+    emoji: str,
+    kind_line: str,
+    moment_str: Optional[str],
+    note: Optional[str],
+) -> str:
+    """Карточка события (§6.4, M5): «{эмодзи} {тип}: {детали} · {время}».
+
+    `note` (если есть) — отдельной строкой; у `sleep` времени нет (C22).
+    """
+    title = f"{emoji} {kind_line}"
+    if moment_str:
+        title += f" · {moment_str}"
+    lines = [title]
+    if note:
+        lines.append(note)
+    return "\n".join(lines)
 
 # ─────────────────────────── Напоминания (слоты) ───────────────────────────
 

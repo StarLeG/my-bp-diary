@@ -40,6 +40,51 @@ CLEANUP_INTERVAL = 60.0
 #: Callback-префикс флоу записи давления (`m:key:5`, `m:cancel`, …).
 FLOW_PREFIX = "m:"
 
+#: Callback'и, пишущие в БД: debounce 1.5 с (§7.2; план 0.6.0, V2/V4/V5).
+DEBOUNCE_EXACT = frozenset(
+    {
+        "m:key:ok",
+        "m:fact:done",
+        "m:med:done",
+        "m:med:yes",
+        "m:med:no",
+        "add:time:now",
+        "add:food:done",
+    }
+)
+DEBOUNCE_PREFIXES = ("m:noremeasure:", "ev:save:", "add:sleep:", "d:pd:")
+
+#: Правка буфера и чекбоксы — каждое нажатие (exempt, §6.3).
+EXEMPT_PREFIXES = (
+    "m:fact:pick:",
+    "m:med:pick:",
+    "add:food:pick:",
+    "d:pt:",
+    "d:filt:",
+)
+#: Чтение (без записи в БД) — каждое нажатие.
+EXEMPT_KEYS = frozenset({"ev:open", "ev:back"})
+
+
+def callback_class(data: str) -> str:
+    """Класс callback'а (§7.2, V2/V4/V5): `debounce` / `exempt` / `pass`.
+
+    - `debounce` — пишущие в БД: повторный тап в окне 1.5 с игнорируется;
+    - `exempt` — каждое нажатие (буфер калькулятора, чекбоксы, чтение);
+    - `pass` — всё остальное, общий throttle 1 с.
+    """
+    if data in DEBOUNCE_EXACT or data.startswith(DEBOUNCE_PREFIXES):
+        return "debounce"
+    if data.startswith("ev:del:"):
+        return "debounce" if data.endswith(":ok") else "exempt"
+    if data.startswith("m:key:"):
+        action = data[len("m:key:") :]
+        return "exempt" if action.isdigit() or action in {"bksp", "clear"} else "pass"
+    if data in EXEMPT_KEYS or data.startswith(EXEMPT_PREFIXES):
+        return "exempt"
+    return "pass"
+
+
 #: Ключ сессии БД в data хендлеров.
 SESSION_KEY = "session"
 
@@ -72,18 +117,13 @@ class DbSessionMiddleware(BaseMiddleware):
 
 
 def _debounce_exempt(callback_data: str) -> bool:
-    """Действия без записи в БД: правка буфера калькулятора и чекбоксы (§6.3).
+    """Действия без записи в БД: правка буфера, чекбоксы, чтение (§6.3, V2/V4/V5).
 
-    Они обязаны срабатывать на каждое нажатие («экран редактируется на каждое
-    нажатие»), поэтому из-под дебаунса выведены; защита от двойного нажатия
-    нужна только действиям, которые сохраняют данные («Готово», «Да», …).
+    Они обязаны срабатывать на каждое нажатие, поэтому из-под дебаунса выведены;
+    защита от двойного нажатия нужна только действиям, которые сохраняют
+    данные («Готово», «Сейчас», «Удалить», …).
     """
-    if callback_data.startswith("m:med:pick:"):
-        return True
-    if callback_data.startswith("m:key:"):
-        action = callback_data[len("m:key:") :]
-        return action.isdigit() or action in {"bksp", "clear"}
-    return False
+    return callback_class(callback_data) == "exempt"
 
 
 class DebounceMiddleware(BaseMiddleware):
@@ -109,8 +149,7 @@ class DebounceMiddleware(BaseMiddleware):
         if (
             not isinstance(event, CallbackQuery)
             or not event.data
-            or not event.data.startswith(FLOW_PREFIX)
-            or _debounce_exempt(event.data)
+            or callback_class(event.data) != "debounce"
         ):
             return await handler(event, data)
         key = (event.from_user.id, event.data)
@@ -145,7 +184,7 @@ class ThrottleMiddleware(BaseMiddleware):
         if (
             not isinstance(event, CallbackQuery)
             or not event.data
-            or event.data.startswith(FLOW_PREFIX)
+            or callback_class(event.data) != "pass"
         ):
             return await handler(event, data)
         now = self._clock()

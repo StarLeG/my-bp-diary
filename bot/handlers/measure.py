@@ -42,6 +42,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, schemas, texts
 from bot.models import User
+from bot.services import events as events_service
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services.reminders import RemindersService
@@ -58,8 +59,12 @@ M_DIA = "m_dia"
 M_PULSE = "m_pulse"
 #: Буфер набора калькулятора (строка ≤ 3 цифр, §6.3).
 M_BUF = "m_buf"
+#: Активное поле калькулятора: `sys` / `dia` / `pulse` (I6, K3).
+M_FIELD = "m_field"
 #: Отмеченные приёмы мультивыбора «Какие лекарства приняли?» (список id).
 M_MED_CHECKED = "m_med_checked"
+#: Отмеченные метки мультивыбора «➕ Фактор» (список меток, §6.3).
+M_FACT_CHECKED = "m_fact_checked"
 #: Id приёмов, принятых за сегодня, — для пометки «· сегодня ✓» при перерисовке (§6.3).
 M_MED_TAKEN_TODAY = "m_med_taken_today"
 M_ID = "m_id"
@@ -75,13 +80,28 @@ A_DATE = "arch_date"
 
 
 class MeasureInput(StatesGroup):
-    """FSM-состояния ввода флоу записи (§15)."""
+    """FSM-состояния флоу записи (§15, §8; 0.6.0).
 
-    sys_input = State()
-    dia_input = State()
-    pulse_input = State()
+    Калькулятор — одно состояние `active` («где я»), данные полей —
+    `m_sys`/`m_dia`/`m_pulse`, активное поле — `m_field`, буфер — `m_buf`
+    (K3, V1).
+    """
+
+    active = State()
     note_input = State()
     feeling_other = State()
+
+
+#: Ключи полей калькулятора в порядке следования (§6.3).
+FIELD_KEYS = ("sys", "dia", "pulse")
+#: Диапазоны и подписи полей (§9).
+FIELD_LIMITS: dict[str, tuple[int, int, str]] = {
+    "sys": (70, 260, "систолическое"),
+    "dia": (40, 160, "диастолическое"),
+    "pulse": (30, 220, "пульс"),
+}
+#: FSM-ключи значений полей (значения остаются в `m_sys`/`m_dia`/`m_pulse`).
+FIELD_VALUE_KEYS = {"sys": M_SYS, "dia": M_DIA, "pulse": M_PULSE}
 
 
 class ArchiveInput(StatesGroup):
@@ -94,28 +114,26 @@ class ArchiveInput(StatesGroup):
 
 @dataclass(frozen=True)
 class _Field:
-    """Описание шага ввода значения (ключ черновика, диапазон, вопрос)."""
+    """Описание поля калькулятора (ключ черновика, диапазон, подпись)."""
 
     key: str
     lo: int
     hi: int
     label: str
-    question: str
-    allow_skip: bool
 
 
-#: Шаги калькулятора по FSM-состоянию (SPEC.md, раздел 6.3, §9).
-_FIELDS: dict[str, _Field] = {
-    MeasureInput.sys_input.state: _Field(
-        M_SYS, 70, 260, "систолическое", texts.ASK_SYSTOLIC, False
-    ),
-    MeasureInput.dia_input.state: _Field(
-        M_DIA, 40, 160, "диастолическое", texts.ASK_DIASTOLIC, False
-    ),
-    MeasureInput.pulse_input.state: _Field(
-        M_PULSE, 30, 220, "пульс", texts.ASK_PULSE, True
-    ),
-}
+def _shown_values(
+    data: dict[str, Any], field: str
+) -> tuple[Optional[int], Optional[int], Optional[int]]:
+    """Значения полей для экрана: активное поле показывает буфер набора (§6.3)."""
+    buf = data.get(M_BUF, "")
+    values: list[Optional[int]] = []
+    for key in FIELD_KEYS:
+        value = data.get(FIELD_VALUE_KEYS[key])
+        if key == field and buf:
+            value = int(buf)
+        values.append(value)
+    return values[0], values[1], values[2]
 
 
 def _buf_add(buf: str, digit: str) -> str:
@@ -152,24 +170,82 @@ async def _send(
         )
 
 
-async def _show_keypad(
+async def _show_calc(
     message: Message,
     state: FSMContext,
     *,
     via_message: bool = False,
     large: bool = False,
 ) -> None:
-    """Показать экран текущего шага с текущим буфером (§6.3)."""
-    current = await state.get_state()
-    field = _FIELDS[current]
+    """Показать экран калькулятора: шапка, поля, итог, клавиатура (§6.3, V3)."""
     data = await state.get_data()
-    buf = data.get(M_BUF, "")
+    field = data.get(M_FIELD, "sys")
+    values = _shown_values(data, field)
     await _send(
         message,
-        texts.fmt_keypad_prompt(field.question, buf),
-        keyboards.keypad_kb(buf, allow_skip=field.allow_skip, large=large),
+        texts.fmt_keypad_prompt(*values, large=large),
+        keyboards.keypad_kb(field, values, large=large),
         via_message=via_message,
+        html=True,
     )
+
+
+async def _commit_field(state: FSMContext) -> Optional[str]:
+    """Коммит буфера в активное поле и валидация (C9).
+
+    «Готово» и переключение поля сначала коммитят `m_buf` в `m_field`, затем
+    валидируют: пустой буфер — значение поля не меняется. Для диастолического
+    проверяется пара (§9), если систолическое уже введено. Возвращает текст
+    ошибки (экран не меняется) или `None`.
+    """
+    data = await state.get_data()
+    field = data.get(M_FIELD, "sys")
+    buf = data.get(M_BUF, "")
+    if not buf:
+        return None
+    lo, hi, label = FIELD_LIMITS[field]
+    try:
+        value = schemas.validate_int(buf, lo, hi, label)
+    except ValueError as exc:
+        return str(exc)
+    if field == "dia":
+        systolic = data.get(M_SYS)
+        if systolic is not None:
+            try:
+                schemas.validate_pair(systolic, value)
+            except ValueError as exc:
+                return str(exc)
+    await state.update_data(**{FIELD_VALUE_KEYS[field]: value, M_BUF: ""})
+    return None
+
+
+async def _finish(
+    message: Message,
+    state: FSMContext,
+    session: AsyncSession,
+    telegram_id: int,
+    *,
+    via_message: bool = False,
+    large: bool = False,
+) -> Optional[str]:
+    """«Готово»: коммит буфера, проверка полноты и пары, сохранение (§6.3).
+
+    Возвращает текст ошибки (экран не меняется) или `None` после сохранения.
+    """
+    error = await _commit_field(state)
+    if error is not None:
+        return error
+    data = await state.get_data()
+    systolic = data.get(M_SYS)
+    diastolic = data.get(M_DIA)
+    if systolic is None or diastolic is None:
+        return texts.KEYPAD_EMPTY_INPUT
+    try:
+        schemas.validate_pair(systolic, diastolic)
+    except ValueError as exc:
+        return str(exc)
+    await _save(message, state, session, telegram_id, via_message=via_message)
+    return None
 
 
 def _saved_markup(data: dict[str, Any]) -> InlineKeyboardMarkup:
@@ -258,50 +334,6 @@ async def _archive_guard(
     return True
 
 
-async def _confirm_value(state: FSMContext, raw: str) -> Optional[str]:
-    """Проверить и сохранить значение текущего шага (§9).
-
-    Возвращает None при успехе или текст ошибки (экран при этом не меняется).
-    На шаге диастолического дополнительно проверяется пара (§9).
-    """
-    current = await state.get_state()
-    field = _FIELDS.get(current or "")
-    if field is None:
-        return texts.KEYPAD_EMPTY_INPUT
-    try:
-        value = schemas.validate_int(raw, field.lo, field.hi, field.label)
-    except ValueError as exc:
-        return str(exc)
-    data = await state.get_data()
-    if field.key == M_DIA:
-        try:
-            schemas.validate_pair(data[M_SYS], value)
-        except ValueError as exc:
-            return str(exc)
-    await state.update_data(**{field.key: value, M_BUF: ""})
-    return None
-
-
-async def _advance(
-    message: Message,
-    state: FSMContext,
-    session: AsyncSession,
-    telegram_id: int,
-    *,
-    via_message: bool = False,
-    large: bool = False,
-) -> None:
-    """После подтверждения значения: следующий шаг калькулятора или сохранение."""
-    current = await state.get_state()
-    if current == MeasureInput.sys_input.state:
-        await state.set_state(MeasureInput.dia_input)
-        await _show_keypad(message, state, via_message=via_message, large=large)
-    elif current == MeasureInput.dia_input.state:
-        await state.set_state(MeasureInput.pulse_input)
-        await _show_keypad(message, state, via_message=via_message, large=large)
-    else:  # pulse_input — сохранение сразу после пульса (§6.3)
-        await state.set_state(None)
-        await _save(message, state, session, telegram_id, via_message=via_message)
 
 
 # ─────────────────────────── Начало и отмена ───────────────────────────
@@ -335,9 +367,9 @@ async def cb_measure_begin(
             await session.commit()
             await reminders.cancel_followup(user.id, parts[2])
     await state.clear()
-    await state.set_state(MeasureInput.sys_input)
-    await state.update_data(**{M_BUF: ""})
-    await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
+    await state.set_state(MeasureInput.active)
+    await state.update_data(**{M_BUF: "", M_FIELD: "sys"})
+    await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -369,11 +401,19 @@ async def cb_edit_begin(
         await callback.answer(texts.NOT_YOUR_RECORD)
         return
     await state.clear()
-    await state.set_state(MeasureInput.sys_input)
+    await state.set_state(MeasureInput.active)
     await state.update_data(
-        **{M_EDIT_ID: measurement.id, M_ID: measurement.id, M_BUF: ""}
+        **{
+            M_EDIT_ID: measurement.id,
+            M_ID: measurement.id,
+            M_SYS: measurement.systolic,
+            M_DIA: measurement.diastolic,
+            M_PULSE: measurement.pulse,
+            M_BUF: "",
+            M_FIELD: "sys",
+        }
     )
-    await _show_keypad(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
+    await _show_calc(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -386,92 +426,130 @@ async def cb_keypad(
     state: FSMContext,
     session: AsyncSession,
 ) -> None:
-    """Кнопки калькулятора: цифры, «C», «⌫», «Готово», «Пропустить» (§6.3).
+    """Кнопки калькулятора: цифры, «C», «⌫», «Готово» (§6.3; 0.6.0).
 
-    «Готово» с пустым буфером — «Введите число»; вне диапазона или с нарушением
-    пары — ошибка валидации: экран не меняется. «Пропустить» — только шаг
-    пульса (значение очищается, §6.3).
+    Цифры и «C»/«⌫» работают с буфером активного поля (каждое нажатие —
+    exempt от дебаунса, §7.2); «Готово» коммитит буфер и сохраняет запись
+    (ошибки — тостом, экран не меняется); «Пропустить» (legacy, C14) и
+    неизвестные действия — в главное меню.
     """
     action = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
-    current = await state.get_state()
-    field = _FIELDS.get(current or "")
-    if field is None:
+    if await state.get_state() != MeasureInput.active.state:
         await _to_menu(callback)  # устаревшие кнопки без черновика
         return
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     large = user.ui_large
-    data = await state.get_data()
-    buf = data.get(M_BUF, "")
+    buf = (await state.get_data()).get(M_BUF, "")
     if action.isdigit():
-        buf = _buf_add(buf, action)
-        await state.update_data(**{M_BUF: buf})
-        await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
+        await state.update_data(**{M_BUF: _buf_add(buf, action)})
+        await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
     elif action == "bksp":
-        buf = buf[:-1]
-        await state.update_data(**{M_BUF: buf})
-        await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
+        await state.update_data(**{M_BUF: buf[:-1]})
+        await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
     elif action == "clear":
         await state.update_data(**{M_BUF: ""})
-        await _show_keypad(callback.message, state, large=large)  # type: ignore[arg-type]
-    elif action == "skip":
-        if field.key != M_PULSE:
-            await _to_menu(callback)  # «Пропустить» бывает только на пульсе
-            return
-        await state.update_data(**{M_PULSE: None, M_BUF: ""})
-        await _advance(
+        await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
+    elif action == "ok":
+        error = await _finish(
             callback.message,  # type: ignore[arg-type]
             state,
             session,
             callback.from_user.id,
             large=large,
         )
-    elif action == "ok":
-        if not buf:
-            await callback.answer(texts.KEYPAD_EMPTY_INPUT)  # экран не меняется
-            return
-        error = await _confirm_value(state, buf)
         if error is not None:
             await callback.answer(error)  # экран не меняется
             return
-        await _advance(
-            callback.message,  # type: ignore[arg-type]
-            state,
-            session,
-            callback.from_user.id,
-            large=large,
-        )
     else:
-        await _to_menu(callback)  # неизвестное действие — устаревшие кнопки
+        await _to_menu(callback)  # `m:key:skip` — legacy (C14), прочее — в меню
         return
     await callback.answer()
 
 
-async def _msg_value(
-    message: Message, state: FSMContext, session: AsyncSession
+@router.callback_query(F.data.startswith("m:field:"))
+async def cb_field(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
 ) -> None:
-    """Число из чата — сразу подтверждённое значение и переход (§6.3)."""
-    error = await _confirm_value(state, message.text or "")
-    if error is not None:
-        await message.answer(error)  # короткая ошибка, повтор ввода
+    """Тап по числу в итоге — фокус в поле (§6.3); буфер прежнего поля коммитится (C9)."""
+    if await state.get_state() != MeasureInput.active.state:
+        await _to_menu(callback)
         return
+    field = callback.data.split(":", 2)[2]  # type: ignore[union-attr]
+    if field not in FIELD_KEYS:
+        await _to_menu(callback)
+        return
+    error = await _commit_field(state)
+    if error is not None:
+        await callback.answer(error)  # экран не меняется
+        return
+    await state.update_data(**{M_FIELD: field})
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await _show_calc(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:reset")
+async def cb_reset(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+) -> None:
+    """«Изменить» — сброс всех трёх полей, фокус в систолическое (C8)."""
+    if await state.get_state() != MeasureInput.active.state:
+        await _to_menu(callback)
+        return
+    await state.update_data(
+        **{M_SYS: None, M_DIA: None, M_PULSE: None, M_BUF: "", M_FIELD: "sys"}
+    )
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await _show_calc(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
+    await callback.answer()
+
+
+@router.message(MeasureInput.active)
+async def msg_value(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """Быстрая строка или одиночное число (§6.3; B5, C7, C12, C17).
+
+    `120/80 72` / `120/80/72` / `120/80` — заполняет все три поля (буфер
+    сбрасывается, фокус — на пульс); одиночное число — в активное поле;
+    иначе — «Например: 120/80 72». Сохранение — только по «Готово».
+    """
     tg_id = message.from_user.id  # type: ignore[union-attr]
     user = await measurements_service.get_or_create_user(session, tg_id)
-    await _advance(message, state, session, tg_id, via_message=True, large=user.ui_large)
-
-
-@router.message(MeasureInput.sys_input)
-async def msg_systolic(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    await _msg_value(message, state, session)
-
-
-@router.message(MeasureInput.dia_input)
-async def msg_diastolic(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    await _msg_value(message, state, session)
-
-
-@router.message(MeasureInput.pulse_input)
-async def msg_pulse(message: Message, state: FSMContext, session: AsyncSession) -> None:
-    await _msg_value(message, state, session)
+    text = (message.text or "").strip()
+    data = await state.get_data()
+    field = data.get(M_FIELD, "sys")
+    if "/" in text:
+        try:
+            systolic, diastolic, pulse = schemas.parse_pressure_line(text)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        await state.update_data(
+            **{
+                M_SYS: systolic,
+                M_DIA: diastolic,
+                M_PULSE: pulse,
+                M_BUF: "",
+                M_FIELD: "pulse",
+            }
+        )
+    elif text.isdigit():
+        lo, hi, label = FIELD_LIMITS[field]
+        try:
+            value = schemas.validate_int(text, lo, hi, label)
+            if field == "dia" and data.get(M_SYS) is not None:
+                schemas.validate_pair(data[M_SYS], value)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+        await state.update_data(**{FIELD_VALUE_KEYS[field]: value, M_BUF: ""})
+    else:
+        await message.answer(schemas.PRESSURE_LINE_HINT)
+        return
+    await _show_calc(message, state, via_message=True, large=user.ui_large)
 
 
 async def _save(
@@ -493,7 +571,7 @@ async def _save(
     загруженный пользователь (без повторного запроса).
     """
     data = await state.get_data()
-    if M_SYS not in data or M_DIA not in data:
+    if data.get(M_SYS) is None or data.get(M_DIA) is None:
         await _send(  # устаревшие кнопки без черновика — в главное меню
             message, texts.MAIN_MENU, keyboards.main_menu(), via_message=via_message
         )
@@ -567,23 +645,194 @@ async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -
     await message.answer(texts.NOTE_SAVED, reply_markup=_saved_markup(data))
 
 
+# ─────────────────────────── «➕ Фактор» (§6.3, 0.6.0) ───────────────────────────
+
+
+@router.callback_query(F.data == "m:fact")
+async def cb_fact(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«➕ Фактор» — мультивыбор меток с привязкой к записи (§6.3, B6)."""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if await _archive_guard(callback, state, large=user.ui_large):
+        return
+    if await _measurement_id(callback, state) is None:
+        return
+    await state.update_data(**{M_FACT_CHECKED: []})
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.FACTOR_ASK,
+        reply_markup=keyboards.factor_kb(set(), large=user.ui_large),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("m:fact:pick:"))
+async def cb_fact_pick(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """Переключить метку фактора (`m:fact:pick:{метка}`) — экран редактируется на тап."""
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if await _archive_guard(callback, state, large=user.ui_large):
+        return
+    mark = callback.data.split(":", 3)[3]  # type: ignore[union-attr]
+    if mark not in texts.FACTOR_LABELS:
+        await _to_menu(callback)
+        return
+    data = await state.get_data()
+    if M_ID not in data:
+        await _to_menu(callback)
+        return
+    checked = set(data.get(M_FACT_CHECKED, []))
+    if mark in checked:
+        checked.discard(mark)
+    else:
+        checked.add(mark)
+    await state.update_data(**{M_FACT_CHECKED: sorted(checked)})
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.FACTOR_ASK,
+        reply_markup=keyboards.factor_kb(checked, large=user.ui_large),
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:fact:done")
+async def cb_fact_done(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Готово»: события факторов с привязкой к измерению, одной транзакцией (§6.3, B6).
+
+    Метки одной группы собираются в одно событие (соль + кофе — «Питание» с двумя
+    метками), разные группы — по событию на тип; идемпотентно (§7.2). Момент
+    события — момент измерения (фактор в контексте замера).
+    """
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if await _archive_guard(callback, state, large=user.ui_large):
+        return
+    measurement_id = await _measurement_id(callback, state)
+    if measurement_id is None:
+        return
+    data = await state.get_data()
+    checked = set(data.get(M_FACT_CHECKED, []))
+    if not checked:
+        await callback.answer(texts.FACTOR_EMPTY)  # экран не меняется
+        return
+    measurement = await measurements_service.get_measurement(session, user, measurement_id)
+    if measurement is None:
+        await state.clear()
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.NOT_YOUR_RECORD, reply_markup=keyboards.back_to_menu()
+        )
+        await callback.answer()
+        return
+    await events_service.create_factor_events(
+        session, user, measurement_id, checked, measurement.timestamp
+    )
+    await session.commit()
+    await state.update_data(**{M_FACT_CHECKED: []})
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.FACTOR_DONE, reply_markup=keyboards.saved_kb()
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "m:fact:cancel")
+async def cb_fact_cancel(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Отмена» — назад к сводке без событий (§6.3)."""
+    data = await state.get_data()
+    if M_ID not in data:
+        await _to_menu(callback)
+        return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    await _hub(callback.message, data, large=user.ui_large)  # type: ignore[arg-type]
+    await callback.answer()
+
+
 # ─────────────────────────── «Приняли лекарство?» ───────────────────────────
+
+
+async def _intake_screen(
+    callback: CallbackQuery,
+    state: FSMContext,
+    session: AsyncSession,
+    user: User,
+    meds: list,
+) -> None:
+    """Мультивыбор «Какие лекарства приняли?»: пустой выбор, пометки «· сегодня ✓»."""
+    taken_today = await medications_service.taken_intake_ids_today(session, user)
+    await state.update_data(**{M_MED_CHECKED: [], M_MED_TAKEN_TODAY: sorted(taken_today)})
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.MEDS_INTAKE_ASK,
+        reply_markup=keyboards.intake_meds_kb(set(), meds, taken_today),
+    )
+    await callback.answer()
 
 
 @router.callback_query(F.data == "m:med")
 async def cb_med(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    """«Приняли лекарство?» обычной сводки (§6.3); при архиве — сводка архива."""
+    """«💊 Лекарство» (§6.3, 0.6.0; B2 = А, C6, K2/M1).
+
+    Лекарства есть: к записи уже привязан приём — «💊 Принято: …» (чтение) +
+    «➕ Добавить ещё»; не привязан — мультивыбор. Лекарств нет — подсказка
+    «Напоминать, какие лекарства принимать?» один раз (маркер
+    `users.meds_ask_shown_at`), при повторных — «Сначала добавьте лекарства
+    в настройках».
+    """
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    if await _archive_guard(callback, state, large=user.ui_large):
+        return
+    measurement_id = await _measurement_id(callback, state)
+    if measurement_id is None:
+        return
+    meds = await medications_service.list_medications(session, user)
+    if not meds:
+        if user.meds_ask_shown_at is None:
+            user.meds_ask_shown_at = datetime.now(timezone.utc)
+            await session.commit()
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.MEDS_ASK_PROMPT, reply_markup=keyboards.meds_ask_kb()
+            )
+        else:
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.MEDS_NONE_HINT, reply_markup=keyboards.meds_none_kb()
+            )
+        await callback.answer()
+        return
+    labels = await medications_service.intake_labels_by_measurement(
+        session, user, [measurement_id]
+    )
+    if labels.get(measurement_id):
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.fmt_meds_intake(labels[measurement_id], large=user.ui_large),
+            reply_markup=keyboards.med_taken_readonly_kb(),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+    await _intake_screen(callback, state, session, user, meds)
+
+
+@router.callback_query(F.data == "m:med:more")
+async def cb_med_more(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«➕ Добавить ещё» (C6) — мультивыбор для следующей дозы той же записи."""
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     if await _archive_guard(callback, state, large=user.ui_large):
         return
     if await _measurement_id(callback, state) is None:
         return
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MED_ASK, reply_markup=keyboards.medication_taken_kb(user.ui_large)
-    )
-    await callback.answer()
+    meds = await medications_service.list_medications(session, user)
+    if not meds:
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.MEDS_NONE_HINT, reply_markup=keyboards.meds_none_kb()
+        )
+        await callback.answer()
+        return
+    await _intake_screen(callback, state, session, user, meds)
 
 
 @router.callback_query(F.data == "m:med:yes")
@@ -680,10 +929,17 @@ async def _should_ask_meds(session: AsyncSession, user: User) -> bool:
 
 
 @router.callback_query(F.data == "m:medask:dismiss")
-async def cb_meds_ask_dismiss(callback: CallbackQuery) -> None:
-    """«Не сейчас» в подсказке о лекарствах — подсказка убирается."""
+async def cb_meds_ask_dismiss(
+    callback: CallbackQuery, state: FSMContext, session: AsyncSession
+) -> None:
+    """«Не сейчас» — «Хорошо…» и возврат к сводке записи (§6.3)."""
+    data = await state.get_data()
+    if M_ID not in data:
+        await _to_menu(callback)
+        return
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MEDS_ASK_DISMISSED, reply_markup=None
+        texts.MEDS_ASK_DISMISSED, reply_markup=keyboards.saved_kb()
     )
     await callback.answer()
 
@@ -738,6 +994,7 @@ async def cb_med_done(
     callback: CallbackQuery,
     state: FSMContext,
     session: AsyncSession,
+    reminders: RemindersService,
 ) -> None:
     """«Готово»: по одной записи `medication_logs` на отмеченный приём (§6.3).
 
@@ -768,6 +1025,11 @@ async def cb_med_done(
     if not result.taken:  # все id чужие или удалённые
         await callback.answer(texts.MEDS_INTAKE_EMPTY)
         return
+    delay = user.med_remeasure_delay
+    if delay:
+        # повторный замер: один на измерение — ensure_remeasure идемпотентен по
+        # measurement_id (C1, C2/C18); «Не надо» — `m:noremeasure:{id}`
+        await reminders.ensure_remeasure(user.id, data[M_ID], delay)
     await state.update_data(**{M_MED_CHECKED: []})
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.fmt_meds_intake(result.taken, large=user.ui_large),
@@ -993,15 +1255,16 @@ async def _archive_set_moment(
         )
     except ValueError as exc:
         return str(exc)
-    await state.set_state(MeasureInput.sys_input)
+    await state.set_state(MeasureInput.active)
     await state.update_data(
         **{
             M_ARCH_TS: moment.astimezone(timezone.utc).isoformat(),
             M_ARCH_LABEL: moment.strftime("%d.%m.%Y, %H:%M"),
             M_BUF: "",
+            M_FIELD: "sys",
         }
     )
-    await _show_keypad(message, state, via_message=via_message, large=user.ui_large)
+    await _show_calc(message, state, via_message=via_message, large=user.ui_large)
     return None
 
 
@@ -1117,18 +1380,23 @@ async def cb_arch_edit(
         await _to_menu(callback)
         return
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    record = await measurements_service.get_measurement(session, user, measurement_id)
     await state.clear()
-    await state.set_state(MeasureInput.sys_input)
+    await state.set_state(MeasureInput.active)
     await state.update_data(
         **{
             M_EDIT_ID: measurement_id,
             M_ID: measurement_id,
+            M_SYS: record.systolic if record else None,
+            M_DIA: record.diastolic if record else None,
+            M_PULSE: record.pulse if record else None,
             M_BUF: "",
+            M_FIELD: "sys",
             M_ARCH_TS: data.get(M_ARCH_TS),
             M_ARCH_LABEL: data.get(M_ARCH_LABEL),
         }
     )
-    await _show_keypad(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
+    await _show_calc(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
     await callback.answer()
 
 

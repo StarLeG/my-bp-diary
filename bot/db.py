@@ -46,7 +46,9 @@ RETRY_BASE_DELAY = 0.05
 #: 9 — «Крупный режим» бота: `users.ui_large` (§4.1, §6.6, 0.5.10).
 #: 10 — заключения к визитам: таблица `appointment_conclusions`
 #:     (§4.17, 0.5.11; `create_all`).
-SCHEMA_VERSION = 10
+#: 11 — записи дневника: таблица `diary_events` (§4.18, 0.6.0; `create_all`),
+#:     `users.meds_ask_shown_at` (§4.1, K2).
+SCHEMA_VERSION = 11
 
 #: Колонки поколений 4–7 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
 _ADDED_COLUMNS = (
@@ -81,6 +83,7 @@ _ADDED_COLUMNS = (
     ("users", "followup_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
     ("users", "reminders_paused_until", "DATE"),
     ("users", "ui_large", "BOOLEAN NOT NULL DEFAULT 0"),
+    ("users", "meds_ask_shown_at", "DATETIME"),
 )
 
 T = TypeVar("T")

@@ -123,6 +123,9 @@ def main_menu(is_doctor: bool = False) -> InlineKeyboardMarkup:
     """
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ADD_RECORD, callback_data="add:menu")
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_DIARY, callback_data="menu:diary"))
     builder.row(InlineKeyboardButton(text=texts.BTN_APPOINTMENTS, callback_data="ap:list"))
     builder.row(InlineKeyboardButton(text=texts.BTN_STATS, callback_data="menu:stats"))
@@ -145,63 +148,95 @@ def back_to_menu() -> InlineKeyboardMarkup:
 # ─────────────────────────── Запись давления ───────────────────────────
 
 
-def keypad_kb(buf: str, *, allow_skip: bool, large: bool = False) -> InlineKeyboardMarkup:
-    """Клавиатура-калькулятор ввода значения (SPEC.md, раздел 6.3; мокап 2.1).
+#: Подписи полей калькулятора в кнопках итога (§6.3).
+KEYPAD_FIELD_LABELS = {"sys": "САД", "dia": "ДАД", "pulse": "Пульс"}
 
-    Цифры 0…9, «C» (`m:key:clear`) — очистить, «⌫» (`m:key:bksp`) — стереть
-    последнюю цифру, «Готово» (`m:key:ok`) — подтвердить, «Пропустить»
-    (`m:key:skip`) — только для пульса (`allow_skip=True`), «Отмена» — в меню.
 
-    `buf` — текущий буфер набора; на разметку не влияет (значение показывает
-    `texts.fmt_keypad_prompt`), передаётся для единообразия с текстом экрана.
+def keypad_kb(
+    field: str,
+    values: tuple[Optional[int], Optional[int], Optional[int]],
+    *,
+    large: bool = False,
+) -> InlineKeyboardMarkup:
+    """Клавиатура-калькулятор (SPEC.md, §6.3; 0.6.0, мокап V3).
 
-    Крупный режим (§11): цифры в 2 колонки (1–0 по порядку), «C»/«⌫» рядом,
-    «Готово»/«Пропустить»/«Отмена» — каждая отдельной строкой (мокап 2.1).
+    Ряд итога — кнопки полей (`m:field:{sys|dia|pulse}`): тап возвращает фокус
+    в поле, активное — с «▸ ». Значения — `(систолическое, диастолическое,
+    пульс)`, пустое — «—». Цифры 0–9 пишут в буфер активного поля, «C»
+    (`m:key:clear`) / «⌫» (`m:key:bksp`) действуют на активное поле, «Готово»
+    (`m:key:ok`) — сохранить, «Изменить» (`m:reset`) — сброс полей с фокусом в
+    систолическое, «Отмена» (`m:cancel`) — в меню. Кнопки «Пропустить» нет
+    (R7 = А): пустой пульс — `pulse = NULL`.
+
+    Крупный режим (§11): итог — по одной кнопке, цифры парами (1–0 по порядку),
+    «C»/«⌫» рядом, «Готово» / «Изменить» / «Отмена» — каждая отдельной строкой.
     """
     builder = InlineKeyboardBuilder()
+
+    def _field_button(key: str, value: Optional[int]) -> InlineKeyboardButton:
+        mark = "▸ " if key == field else ""
+        shown = "—" if value is None else str(value)
+        return InlineKeyboardButton(
+            text=f"{mark}{KEYPAD_FIELD_LABELS[key]} {shown}",
+            callback_data=f"m:field:{key}",
+        )
+
+    rows: list[list[InlineKeyboardButton]] = []
+    field_buttons = [
+        _field_button("sys", values[0]),
+        _field_button("dia", values[1]),
+        _field_button("pulse", values[2]),
+    ]
     if large:
-        # Раскладка крупного режима: 2 колонки (кнопка вдвое шире) — мокап 2.1.
+        rows.extend([[button] for button in field_buttons])
         for digits in ((1, 2), (3, 4), (5, 6), (7, 8), (9, 0)):
-            builder.row(
-                *[
+            rows.append(
+                [
                     InlineKeyboardButton(text=str(d), callback_data=f"m:key:{d}")
                     for d in digits
                 ]
             )
-        builder.row(
-            InlineKeyboardButton(text=texts.BTN_KEYPAD_CLEAR, callback_data="m:key:clear"),
-            InlineKeyboardButton(
-                text=texts.BTN_KEYPAD_BACKSPACE, callback_data="m:key:bksp"
-            ),
-        )
-        builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"))
-        if allow_skip:
-            builder.row(
-                InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="m:key:skip")
-            )
-        builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
-        return builder.as_markup()
-    # Раскладка как у калькулятора: 7-8-9 сверху, 1-2-3 снизу, «C 0 ⌫» последним рядом.
-    for digits in ((7, 8, 9), (4, 5, 6), (1, 2, 3)):
-        builder.row(
-            *[
-                InlineKeyboardButton(text=str(d), callback_data=f"m:key:{d}")
-                for d in digits
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.BTN_KEYPAD_CLEAR, callback_data="m:key:clear"
+                ),
+                InlineKeyboardButton(
+                    text=texts.BTN_KEYPAD_BACKSPACE, callback_data="m:key:bksp"
+                ),
             ]
         )
-    builder.row(
-        InlineKeyboardButton(text=texts.BTN_KEYPAD_CLEAR, callback_data="m:key:clear"),
-        InlineKeyboardButton(text="0", callback_data="m:key:0"),
-        InlineKeyboardButton(text=texts.BTN_KEYPAD_BACKSPACE, callback_data="m:key:bksp"),
-    )
-    if allow_skip:
-        builder.row(
-            InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"),
-            InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="m:key:skip"),
-        )
+        rows.append([InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok")])
+        rows.append([InlineKeyboardButton(text=texts.BTN_RESET, callback_data="m:reset")])
     else:
-        builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+        rows.append(field_buttons)
+        for digits in ((7, 8, 9), (4, 5, 6), (1, 2, 3)):
+            rows.append(
+                [
+                    InlineKeyboardButton(text=str(d), callback_data=f"m:key:{d}")
+                    for d in digits
+                ]
+            )
+        rows.append(
+            [
+                InlineKeyboardButton(
+                    text=texts.BTN_KEYPAD_CLEAR, callback_data="m:key:clear"
+                ),
+                InlineKeyboardButton(text="0", callback_data="m:key:0"),
+                InlineKeyboardButton(
+                    text=texts.BTN_KEYPAD_BACKSPACE, callback_data="m:key:bksp"
+                ),
+            ]
+        )
+        rows.append(
+            [
+                InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"),
+                InlineKeyboardButton(text=texts.BTN_RESET, callback_data="m:reset"),
+            ]
+        )
+    rows.append([InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel")])
+    for row in rows:
+        builder.row(*row)
     return builder.as_markup()
 
 
@@ -234,13 +269,178 @@ def intake_meds_kb(
 
 
 def saved_kb() -> InlineKeyboardMarkup:
-    """Кнопки после сохранения измерения: правка последней записи + опциональные шаги."""
+    """Кнопки сводки 0.6.0 (§6.3, R8): «✏️ Изменить» · «➕ Фактор» · «💊 Лекарство» ·
+    «Самочувствие» · «📝 Заметка» · «Готово». По одной в строке в обоих режимах.
+    """
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_EDIT, callback_data="m:edit"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_ADD_NOTE, callback_data="m:note"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_TOOK_MED, callback_data="m:med"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADD_FACTOR, callback_data="m:fact"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_MED_RECORD, callback_data="m:med"))
     builder.row(InlineKeyboardButton(text=texts.BTN_FEELING, callback_data="m:feeling"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_NOTE_RECORD, callback_data="m:note"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def factor_kb(checked: set[str], *, large: bool = False) -> InlineKeyboardMarkup:
+    """Мультивыбор меток «➕ Фактор» (§6.3, 0.6.0; B6).
+
+    Строка на метку словаря `texts.FACTOR_LABELS` («✓ » — у отмеченных),
+    `m:fact:pick:{метка}` переключает отметку, «Готово» (`m:fact:done`) создаёт
+    события, «Отмена» (`m:fact:cancel`) возвращает к сводке. `large` — канон
+    §11 (по одной в строке — и так соблюдён).
+    """
+    builder = InlineKeyboardBuilder()
+    for mark, label in texts.FACTOR_LABELS.items():
+        prefix = "✓ " if mark in checked else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{prefix}{label}", callback_data=f"m:fact:pick:{mark}"
+            )
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:fact:done"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:fact:cancel"))
+    return builder.as_markup()
+
+
+# ─────────────────── «➕ Добавить запись» (§6.14, 0.6.0) ───────────────────
+
+
+def add_menu_kb() -> InlineKeyboardMarkup:
+    """Экран выбора типа записи (§6.14, R2 = А): 7 типов + «В меню» (M5)."""
+    builder = InlineKeyboardBuilder()
+    for key, label in texts.EVENT_TYPE_LABELS.items():
+        builder.row(InlineKeyboardButton(text=label, callback_data=f"add:{key}"))
     builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def event_saved_kb(event_id: int, type_: str) -> InlineKeyboardMarkup:
+    """После сохранения события (§6.14, C3 = А): «✏️ Изменить» · «🗑 Удалить» ·
+    «➕ Добавить ещё» (новый проход того же типа) · «В меню»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_EDIT, callback_data=f"ev:edit:{event_id}")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_DELETE_EVENT, callback_data=f"ev:del:{event_id}"
+        )
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ADD_MORE, callback_data=f"add:{type_}")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def event_del_kb(event_id: int) -> InlineKeyboardMarkup:
+    """Подтверждение удаления события (§6.14): «Да, удалить» / «Нет»."""
+    builder = InlineKeyboardBuilder()
+    _layout_rows(
+        builder,
+        (
+            (f"Да, удалить", f"ev:del:{event_id}:ok"),
+            (texts.BTN_AP_NO, f"ev:open:{event_id}"),
+        ),
+        large=False,
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def walk_kb() -> InlineKeyboardMarkup:
+    """Шаг длительности прогулки (§6.14, R17 = Б): пресеты + «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    for minutes, label in texts.WALK_DURATION_LABELS.items():
+        builder.row(
+            InlineKeyboardButton(text=label, callback_data=f"add:walk:{minutes}")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    return builder.as_markup()
+
+
+def food_kb(checked: set[str], time_mode: str = "now") -> InlineKeyboardMarkup:
+    """Экран «Питание» — один экран (§6.14, K1 = А): чекбоксы меток + radio времени.
+
+    `time_mode` — `now` («Сейчас») или `other` («Другое время»); тап
+    `add:food:time:other` уводит во ввод `ЧЧ:ММ` без сохранения, «Готово»
+    (`add:food:done`) сохраняет с выбранным временем.
+    """
+    builder = InlineKeyboardBuilder()
+    for mark in ("salt", "coffee", "alcohol"):
+        label = texts.FACTOR_LABELS[mark]
+        prefix = "✓ " if mark in checked else ""
+        builder.row(
+            InlineKeyboardButton(
+                text=f"{prefix}{label}", callback_data=f"add:food:pick:{mark}"
+            )
+        )
+    now_text = (
+        f"✓ {texts.EVENT_TIME_NOW}" if time_mode == "now" else texts.EVENT_TIME_NOW
+    )
+    other_text = (
+        f"✓ {texts.EVENT_TIME_OTHER}"
+        if time_mode == "other"
+        else texts.EVENT_TIME_OTHER
+    )
+    builder.row(
+        InlineKeyboardButton(text=now_text, callback_data="add:food:time:now"),
+        InlineKeyboardButton(text=other_text, callback_data="add:food:time:other"),
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_DONE, callback_data="add:food:done"),
+        InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"),
+    )
+    return builder.as_markup()
+
+
+def stress_kb() -> InlineKeyboardMarkup:
+    """Шаг варианта «Стресс / самочувствие» (§6.14, R19 = Б) + «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    for variant, label in texts.STRESS_VARIANT_LABELS.items():
+        builder.row(
+            InlineKeyboardButton(text=label, callback_data=f"add:stress:{variant}")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    return builder.as_markup()
+
+
+def sleep_kb() -> InlineKeyboardMarkup:
+    """Шаг оценки сна (§6.14, R20 = А): без времени, одна оценка на сутки."""
+    builder = InlineKeyboardBuilder()
+    for rating, label in texts.SLEEP_RATING_LABELS.items():
+        builder.row(
+            InlineKeyboardButton(text=label, callback_data=f"add:sleep:{rating}")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    return builder.as_markup()
+
+
+def event_time_kb(*, large: bool = False) -> InlineKeyboardMarkup:
+    """Шаг времени события (§6.14, C22): «Сейчас» / «Другое» + «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    _layout_rows(
+        builder,
+        (
+            (texts.EVENT_TIME_NOW, "add:time:now"),
+            (texts.EVENT_TIME_OTHER, "add:time:other"),
+        ),
+        large=large,
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:back"))
+    return builder.as_markup()
+
+
+def event_text_kb(*, required: bool = False, large: bool = False) -> InlineKeyboardMarkup:
+    """Шаг текста события (§6.14): «Пропустить» (M6) — кроме обязательного
+    варианта «Другое»; «Отмена» — на предыдущий шаг с сохранением (V8)."""
+    builder = InlineKeyboardBuilder()
+    if not required:
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="add:text:skip")
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:back"))
     return builder.as_markup()
 
 
@@ -307,6 +507,24 @@ def meds_ask_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text=texts.BTN_NOT_NOW, callback_data="m:medask:dismiss")
     )
+    return builder.as_markup()
+
+
+def meds_none_kb() -> InlineKeyboardMarkup:
+    """Повторный вход без лекарств (§6.3, K2): «Добавить» + «В меню»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_ADD, callback_data="med:add"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def med_taken_readonly_kb() -> InlineKeyboardMarkup:
+    """Read-only «💊 Принято: …» (§6.3, B2=А, C6): «➕ Добавить ещё» + «В меню»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ADD_MORE, callback_data="m:med:more")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()
 
 
@@ -440,17 +658,54 @@ def archive_feeling_kb(large: bool = False) -> InlineKeyboardMarkup:
 # ─────────────────────────── Дневник ───────────────────────────
 
 
-def diary_kb(is_empty: bool = False, mark_intake: bool = False) -> InlineKeyboardMarkup:
-    """Дневник за сегодня: при пустом списке — «Записать давление»,
-    при непустом — «Изменить последнюю» (§6.3); «💊 Отметить приём», если есть
-    неотмеченный слот лекарств (§6.4, 0.5.5); всегда «Назад»."""
+def diary_filter_kb(active: Optional[str]) -> InlineKeyboardMarkup:
+    """Чипы-фильтры ленты (§6.4, M2 + C11): активный — «✓ », тап по нему — сброс (M1)."""
     builder = InlineKeyboardBuilder()
+    row = []
+    for key, label in texts.DIARY_FILTER_LABELS.items():
+        mark = "✓ " if key == active else ""
+        row.append(
+            InlineKeyboardButton(
+                text=f"{mark}{label}", callback_data=f"d:filt:{key}"
+            )
+        )
+    builder.row(*row)
+    return builder.as_markup()
+
+
+def diary_kb(
+    feed_rows: Sequence[tuple[str, str]] = (),
+    *,
+    active_filter: Optional[str] = None,
+    is_empty: bool = False,
+    mark_intake: bool = False,
+) -> InlineKeyboardMarkup:
+    """Лента «Дневник за сегодня» (§6.4, 0.6.0).
+
+    Строки записей — кнопками (события → карточка `ev:open`, приёмы → тост
+    «Только просмотр», измерения — без действий, `d:noop`); чипы фильтров;
+    действия: «➕ Добавить запись», при непустом — «✏️ Изменить последнюю»
+    (§6.3), «💊 Отметить приём» (неотмеченные слоты, §6.4), «Назад».
+    """
+    builder = InlineKeyboardBuilder()
+    for text, callback in feed_rows:
+        builder.row(InlineKeyboardButton(text=text, callback_data=callback))
+    builder.row(*diary_filter_kb(active_filter).inline_keyboard[0])
     if is_empty:
-        builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
-    else:
-        builder.row(InlineKeyboardButton(text=texts.BTN_EDIT_LAST, callback_data="m:edit"))
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure")
+        )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_ADD_RECORD, callback_data="add:menu")
+    )
+    if not is_empty:
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_EDIT_LAST, callback_data="m:edit")
+        )
     if mark_intake:
-        builder.row(InlineKeyboardButton(text=texts.BTN_MARK_INTAKE, callback_data="d:mt"))
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_MARK_INTAKE, callback_data="d:mt")
+        )
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
 

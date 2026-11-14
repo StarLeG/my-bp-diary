@@ -678,9 +678,17 @@ async def cb_meds(callback: CallbackQuery, session: AsyncSession) -> None:
 
 @router.callback_query(F.data == "med:add")
 async def cb_med_add(callback: CallbackQuery, state: FSMContext) -> None:
-    """«Добавить» — шаг 1: название (§6.6); кнопка есть и в промпте «Напоминать…»."""
+    """«Добавить» — шаг 1: название (§6.6); кнопка есть и в промпте «Напоминать…».
+
+    Из контекста «💊 Лекарство» (§6.3, M3) — флаг `med_ctx_measurement_id`
+    переживает очистку черновика: после сохранения вернёмся к сводке записи.
+    """
+    data = await state.get_data()
+    from_measure = data.get("m_id")
     await state.clear()
     await state.set_state(SettingsInput.med_name)
+    if from_measure is not None:
+        await state.update_data(**{"med_ctx_measurement_id": from_measure})
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.MEDS_ADD_NAME_PROMPT, reply_markup=keyboards.input_cancel_kb("med:cancel")
     )
@@ -878,7 +886,34 @@ async def cb_med_slots_done(
             else texts.MEDS_ADD_DONE_CRISIS
         )
     await session.commit()
+    ctx_id = data.get("med_ctx_measurement_id")
     await state.clear()
+    if ctx_id is not None:
+        # M3: добавление из «💊 Лекарство» — возврат к сводке записи.
+        from bot.handlers.measure import M_DIA, M_ID, M_PULSE, M_SYS
+
+        measurement = await measurements_service.get_measurement(session, user, ctx_id)
+        if measurement is not None:
+            await state.set_data(
+                {
+                    M_ID: measurement.id,
+                    M_SYS: measurement.systolic,
+                    M_DIA: measurement.diastolic,
+                    M_PULSE: measurement.pulse,
+                }
+            )
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.fmt_saved(
+                    measurement.systolic,
+                    measurement.diastolic,
+                    measurement.pulse,
+                    large=user.ui_large,
+                ),
+                reply_markup=keyboards.saved_kb(),
+                parse_mode="HTML" if user.ui_large else None,
+            )
+            await callback.answer()
+            return
     _, markup = await _meds_screen(session, user)
     await callback.message.edit_text(done, reply_markup=markup)  # type: ignore[union-attr]
     await callback.answer()
