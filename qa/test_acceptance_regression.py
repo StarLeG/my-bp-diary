@@ -42,6 +42,15 @@ def test_acceptance_criteria() -> None:
         violations.append(f"volume: p95 дашборда {volume.get('p95_ms', {}).get('dashboard')} мс ≥ 2000 мс (число из Т3)")
     if not volume.get("csv_p95_ok"):
         violations.append(f"volume: p95 CSV {volume.get('p95_ms', {}).get('csv')} мс ≥ 3000 мс (число из Т3)")
+    window = volume.get("concurrency", {})
+    if window.get("errors"):
+        violations.append(f"volume: окно конкуренции ({window.get('ops')} операций) — ошибки {window['errors'][:3]}")
+    if not window.get("dashboard_p95_ok"):
+        violations.append(
+            f"volume: окно конкуренции — p95 дашборда {window.get('p95_ms', {}).get('dashboard')} мс ≥ 2000 мс"
+        )
+    if not window.get("csv_p95_ok"):
+        violations.append(f"volume: окно конкуренции — p95 CSV {window.get('p95_ms', {}).get('csv')} мс ≥ 3000 мс")
 
     degradation = _load("degradation")
     for operation in degradation.get("operations", []):
