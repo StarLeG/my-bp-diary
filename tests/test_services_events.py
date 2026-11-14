@@ -197,7 +197,7 @@ class TestFactorEvents:
     async def test_links_to_own_measurement(
         self, session: AsyncSession, user: User
     ) -> None:
-        measurement = await save_measurement(session, user, 120, 80, 60)
+        measurement = await save_measurement(session, user, 120, 80, 60, timestamp=MOMENT)
         await session.commit()
         created = await create_factor_events(
             session, user, measurement.id, {"salt", "sleep"}, MOMENT
@@ -207,7 +207,7 @@ class TestFactorEvents:
         assert all(e.measurement_id == measurement.id for e in created)
 
     async def test_idempotent_double_tap(self, session: AsyncSession, user: User) -> None:
-        measurement = await save_measurement(session, user, 120, 80, 60)
+        measurement = await save_measurement(session, user, 120, 80, 60, timestamp=MOMENT)
         await session.commit()
         first = await create_factor_events(session, user, measurement.id, {"salt"}, MOMENT)
         second = await create_factor_events(session, user, measurement.id, {"salt"}, MOMENT)
@@ -262,7 +262,7 @@ class TestSleepUpsert:
 
 class TestDayFeed:
     async def test_mixed_feed_sorted(self, session: AsyncSession, user: User) -> None:
-        measurement = await save_measurement(session, user, 120, 80, 60)
+        measurement = await save_measurement(session, user, 120, 80, 60, timestamp=MOMENT)
         await session.commit()
         medication = Medication(
             user_id=user.id, name="Лозартан", dosage="50 мг", slot="morning"
