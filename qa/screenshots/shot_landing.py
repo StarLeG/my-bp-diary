@@ -416,7 +416,27 @@ class TelegramDialog:
         self.page.wait_for_timeout(700)  # дорисовка клавиатуры
 
     def send(self, text: str) -> None:
-        box = self.page.locator(".input-message-input[contenteditable='true']").first
+        # Страховка после кадра: Web виртуализует и поле ввода — восстановление
+        # скрытия из `shot()` может не успеть перерисоваться, и click зависает.
+        self.page.evaluate(_TG_HIDE_COMPOSER, False)
+        self.page.evaluate(_TG_SHOW_ALL)
+        self.page.evaluate(
+            "() => document.querySelectorAll('#column-center .chat-input')"
+            ".forEach(el => { el.style.display = ''; })"
+        )
+        box = self.page.locator(
+            "#column-center .chat-input .input-message-input[contenteditable='true']"
+        ).first
+        try:
+            box.wait_for(state="visible", timeout=15_000)
+        except Exception:
+            raise AssertionError(
+                "поле ввода не появилось; chat-input: "
+                + str(self.page.evaluate(
+                    "() => { const el = document.querySelector('#column-center .chat-input');"
+                    " return el ? el.outerHTML.slice(0, 400) : 'НЕТ .chat-input'; }"
+                ))
+            )
         box.click()
         box.type(text)
         self.page.keyboard.press("Enter")
@@ -425,9 +445,12 @@ class TelegramDialog:
         """Нажать inline-кнопку последнего сообщения с точным текстом.
 
         Пауза перед нажатием — как у человека: антидребезг бота
-        (`DebounceMiddleware`) отбрасывает слишком частые нажатия.
+        (`DebounceMiddleware`) отбрасывает слишком частые нажатия. Прокрутка
+        вниз обязательна: после кадра виртуализация Telegram Web может держать
+        хвост истории не в DOM, и поиск кнопки не найдёт последнего пузыря.
         """
         self.page.wait_for_timeout(1300)
+        self.bottom()
         # Эмодзи («📅 По дням», «◀») Telegram Web рисует картинками: подпись
         # кнопки сравнивается вместе с `alt` этих картинок, без U+FE0F.
         index = -1
@@ -437,7 +460,10 @@ class TelegramDialog:
                 break
             self.page.wait_for_timeout(500)
         if index < 0:
-            raise AssertionError(f"нет кнопки {label!r} в последнем сообщении")
+            raise AssertionError(
+                f"нет кнопки {label!r} в последнем сообщении; "
+                f"хвост: {self.page.evaluate(_DUMP_LAST)}"
+            )
         self.last().locator(".reply-markup-button").nth(index).click()
 
     def tap_contains(self, label: str) -> None:
@@ -447,6 +473,7 @@ class TelegramDialog:
         `tap` неприменим. Пауза перед нажатием — как у `tap` (антидребезг).
         """
         self.page.wait_for_timeout(1300)
+        self.bottom()
         index = -1
         for _ in range(60):
             index = self.page.evaluate(_TG_BUTTON_INDEX_CONTAINS, label)
@@ -664,25 +691,23 @@ def shoot_bot(
             dialog.shot("bot-menu", keep=2)
 
             dialog.tap(texts.BTN_MEASURE)
-            dialog.wait_text(texts.ASK_SYSTOLIC)
+            dialog.wait_text("Давление и пульс")  # шапка калькулятора (0.6.0, V3)
             for digit in "135":
                 dialog.tap(digit)
-            dialog.wait_text(texts.KEYPAD_ENTERED.format(value=135))
+            dialog.wait_text("Введено: 135/")
             dialog.shot("bot-keypad", keep=1)
 
+            dialog.tap_contains("ДАД")  # фокус → диастолическое (m:field:dia)
+            for digit in "85":
+                dialog.tap(digit)
+            dialog.tap_contains("Пульс")  # фокус → пульс (m:field:pulse)
+            for digit in "72":
+                dialog.tap(digit)
             dialog.tap(texts.BTN_DONE)
-            for value in ("85", "72"):
-                dialog.page.wait_for_timeout(800)
-                for digit in value:
-                    dialog.tap(digit)
-                dialog.wait_text(texts.KEYPAD_ENTERED.format(value=value))
-                dialog.tap(texts.BTN_DONE)
-            dialog.wait_text(texts.BTN_TOOK_MED)
+            dialog.wait_text("135/85, пульс 72")  # сводка одной строкой (§6.3, R9)
             dialog.shot("bot-saved", keep=1)
 
-            dialog.tap(texts.BTN_TOOK_MED)
-            dialog.wait_text(texts.BTN_MED_YES)
-            dialog.tap(texts.BTN_MED_YES)
+            dialog.tap_contains("Лекарство")  # «💊 Лекарство» — мультивыбор (0.6.0)
             dialog.wait_text(texts.MEDS_INTAKE_ASK)
             dialog.shot("bot-meds", keep=2)
             dialog.tap(texts.BTN_CANCEL)  # без отметок: журнал не трогаем
@@ -713,14 +738,14 @@ def shoot_bot(
         dialog.shot("bot-stats", keep=1)
 
         # «📅 По дням» и «📆 Свой период» (§6.5, 0.5.3).
-        dialog.tap(texts.BTN_BY_DAYS)
+        dialog.tap_contains("По дням")  # эмодзи кнопки — картинка, точный текст не найдёт
         dialog.wait_text("Средние по дням")
         dialog.shot("bot-daily", keep=1)
         dialog.tap(texts.BTN_BACK)  # к фото сводки
         dialog.wait_text("За 7 дней")
         dialog.tap(texts.BTN_BACK)  # к выбору периода
         dialog.wait_text("Свой период")  # эмодзи кнопки в Telegram Web — картинка
-        dialog.tap(texts.BTN_CUSTOM_PERIOD)
+        dialog.tap_contains("Свой период")
         dialog.wait_text(texts.STATS_CAL_FIRST)
         today = datetime.now(ZoneInfo("Europe/Minsk")).date()
         start = today - timedelta(days=CUSTOM_PERIOD_DAYS - 1)
