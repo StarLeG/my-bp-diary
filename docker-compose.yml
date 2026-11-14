@@ -11,6 +11,9 @@ services:
     image: my-bp-diary:latest
     container_name: bp-diary-bot
     command: ["python", "-m", "bot"]
+    # Штатное завершение под нагрузкой (SPEC §22, «Остановка»): без паузы
+    # `docker stop` шлёт SIGKILL через 10 с и grace-период не проверить.
+    stop_grace_period: 30s
     env_file: .env
     environment:
       DB_PATH: /app/data/bot.sqlite3
@@ -23,6 +26,7 @@ services:
     image: my-bp-diary:latest
     container_name: bp-diary-cabinet
     command: ["uvicorn", "web.cabinet.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    stop_grace_period: 30s
     env_file: .env
     environment:
       DB_PATH: /app/data/bot.sqlite3
