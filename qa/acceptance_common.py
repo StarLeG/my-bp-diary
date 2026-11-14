@@ -238,6 +238,31 @@ async def spawn_runtime(
     )
 
 
+async def spawn_uvicorn(db: Path, port: int, workers: int = 2):
+    """Реальный сервер кабинета — как в проде (`uvicorn --workers N`).
+
+    Окно конкуренции меряет реальную конфигурацию: рендер кабинета CPU-bound,
+    и один процесс сериализует запросы (SPEC §22, «Окно конкуренции»).
+    """
+    import sys
+
+    env = {
+        **os.environ,
+        "BOT_TOKEN": f"123456:{'A' * 35}",
+        "WEB_SECRET_KEY": "acceptance-secret",
+        "DB_PATH": str(db),
+        "BACKUP_DIR": str(db.parent / "acceptance-backups"),
+    }
+    return await asyncio.create_subprocess_exec(
+        sys.executable, "-m", "uvicorn", "web.cabinet.app:app",
+        "--host", "127.0.0.1", "--port", str(port), "--workers", str(workers),
+        "--log-level", "warning",
+        env=env,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+    )
+
+
 # ─────────────────────────── Runtime «бот» / «кабинет» ───────────────────────────
 
 #: Движок процесса runtime; `SQLAlchemyJobStore` сериализует job'ы, поэтому
