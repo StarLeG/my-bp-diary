@@ -3,30 +3,38 @@
 Полный профиль: 5 названий на пациента (100 названий; строк `medications` —
 100–200, по строке на слот, §4.4), из них ровно одно `crisis`; 25 записей
 `medication_logs` на пациента (500), статусы `taken` / `skipped` /
-`partial` по кругу. Дублей по `(user_id, slot, локальная дата,
-medication_id)` нет — каждая плановая запись лежит в своём дне; записи по
-`crisis` под это правило не подпадают (SOS-препарат можно принять дважды).
+`partial` по кругу. Профиль «три года» (`--scale three-years`) берёт из
+того же пула 8 названий на пациента и ведёт журнал по строке в день за все
+1095 дней окна (1095 записей на пациента). Дублей по `(user_id, slot,
+локальная дата, medication_id)` нет — каждая плановая запись лежит в своём
+дне; записи по `crisis` под это правило не подпадают (SOS-препарат можно
+принять дважды).
 
 Идемпотентно: недостающие строки лекарств добавляются по `(name, slot)`,
-записи журнала — по `(medication_id, timestamp)`. Запуск — через
-`qa/seed/seed_all.py`.
+записи журнала — по `(medication_id, timestamp)`. Записи журнала пишутся
+пачками (`executemany`). Запуск — через `qa/seed/seed_all.py`.
 """
 from __future__ import annotations
 
 from datetime import timedelta
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import Medication, MedicationLog, User
 from qa.seed import Scale, anchor_day, load_patients, seed_moment
 
 #: Плановые лекарства (название, дозировка); последнее место — у `crisis`.
+#: Названия — типовые (вымышленные данные стенда, никаких реальных).
 _REGULAR = (
     ("Лозартан", "50 мг"),
     ("Амлодипин", "5 мг"),
     ("Бисопролол", "2,5 мг"),
     ("Индапамид", "1,5 мг"),
+    ("Валсартан", "80 мг"),
+    ("Метопролол", "50 мг"),
+    ("Рамиприл", "5 мг"),
+    ("Гидрохлоротиазид", "25 мг"),
 )
 
 #: SOS-препарат: ровно один на пациента, слот `crisis`.
@@ -44,14 +52,21 @@ _STATUSES = ("taken", "skipped", "partial")
 #: Каждая десятая запись журнала — приём `crisis`.
 _CRISIS_EVERY = 10
 
+#: Размер пачки `executemany` для записей журнала (строк за один вызов).
+_BATCH = 1000
+
 
 def plan_medications(n: int, scale: Scale) -> list[tuple[str, str, str]]:
     """Строки лекарств пациента `n`: (название, дозировка, слот)."""
     regular_count = scale.medications_per_patient - 1  # одно место — у crisis
     rows: list[tuple[str, str, str]] = []
+    seen: set[tuple[str, str]] = set()
     for k in range(regular_count):
         name, dosage = _REGULAR[k % len(_REGULAR)]
         for slot in _SLOT_PATTERNS[(k + n) % len(_SLOT_PATTERNS)]:
+            if (name, slot) in seen:  # пул короче профиля — дубль слота не вставляем
+                continue
+            seen.add((name, slot))
             rows.append((name, dosage, slot))
     rows.append((*_CRISIS, "crisis"))
     return rows
@@ -97,6 +112,7 @@ async def seed_medications(session: AsyncSession, scale: Scale) -> dict[str, int
             )
         }
         last_day = anchor_day(user.created_at, user.timezone) - timedelta(days=1)
+        log_rows: list[dict] = []
         for j in range(scale.logs_per_patient):
             medication = (
                 crisis if j % _CRISIS_EVERY == _CRISIS_EVERY - 1 else regular[j % len(regular)]
@@ -110,15 +126,17 @@ async def seed_medications(session: AsyncSession, scale: Scale) -> dict[str, int
             if (medication.id, moment) in logged:
                 stats["logs_existing"] += 1
                 continue
-            session.add(
-                MedicationLog(
-                    user_id=user.id,
-                    medication_id=medication.id,
-                    timestamp=moment,
-                    status=_STATUSES[j % len(_STATUSES)],
-                    slot=medication.slot,
-                )
+            log_rows.append(
+                {
+                    "user_id": user.id,
+                    "medication_id": medication.id,
+                    "timestamp": moment,
+                    "status": _STATUSES[j % len(_STATUSES)],
+                    "slot": medication.slot,
+                }
             )
             stats["logs_created"] += 1
+        for start in range(0, len(log_rows), _BATCH):
+            await session.execute(insert(MedicationLog), log_rows[start : start + _BATCH])
     await session.flush()
     return stats

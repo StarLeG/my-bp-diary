@@ -14,6 +14,7 @@ from qa import seed
 from qa.seed import (
     FULL,
     SMOKE,
+    THREE_YEARS,
     StandGuardError,
     ensure_stand_db,
     stand_db_path,
@@ -82,7 +83,7 @@ class TestScales:
         assert SMOKE.measurements < FULL.measurements
 
     def test_scales_registry(self) -> None:
-        assert seed.SCALES == {"full": FULL, "smoke": SMOKE}
+        assert seed.SCALES == {"full": FULL, "smoke": SMOKE, "three-years": THREE_YEARS}
 
 
 class TestAccounts:
@@ -106,13 +107,17 @@ class TestAccounts:
 
 # ─────────────────────────── Сиды на временной БД стенда ───────────────────────────
 
+import asyncio  # noqa: E402
 import sqlite3  # noqa: E402
-from datetime import datetime, timedelta, timezone  # noqa: E402
+from datetime import date, datetime, timedelta, timezone  # noqa: E402
+from zoneinfo import ZoneInfo  # noqa: E402
 
 from qa.seed import SEED_SECOND, anchor_day, seed_moment  # noqa: E402
 from qa.seed import seed_all as seed_all_module  # noqa: E402
+from qa.seed import seed_appointments as seed_appts  # noqa: E402
 from qa.seed.seed_5000_measurements import plan_measurements  # noqa: E402
 from qa.seed.seed_admin import ADMIN_HINT  # noqa: E402
+from qa.seed.seed_appointments import CONCLUSIONS_MAX, FORWARD_DAYS, plan_appointments  # noqa: E402
 from qa.seed.seed_medications import plan_medications  # noqa: E402
 
 #: Момент сида в тестах: напоминания — «в ближайший час» от него.
@@ -412,3 +417,244 @@ class TestSeedConsents:
         doctor = count(stand, "SELECT COUNT(*) FROM consents WHERE kind = 'doctor' AND withdrawn_at IS NULL")
         assert doctor == links
         assert count(stand, "SELECT COUNT(*) FROM doctors WHERE consent_at IS NULL") == 0
+
+
+# ─────────────────── Профиль «три года» (авто-приёмка, SPEC §22) ───────────────────
+
+
+class FakePatient:
+    """Пациент для чистых планов: фиксированные момент создания и пояс."""
+
+    created_at = datetime(2026, 3, 1, 21, 30, tzinfo=timezone.utc)
+    timezone = "Europe/Moscow"  # 2 марта 00:30 по Москве → anchor = 2026-03-02
+
+
+def plus_two_years(day: date) -> date:
+    """«День + 2 года» (§6.13); 29 февраля — последний день февраля."""
+    try:
+        return day.replace(year=day.year + 2)
+    except ValueError:
+        return day.replace(year=day.year + 2, month=2, day=28)
+
+
+@pytest.fixture(scope="class")
+def three_stand(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Стенд «три года» на временной БД стенда: один `seed_all` на класс тестов."""
+    db = tmp_path_factory.mktemp("three-years") / "test-stand.sqlite3"
+    asyncio.run(seed_all_module.seed_all(db, THREE_YEARS, "test-pass", now=NOW, verbose=False))
+    return db
+
+
+class TestThreeYearsScale:
+    """Профиль «три года»: ~50 000 измерений; масштабируемые и фиксированные таблицы."""
+
+    def test_volume_about_50k(self) -> None:
+        assert THREE_YEARS.patients == 20
+        assert THREE_YEARS.measurements_per_patient == 2500
+        assert abs(THREE_YEARS.measurements - 50_000) <= 50_000 * 0.05  # ~50k ± 5%
+        assert THREE_YEARS.days == 1095  # история за 3 года
+
+    def test_scaled_tables_grow(self) -> None:
+        """Масштабируем: измерения, лекарства, логи приёма, визиты и заключения."""
+        assert THREE_YEARS.measurements > FULL.measurements
+        assert THREE_YEARS.medications_per_patient > FULL.medications_per_patient
+        assert THREE_YEARS.logs_per_patient > FULL.logs_per_patient
+        assert THREE_YEARS.appointments_per_patient > 0  # визиты → и заключения
+
+    def test_not_scaled_same_as_full(self) -> None:
+        """Не масштабируем: иначе получим нереалистичные строки (В1)."""
+        assert THREE_YEARS.reminders == FULL.reminders == 100  # активные не накапливаются
+        assert THREE_YEARS.doctors == FULL.doctors == 20  # связи врач–пациент
+
+
+class TestThreeYearsPlans:
+    """Планы «три года»: окна дат, детерминизм, вымышленные данные."""
+
+    def test_measurements_span_three_years(self) -> None:
+        plan = plan_measurements(1, FakePatient(), THREE_YEARS)  # type: ignore[arg-type]
+        assert len(plan) == THREE_YEARS.measurements_per_patient
+        assert all(p.timestamp < FakePatient.created_at for p in plan), "моментов в будущем нет"
+        first_day = anchor_day(FakePatient.created_at, FakePatient.timezone) - timedelta(
+            days=THREE_YEARS.days
+        )
+        per_day: dict[date, int] = {}
+        for planned in plan:
+            local = planned.timestamp.astimezone(ZoneInfo(FakePatient.timezone)).date()
+            per_day[local] = per_day.get(local, 0) + 1
+        assert set(per_day) == {
+            first_day + timedelta(days=d) for d in range(THREE_YEARS.days)
+        }, "записи — во всех 1095 днях окна"
+        assert max(per_day.values()) == 3 and min(per_day.values()) == 2, "2–3 измерения в день"
+
+    def test_measurement_values_in_ranges(self) -> None:
+        plan = plan_measurements(1, FakePatient(), THREE_YEARS)  # type: ignore[arg-type]
+        for planned in plan:
+            assert 100 <= planned.systolic <= 180
+            assert 60 <= planned.diastolic <= 110
+            assert 50 <= planned.pulse <= 110
+            assert planned.systolic - planned.diastolic >= 20
+
+    def test_appointments_within_two_years(self) -> None:
+        anchor = anchor_day(FakePatient.created_at, FakePatient.timezone)
+        plan = plan_appointments(1, FakePatient(), THREE_YEARS)  # type: ignore[arg-type]
+        assert len(plan) == THREE_YEARS.appointments_per_patient
+        for planned in plan:
+            assert anchor - timedelta(days=THREE_YEARS.days) <= planned.starts_on
+            assert planned.starts_on <= anchor + timedelta(days=FORWARD_DAYS)
+            assert planned.starts_on <= plus_two_years(anchor), "не дальше «сегодня + 2 года» (§6.13)"
+            if planned.starts_on >= anchor:
+                assert planned.status == "planned"
+            else:
+                assert planned.status in ("done", "missed", "moved", "cancelled")
+        upcoming = [p for p in plan if p.starts_on >= anchor]
+        assert 0 < len(upcoming) <= 30, "в «Скоро» — не больше лимита 30 событий (§6.13)"
+
+    def test_conclusions_on_done_visits_only(self) -> None:
+        anchor = anchor_day(FakePatient.created_at, FakePatient.timezone)
+        plan = plan_appointments(1, FakePatient(), THREE_YEARS)  # type: ignore[arg-type]
+        done = [p for p in plan if p.status == "done"]
+        assert done
+        for planned in plan:
+            if planned.status != "done":
+                assert planned.conclusions == (), "заключения — только к прошедшим визитам"
+                continue
+            assert planned.starts_on < anchor
+            assert 1 <= len(planned.conclusions) <= CONCLUSIONS_MAX, "до 5 на событие (§4.17)"
+            texts = [c.text for c in planned.conclusions]
+            assert len(set(texts)) == len(texts), "тексты внутри события не повторяются"
+            for text in texts:
+                assert text in seed_appts._CONCLUSION_TEXTS, "вымышленные фразы врача"
+                assert 1 <= len(text) <= 4000
+
+    def test_fictional_titles_and_notes(self) -> None:
+        plan = plan_appointments(1, FakePatient(), THREE_YEARS)  # type: ignore[arg-type]
+        for planned in plan:
+            assert planned.title in seed_appts._TITLES[planned.kind], "подсказки шага 2 (§6.13)"
+            assert 1 <= len(planned.title) <= 60
+            assert planned.note in seed_appts._NOTES
+
+    def test_plans_are_deterministic(self) -> None:
+        """Seeded RNG: повторный прогон даёт те же данные (В1)."""
+        assert plan_measurements(1, FakePatient(), THREE_YEARS) == plan_measurements(  # type: ignore[arg-type]
+            1, FakePatient(), THREE_YEARS  # type: ignore[arg-type]
+        )
+        assert plan_appointments(1, FakePatient(), THREE_YEARS) == plan_appointments(  # type: ignore[arg-type]
+            1, FakePatient(), THREE_YEARS  # type: ignore[arg-type]
+        )
+
+
+class TestThreeYearsSeed:
+    """Стенд «три года» на временной БД: объёмы, даты, не-масштабируемые таблицы."""
+
+    def test_counts(self, three_stand: Path) -> None:
+        measurements = count(three_stand, f"SELECT COUNT(*) FROM measurements WHERE {LOAD}")
+        assert abs(measurements - 50_000) <= 50_000 * 0.05  # ~50k ± 5%
+        assert measurements == THREE_YEARS.measurements
+        logs = count(three_stand, f"SELECT COUNT(*) FROM medication_logs WHERE {LOAD}")
+        assert logs == THREE_YEARS.patients * THREE_YEARS.logs_per_patient
+        names = count(
+            three_stand,
+            f"SELECT COUNT(*) FROM (SELECT DISTINCT user_id, name FROM medications WHERE {LOAD})",
+        )
+        assert names == THREE_YEARS.patients * THREE_YEARS.medications_per_patient
+        appointments = count(three_stand, f"SELECT COUNT(*) FROM appointments WHERE {LOAD}")
+        assert appointments == THREE_YEARS.patients * THREE_YEARS.appointments_per_patient
+        conclusions = count(three_stand, "SELECT COUNT(*) FROM appointment_conclusions")
+        assert conclusions > 0, "заключения — к прошедшим визитам"
+        assert count(three_stand, f"SELECT COUNT(*) FROM web_users WHERE {LOAD}") == THREE_YEARS.patients
+
+    def test_measurements_invariants(self, three_stand: Path) -> None:
+        row = sql(
+            three_stand,
+            "SELECT MIN(systolic), MAX(systolic), MIN(diastolic), MAX(diastolic), "
+            f"MIN(pulse), MAX(pulse), SUM(systolic - diastolic < 20) FROM measurements WHERE {LOAD}",
+        )[0]
+        assert 100 <= row[0] and row[1] <= 180
+        assert 60 <= row[2] and row[3] <= 110
+        assert 50 <= row[4] and row[5] <= 110
+        assert row[6] == 0
+        marked = count(
+            three_stand,
+            f"SELECT COUNT(*) FROM measurements WHERE {LOAD} "
+            f"AND strftime('%S', timestamp) = '{SEED_SECOND}'",
+        )
+        assert marked == THREE_YEARS.measurements, "все сидированные записи — с секундой-меткой"
+
+    def test_visit_dates(self, three_stand: Path) -> None:
+        created_raw, tz_name = sql(
+            three_stand,
+            f"SELECT created_at, timezone FROM users WHERE telegram_id = {seed.patient_tg_id(1)}",
+        )[0]
+        anchor = anchor_day(
+            datetime.fromisoformat(created_raw).replace(tzinfo=timezone.utc), tz_name
+        )
+        for raw_day, status in sql(
+            three_stand, f"SELECT starts_on, status FROM appointments WHERE {LOAD}"
+        ):
+            day = date.fromisoformat(raw_day)
+            assert anchor - timedelta(days=THREE_YEARS.days) <= day <= anchor + timedelta(days=FORWARD_DAYS)
+            assert day <= plus_two_years(anchor), "никаких дат > «сегодня + 2 года»"
+            if day >= anchor:
+                assert status == "planned"
+            else:
+                assert status != "planned"
+        upcoming = sql(
+            three_stand,
+            f"SELECT COUNT(*) FROM appointments WHERE {LOAD} AND status = 'planned' GROUP BY user_id",
+        )
+        assert upcoming and all(count_per_user <= 30 for (count_per_user,) in upcoming)
+
+    def test_conclusions(self, three_stand: Path) -> None:
+        rows = sql(
+            three_stand,
+            "SELECT appointment_id, COUNT(*), MAX(length(text)) "
+            "FROM appointment_conclusions GROUP BY appointment_id",
+        )
+        for _, per_event, longest in rows:
+            assert 1 <= per_event <= CONCLUSIONS_MAX, "до 5 заключений на событие (§4.17)"
+            assert 1 <= longest <= 4000
+        foreign = count(
+            three_stand,
+            "SELECT COUNT(*) FROM appointment_conclusions c "
+            "JOIN appointments a ON a.id = c.appointment_id WHERE a.status != 'done'",
+        )
+        assert foreign == 0, "заключения — только к прошедшим визитам со статусом done"
+
+    def test_not_scaled_counters(self, three_stand: Path) -> None:
+        """`reminders`, `doctor_patients`, `web_sessions`, `invite_log` — как в FULL."""
+        reminders = count(three_stand, f"SELECT COUNT(*) FROM reminders WHERE {LOAD}")
+        assert reminders == FULL.reminders == 100
+        active = count(three_stand, "SELECT COUNT(*) FROM doctor_patients WHERE status = 'active'")
+        assert active == FULL.doctors == 20
+        assert count(three_stand, "SELECT COUNT(*) FROM web_sessions") == 0
+        assert count(three_stand, "SELECT COUNT(*) FROM invite_log") == 0
+
+    def test_second_run_gives_identical_data(self, three_stand: Path) -> None:
+        """Два запуска → идентичные данные: второй ничего не добавляет и не меняет."""
+        tables = (
+            "users",
+            "web_users",
+            "measurements",
+            "medications",
+            "medication_logs",
+            "appointments",
+            "appointment_conclusions",
+            "reminders",
+            "doctor_patients",
+        )
+        before = {t: sql(three_stand, f"SELECT * FROM {t} ORDER BY 1") for t in tables}
+        report = asyncio.run(
+            seed_all_module.seed_all(three_stand, THREE_YEARS, "test-pass", now=NOW, verbose=False)
+        )
+        assert report["users"]["created"] == 0
+        assert report["measurements"]["created"] == 0
+        assert report["medications"]["medications_created"] == 0
+        assert report["medications"]["logs_created"] == 0
+        assert report["appointments"]["created"] == 0
+        assert report["appointments"]["conclusions_created"] == 0
+        assert report["reminders"]["slots_created"] == 0
+        assert report["reminders"]["remeasure_created"] == 0
+        assert report["doctors"]["doctors_created"] == 0
+        assert report["doctors"]["links_created"] == 0
+        after = {t: sql(three_stand, f"SELECT * FROM {t} ORDER BY 1") for t in tables}
+        assert after == before

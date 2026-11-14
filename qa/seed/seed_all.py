@@ -1,18 +1,24 @@
 """Оркестратор сида нагрузочного стенда (SPEC.md, §22, «Сид данных»).
 
-Порядок: [clean] → users → measurements → medications → reminders → doctors
-→ admin. Каждый шаг — своя короткая транзакция. По умолчанию идемпотентное
-дозаполнение: повторный запуск ничего не дублирует. `--clean` сначала
-удаляет только нагрузочные данные: пациентов из диапазона TG ID (остальное —
-каскадом) и врачей `*@load.test` (связи и заметки — каскадом); job'ы их
-напоминаний снимаются из таблицы APScheduler до удаления строк (CLAUDE.md).
+Порядок: [clean] → users → measurements → medications → appointments →
+reminders → doctors → admin. Каждый шаг — своя короткая транзакция. По
+умолчанию идемпотентное дозаполнение: повторный запуск ничего не дублирует.
+`--clean` сначала удаляет только нагрузочные данные: пациентов из диапазона
+TG ID (остальное — каскадом) и врачей `*@load.test` (связи и заметки —
+каскадом); job'ы их напоминаний снимаются из таблицы APScheduler до удаления
+строк (CLAUDE.md).
+
+Профили (`--scale`): `full`, `smoke` и `three-years` — полный объём
+авто-приёмки (~50 000 измерений за 3 года; `doc/LOAD-CRITERIA-QUESTIONS.md`,
+В1/В2).
 
 ТОЛЬКО для тестового стенда: БД без «test-stand» в имени отклоняется.
 
 Запуск (из корня репозитория):
 
     LOAD_PASSWORD='<пароль стенда>' \\
-        uv run python qa/seed/seed_all.py --db data/test-stand.sqlite3 [--scale smoke] [--clean]
+        uv run python qa/seed/seed_all.py --db data/test-stand.sqlite3 \\
+        [--scale smoke|full|three-years] [--clean]
 
 Пароль — только из `LOAD_PASSWORD` (или `--password`); в коде его нет.
 """
@@ -46,6 +52,7 @@ from qa.seed import (  # noqa: E402
 )
 from qa.seed.seed_5000_measurements import seed_measurements  # noqa: E402
 from qa.seed.seed_admin import seed_admin  # noqa: E402
+from qa.seed.seed_appointments import seed_appointments  # noqa: E402
 from qa.seed.seed_doctors import seed_doctors  # noqa: E402
 from qa.seed.seed_load_users import seed_users  # noqa: E402
 from qa.seed.seed_medications import seed_medications  # noqa: E402
@@ -131,6 +138,7 @@ async def seed_all(
         await step("users", lambda s: seed_users(s, scale, password_hash))
         await step("measurements", lambda s: seed_measurements(s, scale))
         await step("medications", lambda s: seed_medications(s, scale))
+        await step("appointments", lambda s: seed_appointments(s, scale))
         await step("reminders", lambda s: seed_reminders(s, scale, now=now))
         await step("doctors", lambda s: seed_doctors(s, scale, password_hash))
         await step("admin", lambda s: seed_admin(s, admin_ids))

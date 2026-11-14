@@ -2,7 +2,7 @@
 
 Общее для всех сидов и нагрузочных тестов: защита от запуска не на стенде,
 диапазоны Telegram ID нагрузочных пользователей, профили масштаба
-(`full` / `smoke`) и чтение пароля нагрузочных аккаунтов.
+(`full` / `smoke` / `three-years`) и чтение пароля нагрузочных аккаунтов.
 
 Защита стенда: нагрузочный код работает только с БД, в имени файла которой
 есть `test-stand` (`data/test-stand.sqlite3` или `test-stand.sqlite3` во
@@ -95,6 +95,7 @@ class Scale:
     remeasure_per_patient: int
     doctors: int
     days: int = 30
+    appointments_per_patient: int = 0
 
     @property
     def measurements(self) -> int:
@@ -132,7 +133,32 @@ SMOKE = Scale(
     doctors=3,
 )
 
-SCALES: dict[str, Scale] = {FULL.name: FULL, SMOKE.name: SMOKE}
+#: Профиль полного объёма авто-приёмки (`--scale three-years`, SPEC §22,
+#: «Полный объём»; ответы — `doc/LOAD-CRITERIA-QUESTIONS.md`, В1/В2): 20
+#: пациентов × 2500 измерений ≈ 50 000 за 3 года (~2–3 в день на пациента),
+#: лекарства и логи приёма растут вместе с окном истории, визиты — 3 года
+#: назад … сегодня + 2 года (§6.13) с заключениями к прошедшим. Не
+#: масштабируются (нереалистичного роста нет): `reminders` (активные — 100,
+#: как FULL), связи врач–пациент (20), `web_sessions` и `invite_log` не
+#: создаются вовсе.
+THREE_YEARS = Scale(
+    name="three-years",
+    patients=20,
+    measurements_per_patient=2500,
+    medications_per_patient=8,
+    logs_per_patient=1095,
+    slot_reminders_per_patient=3,
+    remeasure_per_patient=2,
+    doctors=20,
+    days=1095,
+    appointments_per_patient=30,
+)
+
+SCALES: dict[str, Scale] = {
+    FULL.name: FULL,
+    SMOKE.name: SMOKE,
+    THREE_YEARS.name: THREE_YEARS,
+}
 
 
 #: Секунда-метка моментов сида: форма кабинета пишет время с точностью до

@@ -1,14 +1,16 @@
 """Сид измерений нагрузочных пациентов: 250 на пациента за 30 дней (SPEC.md, §22).
 
-Полный профиль — 20 × 250 = 5000 записей. Расписание детерминированное:
-запись i пациента n лежит в день `anchor − days + i·days // m` (m — записей
-на пациента) с 06:00 шагом в 2 часа, минуты — по формуле, секунда —
+Полный профиль — 20 × 250 = 5000 записей, «три года» (`--scale three-years`) —
+20 × 2500 = 50 000 за 1095 дней (~2–3 измерения в день на пациента). Расписание
+детерминированное: запись i пациента n лежит в день `anchor − days + i·days // m`
+(m — записей на пациента) с 06:00 шагом в 2 часа, минуты — по формуле, секунда —
 `SEED_SECOND`. Значения в валидных диапазонах: САД 100–180, ДАД 60–110
 (всегда ниже САД минимум на 20), пульс 50–110. У каждой третьей записи
 заполнены самочувствие, заметка и флаг «Принял лекарство».
 
 Идемпотентно: вставляются только моменты расписания, которых ещё нет у
-пациента. Запуск — через `qa/seed/seed_all.py`.
+пациента. Строки пишутся пачками (`executemany`) — 50 000 записей сеются
+секунды, а не минуты. Запуск — через `qa/seed/seed_all.py`.
 """
 from __future__ import annotations
 
@@ -17,7 +19,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Optional
 
-from sqlalchemy import select
+from sqlalchemy import insert, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import Measurement, User
@@ -79,6 +81,10 @@ def plan_measurements(n: int, user: User, scale: Scale) -> list[PlannedMeasureme
     return plan
 
 
+#: Размер пачки `executemany` (строк за один вызов).
+_BATCH = 1000
+
+
 async def seed_measurements(session: AsyncSession, scale: Scale) -> dict[str, int]:
     """Дозаполнить расписание измерений всех пациентов профиля.
 
@@ -93,22 +99,24 @@ async def seed_measurements(session: AsyncSession, scale: Scale) -> dict[str, in
                 )
             ).scalars()
         )
+        rows: list[dict] = []
         for planned in plan_measurements(n, user, scale):
             if planned.timestamp in taken:
                 existing += 1
                 continue
-            session.add(
-                Measurement(
-                    user_id=user.id,
-                    timestamp=planned.timestamp,
-                    systolic=planned.systolic,
-                    diastolic=planned.diastolic,
-                    pulse=planned.pulse,
-                    feeling=planned.feeling,
-                    note=planned.note,
-                    medication_taken=planned.medication_taken,
-                )
+            rows.append(
+                {
+                    "user_id": user.id,
+                    "timestamp": planned.timestamp,
+                    "systolic": planned.systolic,
+                    "diastolic": planned.diastolic,
+                    "pulse": planned.pulse,
+                    "feeling": planned.feeling,
+                    "note": planned.note,
+                    "medication_taken": planned.medication_taken,
+                }
             )
             created += 1
-    await session.flush()
+        for start in range(0, len(rows), _BATCH):
+            await session.execute(insert(Measurement), rows[start : start + _BATCH])
     return {"created": created, "existing": existing}
