@@ -1939,6 +1939,7 @@ dev = [
 load = [
     { name = "locust" },
     { name = "playwright" },
+    { name = "psutil" },
     { name = "pytest-html" },
 ]
 qa = [
@@ -1983,6 +1984,7 @@ dev = [
 load = [
     { name = "locust", specifier = ">=2.47.0" },
     { name = "playwright", specifier = ">=1.45" },
+    { name = "psutil", specifier = ">=7.2.2" },
     { name = "pytest-html", specifier = ">=4.1" },
 ]
 qa = [

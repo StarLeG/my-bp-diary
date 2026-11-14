@@ -38,6 +38,7 @@ load = [
     "locust>=2.47.0",
     "pytest-html>=4.1",
     "playwright>=1.45",
+    "psutil>=7.2.2",
 ]
 # E2E QA-стенда (SPEC §22): Telethon + всё для pytest; образ qa/Dockerfile.
 qa = [
