@@ -1063,10 +1063,15 @@ class TestLargeButtonsOnePerRow:
 
 
 class TestKeypadLayout:
-    """Калькулятор — исключение §11: 3 колонки обычный / 2 крупный (мокап 2.1)."""
+    """Калькулятор — исключение §11: 3 колонки обычный / 2 крупный (§6.3, 0.6.0)."""
 
     def test_normal_three_columns(self) -> None:
-        assert buttons_of(keyboards.keypad_kb("", allow_skip=True)) == [
+        assert buttons_of(keyboards.keypad_kb("sys", (None, None, None))) == [
+            [
+                ("▸ САД —", "m:field:sys"),
+                ("ДАД —", "m:field:dia"),
+                ("Пульс —", "m:field:pulse"),
+            ],
             [("7", "m:key:7"), ("8", "m:key:8"), ("9", "m:key:9")],
             [("4", "m:key:4"), ("5", "m:key:5"), ("6", "m:key:6")],
             [("1", "m:key:1"), ("2", "m:key:2"), ("3", "m:key:3")],
@@ -1075,34 +1080,46 @@ class TestKeypadLayout:
                 ("0", "m:key:0"),
                 (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
             ],
-            [(texts.BTN_DONE, "m:key:ok"), (texts.BTN_SKIP, "m:key:skip")],
+            [(texts.BTN_DONE, "m:key:ok"), (texts.BTN_RESET, "m:reset")],
             [(texts.BTN_CANCEL, "m:cancel")],
         ]
 
     def test_large_two_columns(self) -> None:
-        rows = buttons_of(keyboards.keypad_kb("", allow_skip=True, large=True))
+        rows = buttons_of(keyboards.keypad_kb("sys", (None, None, None), large=True))
         assert rows == [
+            [("▸ САД —", "m:field:sys")],
+            [("ДАД —", "m:field:dia")],
+            [("Пульс —", "m:field:pulse")],
             [("1", "m:key:1"), ("2", "m:key:2")],
             [("3", "m:key:3"), ("4", "m:key:4")],
             [("5", "m:key:5"), ("6", "m:key:6")],
             [("7", "m:key:7"), ("8", "m:key:8")],
             [("9", "m:key:9"), ("0", "m:key:0")],
-            [(texts.BTN_KEYPAD_CLEAR, "m:key:clear"), (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp")],
+            [
+                (texts.BTN_KEYPAD_CLEAR, "m:key:clear"),
+                (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
+            ],
             [(texts.BTN_DONE, "m:key:ok")],
-            [(texts.BTN_SKIP, "m:key:skip")],
+            [(texts.BTN_RESET, "m:reset")],
             [(texts.BTN_CANCEL, "m:cancel")],
         ]
 
     def test_large_not_single_column(self) -> None:
         """Крупный режим не разъезжает калькулятор в один столбец (§11, исключение)."""
-        rows = buttons_of(keyboards.keypad_kb("", allow_skip=False, large=True))
-        assert all(len(row) == 2 for row in rows[:6])  # цифры и «C»/«⌫» парами
-        assert rows[6] == [(texts.BTN_DONE, "m:key:ok")]
-        assert rows[7] == [(texts.BTN_CANCEL, "m:cancel")]
+        rows = buttons_of(keyboards.keypad_kb("sys", (None, None, None), large=True))
+        assert all(len(row) == 2 for row in rows[3:8])  # цифры парами
+        assert rows[8] == [
+            (texts.BTN_KEYPAD_CLEAR, "m:key:clear"),
+            (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
+        ]
+        assert rows[9] == [(texts.BTN_DONE, "m:key:ok")]
+        assert rows[10] == [(texts.BTN_RESET, "m:reset")]
+        assert rows[11] == [(texts.BTN_CANCEL, "m:cancel")]
 
-    def test_normal_without_skip_single_done(self) -> None:
-        assert buttons_of(keyboards.keypad_kb("", allow_skip=False))[-2:] == [
-            [(texts.BTN_DONE, "m:key:ok")],
+    def test_no_skip_button(self) -> None:
+        """«Пропустить» убрана (R7 = А): пустой пульс — `pulse = NULL`."""
+        assert buttons_of(keyboards.keypad_kb("pulse", (None, None, None)))[-2:] == [
+            [(texts.BTN_DONE, "m:key:ok"), (texts.BTN_RESET, "m:reset")],
             [(texts.BTN_CANCEL, "m:cancel")],
         ]
 

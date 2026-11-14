@@ -11,7 +11,7 @@ from bot import keyboards, texts
 from bot.models import Medication
 
 #: Области callback_data, зафиксированные в SPEC.md, раздел 8 (adm — §18).
-KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm", "ap", "prof"}
+KNOWN_AREAS = {"menu", "onb", "m", "d", "stats", "csv", "pdf", "doc", "set", "med", "rem", "about", "adm", "ap", "prof", "add", "ev"}
 
 CALLBACK_RE = re.compile(r"^(?P<area>[a-z]+):(?P<action>[a-z0-9_-]+)(?::(?P<value>.*))?$")
 
@@ -39,8 +39,8 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
     return [
         ("main_menu", keyboards.main_menu()),
         ("back_to_menu", keyboards.back_to_menu()),
-        ("keypad_kb", keyboards.keypad_kb("", allow_skip=False)),
-        ("keypad_kb_skip", keyboards.keypad_kb("12", allow_skip=True)),
+        ("keypad_kb", keyboards.keypad_kb("sys", (None, None, None))),
+        ("keypad_kb_filled", keyboards.keypad_kb("pulse", (120, 80, 72))),
         ("intake_meds_kb", keyboards.intake_meds_kb({1}, [med_row])),
         ("saved_kb", keyboards.saved_kb()),
         ("medication_taken_kb", keyboards.medication_taken_kb()),
@@ -131,7 +131,7 @@ def all_keyboards() -> list[tuple[str, InlineKeyboardMarkup]]:
         ("doctor_kb_revoked", keyboards.doctor_kb([(1, "doc@example.org", "revoked")])),
         ("doctor_kb_empty", keyboards.doctor_kb([])),
         # 0.5.10 (§11): крупный режим, шаг онбординга UI, визиты и пагинация.
-        ("keypad_kb_large", keyboards.keypad_kb("1", allow_skip=True, large=True)),
+        ("keypad_kb_large", keyboards.keypad_kb("dia", (120, None, None), large=True)),
         ("medication_taken_kb_large", keyboards.medication_taken_kb(large=True)),
         ("feeling_kb_large", keyboards.feeling_kb(large=True)),
         ("archive_date_kb_large", keyboards.archive_date_kb(large=True)),
@@ -242,44 +242,45 @@ class TestCallbackData:
 
 class TestKeypadKeyboard:
     def test_calculator_layout(self) -> None:
-        """Раскладка как у калькулятора: 7-8-9 / 4-5-6 / 1-2-3 / «C 0 ⌫» (§6.3)."""
-        markup = keyboards.keypad_kb("", allow_skip=False)
-        digit_rows = [[button.callback_data for button in row] for row in markup.inline_keyboard[:4]]
-        assert digit_rows == [
+        """Раскладка: ряд итога, 7-8-9 / 4-5-6 / 1-2-3 / «C 0 ⌫», «Готово»/«Изменить» (§6.3)."""
+        markup = keyboards.keypad_kb("sys", (None, None, None))
+        rows = [[button.callback_data for button in row] for row in markup.inline_keyboard]
+        assert rows[0] == ["m:field:sys", "m:field:dia", "m:field:pulse"]
+        assert rows[1:5] == [
             ["m:key:7", "m:key:8", "m:key:9"],
             ["m:key:4", "m:key:5", "m:key:6"],
             ["m:key:1", "m:key:2", "m:key:3"],
             ["m:key:clear", "m:key:0", "m:key:bksp"],
         ]
+        assert rows[5] == ["m:key:ok", "m:reset"]
+        assert rows[6] == ["m:cancel"]
 
-    def test_done_cancel_rows(self) -> None:
-        markup = keyboards.keypad_kb("", allow_skip=False)
-        rows = [[button.callback_data for button in row] for row in markup.inline_keyboard[4:]]
-        assert rows == [["m:key:ok"], ["m:cancel"]]
-
-    def test_skip_only_with_allow_skip(self) -> None:
-        """«Пропустить» — только у пульса (`allow_skip=True`), §6.3."""
-        without = {
-            button.callback_data for button in callback_buttons(keyboards.keypad_kb("", allow_skip=False))
+    def test_no_skip_button(self) -> None:
+        """Кнопки «Пропустить» нет (R7 = А): пустой пульс — `pulse = NULL`."""
+        data = {
+            button.callback_data
+            for button in callback_buttons(keyboards.keypad_kb("pulse", (None, None, None)))
         }
-        with_skip = {
-            button.callback_data for button in callback_buttons(keyboards.keypad_kb("", allow_skip=True))
-        }
-        assert "m:key:skip" not in without
-        assert "m:key:skip" in with_skip
-        assert without < with_skip
+        assert "m:key:skip" not in data
 
     def test_all_digit_keys_present(self) -> None:
         data = {
-            button.callback_data for button in callback_buttons(keyboards.keypad_kb("12", allow_skip=True))
+            button.callback_data
+            for button in callback_buttons(keyboards.keypad_kb("dia", (120, 80, None)))
         }
         assert {f"m:key:{digit}" for digit in range(10)} <= data
-        assert {"m:key:clear", "m:key:bksp", "m:key:ok", "m:cancel"} <= data
+        assert {"m:key:clear", "m:key:bksp", "m:key:ok", "m:reset", "m:cancel"} <= data
 
-    def test_buffer_does_not_change_layout(self) -> None:
-        """`buf` на разметку не влияет — её рисует `texts.fmt_keypad_prompt`."""
-        empty = keyboards.keypad_kb("", allow_skip=True)
-        filled = keyboards.keypad_kb("42", allow_skip=True)
+    def test_active_field_marked(self) -> None:
+        """Активное поле — с «▸ » (§6.3, фокус в итоге)."""
+        markup = keyboards.keypad_kb("dia", (120, None, None))
+        labels = [button.text for button in markup.inline_keyboard[0]]
+        assert labels == ["САД 120", "▸ ДАД —", "Пульс —"]
+
+    def test_values_do_not_change_layout(self) -> None:
+        """Значения меняют подписи, но не набор callback'ов."""
+        empty = keyboards.keypad_kb("sys", (None, None, None))
+        filled = keyboards.keypad_kb("sys", (120, 80, 72))
         assert [[b.callback_data for b in row] for row in empty.inline_keyboard] == [
             [b.callback_data for b in row] for row in filled.inline_keyboard
         ]
@@ -336,7 +337,7 @@ class TestIntakeMedsKeyboard:
 class TestMeasurementKeyboards:
     def test_saved_kb_actions(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.saved_kb())}
-        assert data == {"m:edit", "m:note", "m:med", "m:feeling", "menu:back"}
+        assert data == {"m:edit", "m:fact", "m:med", "m:feeling", "m:note", "menu:back"}
 
     def test_saved_kb_edit_is_first_row(self) -> None:
         first_row = keyboards.saved_kb().inline_keyboard[0]
@@ -470,6 +471,7 @@ class TestMainMenuKeyboards:
         data = {button.callback_data for button in callback_buttons(keyboards.main_menu())}
         assert data == {
             "menu:measure",
+            "add:menu",
             "menu:diary",
             "ap:list",
             "menu:stats",
@@ -993,7 +995,16 @@ class TestDiaryIntakeKeyboards:
 
     def test_diary_mark_button(self) -> None:
         data = [b.callback_data for b in callback_buttons(keyboards.diary_kb(mark_intake=True))]
-        assert data == ["m:edit", "d:mt", "menu:back"]
+        assert data == [
+            "d:filt:bp",
+            "d:filt:med",
+            "d:filt:fact",
+            "d:filt:other",
+            "add:menu",
+            "m:edit",
+            "d:mt",
+            "menu:back",
+        ]
         assert "d:mt" not in [b.callback_data for b in callback_buttons(keyboards.diary_kb())]
 
     def test_partial_diary_area(self) -> None:
@@ -1079,10 +1090,10 @@ def _pair_case_list() -> list[tuple[str, InlineKeyboardMarkup, InlineKeyboardMar
             (("Да, удалить", texts.BTN_AP_NO),),
         ),
         (
-            "Готово/Пропустить (калькулятор)",
-            keyboards.keypad_kb("", allow_skip=True),
-            keyboards.keypad_kb("", allow_skip=True, large=True),
-            ((texts.BTN_DONE, texts.BTN_SKIP),),
+            "Готово/Изменить (калькулятор)",
+            keyboards.keypad_kb("sys", (None, None, None)),
+            keyboards.keypad_kb("sys", (None, None, None), large=True),
+            ((texts.BTN_DONE, texts.BTN_RESET),),
         ),
         (
             "Мужской/Женский",
@@ -1185,10 +1196,12 @@ class TestLayoutExceptions11:
     """Исключения §11: калькулятор, календари и сетки времени не схлопываются."""
 
     def test_keypad_columns_both_modes(self) -> None:
-        regular = keyboards.keypad_kb("", allow_skip=False)
-        assert [len(row) for row in regular.inline_keyboard[:4]] == [3, 3, 3, 3]
-        large = keyboards.keypad_kb("", allow_skip=False, large=True)
-        assert [len(row) for row in large.inline_keyboard[:6]] == [2, 2, 2, 2, 2, 2]
+        regular = keyboards.keypad_kb("sys", (None, None, None))
+        # итог — 3 кнопки, цифры — 4 ряда по 3 (§6.3)
+        assert [len(row) for row in regular.inline_keyboard[:5]] == [3, 3, 3, 3, 3]
+        large = keyboards.keypad_kb("sys", (None, None, None), large=True)
+        # крупный: итог по одной кнопке, цифры парами (§6.3, §11)
+        assert [len(row) for row in large.inline_keyboard[:8]] == [1, 1, 1, 2, 2, 2, 2, 2]
 
     def test_time_grids_keep_columns(self) -> None:
         """Сетки времени — 3–4 кнопки в ряд, правилу «по одной» не подчиняются."""

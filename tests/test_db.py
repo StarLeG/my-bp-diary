@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 10
+                assert version == SCHEMA_VERSION == 11
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -385,7 +385,7 @@ class TestMigrateConsents:
                 tables = {r[0] for r in (await conn.exec_driver_sql(
                     "SELECT name FROM sqlite_master WHERE type='table'")).all()}
                 assert "consents" in tables
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 10
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 11
         finally:
             await engine.dispose()
 
@@ -431,7 +431,7 @@ class TestMigrateReminders:
                 assert tuple(urow) == (1, None)
                 with pytest.raises(Exception):
                     await conn.exec_driver_sql("UPDATE reminders SET mode = 'zzz'")
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 10
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 11
         finally:
             await engine.dispose()
 
@@ -457,7 +457,7 @@ class TestMigrateAppointments:
                 assert "appointments" in tables
                 indexes = {r[1] for r in (await conn.exec_driver_sql("PRAGMA index_list(appointments)")).all()}
                 assert {"ix_appointments_user_day", "ix_appointments_status_day"} <= indexes
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 10
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 11
                 await conn.exec_driver_sql(
                     "INSERT INTO users (id, telegram_id, timezone, target_systolic, target_diastolic, onboarded, created_at)"
                     " VALUES (1, 111, 'Europe/Minsk', 130, 80, 1, '2026-01-01 00:00:00')"
@@ -504,7 +504,7 @@ class TestMigrateUILarge:
                 assert "ui_large" in columns
                 row = (await conn.exec_driver_sql("SELECT ui_large FROM users")).one()
                 assert tuple(row) == (0,)  # DEFAULT 0 — обычный режим
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 10
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 11
         finally:
             await engine.dispose()
 
@@ -539,7 +539,7 @@ class TestMigrateConclusions:
                     for r in (await conn.exec_driver_sql("PRAGMA index_list(appointment_conclusions)")).all()
                 }
                 assert "ix_appointment_conclusions_appointment" in indexes
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 10
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 11
                 await conn.exec_driver_sql(
                     "INSERT INTO users (id, telegram_id, timezone, target_systolic, target_diastolic, onboarded, created_at)"
                     " VALUES (1, 111, 'Europe/Minsk', 130, 80, 1, '2026-01-01 00:00:00')"
@@ -561,6 +561,78 @@ class TestMigrateConclusions:
                 await conn.exec_driver_sql(
                     "INSERT INTO appointment_conclusions (appointment_id, text, photo_file_id, created_at)"
                     " VALUES (1, 'Рекомендовано продолжить', NULL, '2026-11-11 00:00:00')"
+                )
+        finally:
+            await engine.dispose()
+
+
+class TestMigrateDiaryEvents:
+    """Поколение 11 (0.6.0): таблица `diary_events` и `users.meds_ask_shown_at` (§4.18, §4.1)."""
+
+    async def test_migration_from_gen10(self, tmp_path) -> None:
+        engine = create_engine(str(tmp_path / "gen10.sqlite3"))
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL UNIQUE,"
+                    " timezone VARCHAR(64) NOT NULL, target_systolic INTEGER NOT NULL,"
+                    " target_diastolic INTEGER NOT NULL, med_remeasure_delay INTEGER,"
+                    " onboarded BOOLEAN NOT NULL, last_support_shown_at DATETIME,"
+                    " created_at DATETIME NOT NULL)"
+                )
+                await conn.exec_driver_sql(
+                    "INSERT INTO users VALUES (1, 111, 'Europe/Minsk', 130, 80, 60, 1, NULL,"
+                    " '2026-01-01 00:00:00')"
+                )
+                await conn.exec_driver_sql("PRAGMA user_version = 10")
+            await init_db(engine)
+            await init_db(engine)  # повторно — без изменений
+            async with engine.connect() as conn:
+                tables = {
+                    r[0]
+                    for r in (
+                        await conn.exec_driver_sql(
+                            "SELECT name FROM sqlite_master WHERE type='table'"
+                        )
+                    ).all()
+                }
+                assert "diary_events" in tables
+                indexes = {
+                    r[1]
+                    for r in (
+                        await conn.exec_driver_sql("PRAGMA index_list(diary_events)")
+                    ).all()
+                }
+                assert {"ix_diary_events_user_moment", "ix_diary_events_measurement"} <= indexes
+                columns = {
+                    r[1]
+                    for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).all()
+                }
+                assert "meds_ask_shown_at" in columns
+                row = (
+                    await conn.exec_driver_sql("SELECT meds_ask_shown_at FROM users")
+                ).one()
+                assert tuple(row) == (None,)  # у существующих строк — NULL
+                version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
+                assert version == SCHEMA_VERSION == 11
+                # CHECK типа события (§4.18)
+                with pytest.raises(Exception):
+                    await conn.exec_driver_sql(
+                        "INSERT INTO diary_events (user_id, type, moment, created_at)"
+                        " VALUES (1, 'meal', '2026-11-14 13:20:00', '2026-11-14 13:20:00')"
+                    )
+                # CHECK длины заметки
+                with pytest.raises(Exception):
+                    await conn.exec_driver_sql(
+                        "INSERT INTO diary_events (user_id, type, moment, note, created_at)"
+                        " VALUES (1, 'note', '2026-11-14 13:20:00', '"
+                        + "х" * 501
+                        + "', '2026-11-14 13:20:00')"
+                    )
+                await conn.exec_driver_sql(
+                    "INSERT INTO diary_events (user_id, type, moment, payload, created_at)"
+                    " VALUES (1, 'food', '2026-11-14 13:20:00', '{\"marks\": [\"salt\"]}',"
+                    " '2026-11-14 13:20:00')"
                 )
         finally:
             await engine.dispose()

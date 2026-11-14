@@ -67,38 +67,24 @@ class TestScreenHeaders:
 
 
 class TestSummariesBothModes:
-    def test_saved_regular_one_field_per_line_plain(self) -> None:
+    def test_saved_regular_one_line_plain(self) -> None:
         text = texts.fmt_saved(135, 85, 72)
-        assert text == (
-            "✅ Записано\n"
-            "Систолическое: 135\n"
-            "Диастолическое: 85\n"
-            "Пульс: 72"
-        )
+        assert text == "✅ 135/85, пульс 72"
         assert "<b>" not in text
 
-    def test_saved_large_blank_line_and_bold_values(self) -> None:
+    def test_saved_large_bold_values(self) -> None:
         text = texts.fmt_saved(135, 85, 72, large=True)
-        assert text == (
-            "✅ Записано\n"
-            "\n"
-            "Систолическое: <b>135</b>\n"
-            "Диастолическое: <b>85</b>\n"
-            "Пульс: <b>72</b>"
-        )
+        assert text == "✅ <b>135/85</b>, пульс <b>72</b>"
 
     def test_saved_without_pulse(self) -> None:
-        assert texts.fmt_saved(135, 85).endswith(f"Пульс: {texts.KEYPAD_ENTERED_EMPTY}")
-        assert texts.fmt_saved(135, 85, large=True).endswith(
-            f"Пульс: <b>{texts.KEYPAD_ENTERED_EMPTY}</b>"
-        )
+        assert texts.fmt_saved(135, 85) == "✅ 135/85"
+        assert texts.fmt_saved(135, 85, large=True) == "✅ <b>135/85</b>"
 
     def test_updated_and_archive_saved_same_shape(self) -> None:
         updated = texts.fmt_updated(120, 70, None, large=True)
-        assert updated.startswith("✅ Обновлено\n\nСистолическое: <b>120</b>")
+        assert updated == "✅ Обновлено: <b>120/70</b>"
         archive = texts.fmt_archive_saved("12.03.2025, 08:00", 135, 85, 72, large=True)
-        assert archive.startswith("✅ Записано за 12.03.2025, 08:00\n\n")
-        assert "Диастолическое: <b>85</b>" in archive
+        assert archive == "✅ <b>135/85</b>, пульс <b>72</b> · за 12.03.2025, 08:00"
 
     def test_archive_saved_escapes_moment(self) -> None:
         text = texts.fmt_archive_saved("1 < 2", 135, 85)
@@ -174,12 +160,12 @@ class TestButtonsBothModes:
         left, right = self._pair_rows(large, texts.BTN_MED_YES, texts.BTN_MED_NO)
         assert left is not right and len(left) == len(right) == 1  # разъехались
 
-    def test_done_skip_pair_on_keypad(self) -> None:
-        regular = keyboards.keypad_kb("", allow_skip=True)
-        left, right = self._pair_rows(regular, texts.BTN_DONE, texts.BTN_SKIP)
+    def test_done_reset_pair_on_keypad(self) -> None:
+        regular = keyboards.keypad_kb("sys", (None, None, None))
+        left, right = self._pair_rows(regular, texts.BTN_DONE, texts.BTN_RESET)
         assert left is right and len(left) == 2
-        large = keyboards.keypad_kb("", allow_skip=True, large=True)
-        left, right = self._pair_rows(large, texts.BTN_DONE, texts.BTN_SKIP)
+        large = keyboards.keypad_kb("sys", (None, None, None), large=True)
+        left, right = self._pair_rows(large, texts.BTN_DONE, texts.BTN_RESET)
         assert left is not right
 
     def test_sex_pair(self) -> None:
@@ -265,8 +251,9 @@ class TestButtonsBothModes:
 
 class TestKeypadColumns:
     def test_regular_calculator_columns(self) -> None:
-        markup = keyboards.keypad_kb("", allow_skip=False)
-        assert row_data(markup)[:4] == [
+        markup = keyboards.keypad_kb("sys", (None, None, None))
+        assert row_data(markup)[:5] == [
+            ["m:field:sys", "m:field:dia", "m:field:pulse"],
             ["m:key:7", "m:key:8", "m:key:9"],
             ["m:key:4", "m:key:5", "m:key:6"],
             ["m:key:1", "m:key:2", "m:key:3"],
@@ -274,22 +261,27 @@ class TestKeypadColumns:
         ]
 
     def test_large_two_columns(self) -> None:
-        markup = keyboards.keypad_kb("", allow_skip=True, large=True)
+        markup = keyboards.keypad_kb("sys", (None, None, None), large=True)
         rows = row_data(markup)
-        assert rows[:6] == [
+        assert rows[:3] == [["m:field:sys"], ["m:field:dia"], ["m:field:pulse"]]
+        assert rows[3:8] == [
             ["m:key:1", "m:key:2"],
             ["m:key:3", "m:key:4"],
             ["m:key:5", "m:key:6"],
             ["m:key:7", "m:key:8"],
             ["m:key:9", "m:key:0"],
-            ["m:key:clear", "m:key:bksp"],
         ]
-        assert rows[6:] == [["m:key:ok"], ["m:key:skip"], ["m:cancel"]]
+        assert rows[8:] == [
+            ["m:key:clear", "m:key:bksp"],
+            ["m:key:ok"],
+            ["m:reset"],
+            ["m:cancel"],
+        ]
 
     def test_large_digits_never_single_column(self) -> None:
         """Исключение §11: калькулятор не схлопывается в один столбец."""
-        markup = keyboards.keypad_kb("1", allow_skip=False, large=True)
-        for row in markup.inline_keyboard[:6]:
+        markup = keyboards.keypad_kb("1", (None, None, None), large=True)
+        for row in markup.inline_keyboard[3:8]:
             assert len(row) == 2
 
 

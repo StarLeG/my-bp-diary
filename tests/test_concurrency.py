@@ -461,7 +461,7 @@ class TestDoubleTap:
             calls += 1
             return "ok"
 
-        callback = make_callback("m:sys:135")
+        callback = make_callback("m:key:ok")
         first = await middleware(handler, callback, {})
         second = await middleware(handler, callback, {})
         assert first == "ok"
@@ -793,7 +793,12 @@ class TestMedsDoneLockOrder:
 
         async def done() -> None:
             async with session_factory() as session:
-                await measure.cb_med_done(callback, state, session)
+                await measure.cb_med_done(
+                    callback,
+                    state,
+                    session,
+                    mocker.Mock(ensure_remeasure=mocker.AsyncMock()),
+                )
 
         task = asyncio.create_task(done())
         for _ in range(200):  # хендлер дошёл до лока (очередь непуста)

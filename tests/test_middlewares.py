@@ -164,14 +164,17 @@ class TestDebounceMiddleware:
         assert handler.await_count == 2
 
     async def test_confirm_actions_debounced(self, answer_mock) -> None:
-        """«Готово»/«Пропустить» сохраняют данные — двойной тап глушится (§7.2)."""
+        """Пишущие в БД («Готово», «Сейчас», …) — двойной тап глушится (V2/V4/V5)."""
         handler = AsyncMock(return_value="ok")
         middleware = DebounceMiddleware(clock=FakeClock())
         await middleware(handler, make_callback("m:key:ok"), {})
         assert await middleware(handler, make_callback("m:key:ok"), {}) is None
         handler2 = AsyncMock(return_value="ok")
-        await middleware(handler2, make_callback("m:key:skip"), {})
-        assert await middleware(handler2, make_callback("m:key:skip"), {}) is None
+        await middleware(handler2, make_callback("add:food:done"), {})
+        assert await middleware(handler2, make_callback("add:food:done"), {}) is None
+        handler3 = AsyncMock(return_value="ok")
+        await middleware(handler3, make_callback("ev:del:7:ok"), {})
+        assert await middleware(handler3, make_callback("ev:del:7:ok"), {}) is None
 
     @pytest.mark.parametrize(
         "data",

@@ -84,7 +84,7 @@ async def add_row(
 
 class TestDiary:
     async def test_empty_shows_prompt(self, session, edit, cb_answer) -> None:
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         assert edit.call_args.args[0] == f"{texts.screen_header('diary')}\n{texts.DIARY_EMPTY}"
         assert edit.call_args.kwargs["parse_mode"] == "HTML"
         assert edit.call_args.kwargs["reply_markup"] == keyboards.diary_kb(is_empty=True)
@@ -96,20 +96,28 @@ class TestDiary:
         await session.commit()
         stamp = utcnow().replace(second=0, microsecond=0)
         await add_row(session, user, timestamp=stamp)
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         text = edit.call_args.args[0]
         local = stamp.astimezone(ZoneInfo("Asia/Yekaterinburg")).strftime("%H:%M")
         assert text.startswith(texts.screen_header("diary"))
-        assert f"{local} — 135/85, пульс 72" in text
+        labels = [
+            button.text
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert f"{local} — 135/85, пульс 72" in labels  # строка — кнопка ленты (0.6.0)
         assert texts.DIARY_TOTAL.format(count=1) in text
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.diary_kb()
 
     async def test_shows_flags(self, session, user, edit, cb_answer) -> None:
         await add_row(session, user, medication_taken=True, feeling="headache")
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
-        text = edit.call_args.args[0]
-        assert "лекарство: да" in text
-        assert "головная боль" in text
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
+        labels = [
+            button.text
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert any("лекарство: да" in label for label in labels)
+        assert any("головная боль" in label for label in labels)
 
     async def test_foreign_measurements_hidden(
         self, session, user, edit, cb_answer
@@ -119,16 +127,20 @@ class TestDiary:
         await session.commit()
         await add_row(session, user)
         await add_row(session, other_user, systolic=200)
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
-        text = edit.call_args.args[0]
-        assert "135/85" in text
-        assert "200/" not in text
-        assert texts.DIARY_TOTAL.format(count=1) in text
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
+        labels = [
+            button.text
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert any("135/85" in label for label in labels)
+        assert not any("200/" in label for label in labels)
+        assert texts.DIARY_TOTAL.format(count=1) in edit.call_args.args[0]
 
     async def test_no_pulse_line(self, session, user, edit, cb_answer) -> None:
         await add_row(session, user, pulse=None)
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
-        line = edit.call_args.args[0].splitlines()[1]
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
+        line = edit.call_args.kwargs["reply_markup"].inline_keyboard[0][0].text
         assert "135/85" in line
         assert "пульс" not in line
 
@@ -136,7 +148,7 @@ class TestDiary:
         self, session, user, edit, cb_answer
     ) -> None:
         await add_row(session, user)
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         markup = edit.call_args.kwargs["reply_markup"]
         data_by_text = {
             button.text: button.callback_data
@@ -146,7 +158,7 @@ class TestDiary:
         assert data_by_text[texts.BTN_EDIT_LAST] == "m:edit"
 
     async def test_no_edit_button_in_empty_diary(self, session, edit, cb_answer) -> None:
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         markup = edit.call_args.kwargs["reply_markup"]
         data = {
             button.callback_data
@@ -204,7 +216,7 @@ def kb_data(markup) -> list[str]:
 
 
 async def open_diary(session, edit) -> tuple[str, object]:
-    await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+    await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
     return edit.call_args.args[0], edit.call_args.kwargs["reply_markup"]
 
 
@@ -233,7 +245,8 @@ class TestDiaryMedsLine:
             "💊 Лекарства: утро ✓ · обед — частично · вечер — ещё не отмечено"
         )
         assert text.splitlines()[0] == texts.screen_header("diary")
-        assert text.splitlines()[1] == texts.DIARY_EMPTY
+        # лента включает отметки приёмов — «Всего записей» считает все виды (M1)
+        assert text.splitlines()[1] == texts.DIARY_TOTAL.format(count=3)
         assert "d:mt" in kb_data(markup)
         assert d.id
 
@@ -252,7 +265,8 @@ class TestDiaryMedsLine:
         await add_row(session, user)
         text, markup = await open_diary(session, edit)
         assert text.splitlines()[-1] == "💊 Лекарства: утро ✓"
-        assert texts.DIARY_TOTAL.format(count=1) in text
+        # измерение + отметка приёма — обе строки ленты (M1)
+        assert texts.DIARY_TOTAL.format(count=2) in text
         assert "d:mt" not in kb_data(markup)
         assert "m:edit" in kb_data(markup)
 
@@ -384,11 +398,11 @@ class TestNearestAppointment:
         tomorrow = datetime.now(ZoneInfo(user.timezone)).date() + timedelta(days=1)
         await ap.create(session, user, "doctor", "Кардиолог", tomorrow, "10:30")
         await session.commit()
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         assert edit.call_args.args[0].split("\n")[-1] == "📅 Завтра: Кардиолог, 10:30"
 
     async def test_no_line_without_events(self, session, user, edit, cb_answer) -> None:
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         assert "📅" not in edit.call_args.args[0]
 
 
@@ -403,7 +417,11 @@ def local_today_stamp(user: UserModel, hour: int, minute: int) -> datetime:
 
 
 class TestDiaryLarge:
-    """Крупный режим `users.ui_large`: записи блоками, секции через пустую строку (§13)."""
+    """Крупный режим `users.ui_large`: секции через пустую строку (§13, 0.6.0).
+
+    Строки записей — кнопками ленты (одинаково в обоих режимах); крупный
+    влияет на разделение секций текста.
+    """
 
     async def test_entry_block(self, session, user, edit, cb_answer) -> None:
         user.ui_large = True
@@ -413,13 +431,18 @@ class TestDiaryLarge:
             timestamp=local_today_stamp(user, 8, 15),
             medication_taken=True, feeling="headache",
         )
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         text = edit.call_args.args[0]
         assert text == (
             f"{texts.screen_header('diary')}\n\n"
-            "08:15\n<b>135/85 · пульс 72</b>\nлекарство: да · головная боль\n\n"
             + texts.DIARY_TOTAL.format(count=1)
         )
+        labels = [
+            button.text
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert "08:15 — 135/85, пульс 72 · лекарство: да · головная боль" in labels
         assert edit.call_args.kwargs["parse_mode"] == "HTML"
 
     async def test_blocks_separated_by_blank_line(self, session, user, edit, cb_answer) -> None:
@@ -428,33 +451,33 @@ class TestDiaryLarge:
         await add_row(session, user, timestamp=local_today_stamp(user, 8, 15))
         await add_row(session, user, systolic=130, diastolic=80, pulse=None,
                       timestamp=local_today_stamp(user, 9, 30))
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
-        text = edit.call_args.args[0]
-        assert text == (
-            f"{texts.screen_header('diary')}\n\n"
-            "08:15\n<b>135/85 · пульс 72</b>\n\n"
-            "09:30\n<b>130/80</b>\n\n"
-            + texts.DIARY_TOTAL.format(count=2)
-        )
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
+        labels = [
+            button.text
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        assert "08:15 — 135/85, пульс 72" in labels
+        assert "09:30 — 130/80" in labels
+        assert texts.DIARY_TOTAL.format(count=2) in edit.call_args.args[0]
 
     async def test_empty_screen(self, session, user, edit, cb_answer) -> None:
         user.ui_large = True
         await session.commit()
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         assert edit.call_args.args[0] == f"{texts.screen_header('diary')}\n\n{texts.DIARY_EMPTY}"
 
     async def test_normal_mode_stays_single_line(self, session, user, edit, cb_answer) -> None:
-        """Обычный режим: запись одной строкой, без жирных значений и пустых строк (§11)."""
+        """Обычный режим: секции без пустой строки между шапкой и итогом (§11)."""
         await add_row(
             session, user,
             timestamp=local_today_stamp(user, 8, 15),
             medication_taken=True, feeling="headache",
         )
-        await diary.cb_diary(make_callback("menu:diary", make_message()), session)
+        await diary.cb_diary(make_callback("menu:diary", make_message()), make_state(), session)
         text = edit.call_args.args[0]
         assert text == (
             f"{texts.screen_header('diary')}\n"
-            "08:15 — 135/85, пульс 72 · лекарство: да · головная боль\n"
             + texts.DIARY_TOTAL.format(count=1)
         )
 
@@ -472,3 +495,75 @@ class TestDiaryLarge:
         assert "Отметил: принято: A&lt;b&gt;C 50 мг" in text
         assert "A<b>C" not in text
         assert edit.call_args.kwargs["parse_mode"] == "HTML"
+
+
+class TestFeedFilters:
+    """Лента: смешанные строки, чипы фильтров, тосты (§6.4, 0.6.0)."""
+
+    async def _feed(self, session, user) -> None:
+        from bot.services import events as events_service
+
+        await add_row(session, user, timestamp=local_today_stamp(user, 8, 15))
+        med = await add_med(session, user, name="Лозартан", slot="morning")
+        await log(session, user, med, "taken", when=local_today_stamp(user, 9, 0))
+        await events_service.create_event(
+            session,
+            user,
+            "food",
+            local_today_stamp(user, 13, 20),
+            payload=events_service.event_payload("food", marks={"salt"}),
+        )
+        await events_service.create_event(
+            session,
+            user,
+            "activity",
+            local_today_stamp(user, 18, 0),
+            payload=events_service.event_payload("activity", duration_min=20),
+        )
+        await session.commit()
+
+    async def test_mixed_feed_sorted_by_time(self, session, user, edit, cb_answer) -> None:
+        await self._feed(session, user)
+        text, markup = await open_diary(session, edit)
+        labels = [row[0].text for row in markup.inline_keyboard]
+        assert labels[0].startswith("08:15 — 135/85")  # измерение
+        assert labels[1].startswith("09:00 — 💊 Лозартан 50 мг · утро ✓")
+        assert labels[2] == "13:20 — 🥗 Питание: солёное"
+        assert labels[3] == "18:00 — 🚶 Прогулка: 20 минут"
+        assert texts.DIARY_TOTAL.format(count=4) in text
+
+    async def test_filter_chips_and_reset(self, session, user, edit, cb_answer) -> None:
+        await self._feed(session, user)
+        state = make_state()
+        await diary.cb_diary_filter(
+            make_callback("d:filt:fact", make_message()), state, session
+        )
+        labels = [row[0].text for row in edit.call_args.kwargs["reply_markup"].inline_keyboard]
+        assert labels[0] == "13:20 — 🥗 Питание: солёное"  # только факторы
+        assert texts.DIARY_TOTAL.format(count=1) in edit.call_args.args[0]
+        chips = next(
+            row
+            for row in edit.call_args.kwargs["reply_markup"].inline_keyboard
+            if row[0].callback_data.startswith("d:filt:")
+        )
+        assert chips[2].text == f"✓ {texts.DIARY_FILTER_LABELS['fact']}"
+        # тап по активному чипу — сброс в «Все» (M1)
+        await diary.cb_diary_filter(
+            make_callback("d:filt:fact", make_message()), state, session
+        )
+        assert texts.DIARY_TOTAL.format(count=4) in edit.call_args.args[0]
+
+    async def test_empty_filter_shows_notice(self, session, user, edit, cb_answer) -> None:
+        await add_row(session, user)
+        state = make_state()
+        await diary.cb_diary_filter(make_callback("d:filt:other", make_message()), state, session)
+        assert texts.DIARY_FILTER_EMPTY in edit.call_args.args[0]
+
+    async def test_med_line_is_readonly(self, session, user, edit, cb_answer) -> None:
+        await self._feed(session, user)
+        await diary.cb_diary_med_view(make_callback("d:medview:1", make_message()))
+        cb_answer.assert_awaited_once_with(texts.DIARY_MED_VIEW)
+
+    async def test_bp_line_noop(self, session, user, edit, cb_answer) -> None:
+        await diary.cb_diary_noop(make_callback("d:noop", make_message()))
+        cb_answer.assert_awaited_once_with()

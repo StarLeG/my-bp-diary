@@ -21,36 +21,41 @@ PROPER_NOUNS = {"Telegram"}
 
 class TestFormatting:
     def test_fmt_saved_without_pulse(self) -> None:
-        # SPEC.md, §6.3 — сводка дословно, без пульса — «Пульс: —».
-        assert texts.fmt_saved(135, 85) == (
-            "✅ Записано\nСистолическое: 135\nДиастолическое: 85\nПульс: —"
-        )
+        # SPEC.md, §6.3 (R9, 0.6.0) — одна строка, без пульса — без суффикса.
+        assert texts.fmt_saved(135, 85) == "✅ 135/85"
 
     def test_fmt_saved_with_pulse(self) -> None:
-        assert texts.fmt_saved(135, 85, 72) == (
-            "✅ Записано\nСистолическое: 135\nДиастолическое: 85\nПульс: 72"
-        )
+        assert texts.fmt_saved(135, 85, 72) == "✅ 135/85, пульс 72"
 
     def test_fmt_updated_without_pulse(self) -> None:
-        assert texts.fmt_updated(135, 85) == (
-            "✅ Обновлено\nСистолическое: 135\nДиастолическое: 85\nПульс: —"
-        )
+        assert texts.fmt_updated(135, 85) == "✅ Обновлено: 135/85"
 
     def test_fmt_updated_with_pulse(self) -> None:
-        assert texts.fmt_updated(135, 85, 72) == (
-            "✅ Обновлено\nСистолическое: 135\nДиастолическое: 85\nПульс: 72"
-        )
+        assert texts.fmt_updated(135, 85, 72) == "✅ Обновлено: 135/85, пульс 72"
 
     def test_fmt_keypad_prompt(self) -> None:
-        """Экран калькулятора: вопрос, набор и подсказка (§6.3)."""
-        assert texts.fmt_keypad_prompt(texts.ASK_SYSTOLIC, "12") == (
-            "Систолическое (верхнее)?\n\n"
-            "Введено: 12\nМожно также написать число сообщением."
+        """Экран калькулятора: шапка, поля, итог (§6.3, мокап V3)."""
+        assert texts.fmt_keypad_prompt(135, 85, 72) == (
+            "<b>🩺 Давление и пульс</b>\n"
+            "\n"
+            "Систолическое: 135\n"
+            "Диастолическое: 85\n"
+            "Пульс: 72\n"
+            "\n"
+            "Введено: 135/85 · пульс 72\n"
+            "Можно также написать: 120/80 72"
         )
 
-    def test_fmt_keypad_prompt_empty_buffer(self) -> None:
-        assert texts.fmt_keypad_prompt(texts.ASK_PULSE, "") == (
-            "Пульс?\n\nВведено: —\nМожно также написать число сообщением."
+    def test_fmt_keypad_prompt_empty_fields(self) -> None:
+        assert texts.fmt_keypad_prompt(None, None, None) == (
+            "<b>🩺 Давление и пульс</b>\n"
+            "\n"
+            "Систолическое: —\n"
+            "Диастолическое: —\n"
+            "Пульс: —\n"
+            "\n"
+            "Введено: —/— · пульс —\n"
+            "Можно также написать: 120/80 72"
         )
 
     def test_fmt_intake_item(self) -> None:
@@ -345,18 +350,16 @@ class TestTone:
 
 
 class TestArchiveFormatting:
-    """Сводка архивной записи (§6.10): «✅ Записано за …» + значения."""
+    """Сводка архивной записи (§6.3, C16): «✅ 135/85, пульс 72 · за …»."""
 
     def test_fmt_archive_saved_without_pulse(self) -> None:
         assert texts.fmt_archive_saved("12.03.2025, 08:00", 135, 85) == (
-            "✅ Записано за 12.03.2025, 08:00\n"
-            "Систолическое: 135\nДиастолическое: 85\nПульс: —"
+            "✅ 135/85 · за 12.03.2025, 08:00"
         )
 
     def test_fmt_archive_saved_with_pulse(self) -> None:
         assert texts.fmt_archive_saved("12.03.2025, 08:00", 135, 85, 72) == (
-            "✅ Записано за 12.03.2025, 08:00\n"
-            "Систолическое: 135\nДиастолическое: 85\nПульс: 72"
+            "✅ 135/85, пульс 72 · за 12.03.2025, 08:00"
         )
 
     def test_archive_saved_template_canonical(self) -> None:
@@ -434,6 +437,7 @@ class TestScreenHeaders:
         "🩺 Здоровье системы",
         "📢 Рассылка",
         "👤 Поиск пользователя",
+        "🩺 Давление и пульс",
     ]
 
     def test_dictionary_matches_canon(self) -> None:
@@ -446,6 +450,7 @@ class TestScreenHeaders:
             "stats_days", "stats_custom", "report", "meds", "archive", "about",
             "support", "doctor_patients", "doctor_panel", "admin_stats",
             "admin_backups", "admin_health", "admin_broadcast", "admin_search",
+            "calculator",
         ]
 
     @pytest.mark.parametrize("key", list(texts.SCREEN_HEADERS))

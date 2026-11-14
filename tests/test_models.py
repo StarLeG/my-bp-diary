@@ -9,6 +9,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot.models import (
+    DiaryEvent,
     Doctor,
     DoctorNote,
     DoctorPatient,
@@ -660,3 +661,72 @@ class TestDoctorNote:
         await session.commit()
         rows = (await session.execute(DoctorNote.__table__.select())).all()
         assert rows == []
+
+
+class TestDiaryEvent:
+    """Событие дневника (SPEC.md, §4.18; 0.6.0): CHECK, nullable, каскады."""
+
+    @staticmethod
+    def _event(user_id: int, **overrides) -> DiaryEvent:
+        data = {
+            "user_id": user_id,
+            "type": "food",
+            "moment": datetime(2026, 11, 14, 13, 20, tzinfo=UTC),
+            "payload": '{"marks": ["salt"]}',
+        }
+        data.update(overrides)
+        return DiaryEvent(**data)
+
+    async def test_insert_valid(self, session: AsyncSession, user: User) -> None:
+        event = self._event(user.id)
+        session.add(event)
+        await session.commit()
+        assert event.created_at.tzinfo is not None
+        assert event.measurement_id is None
+
+    @pytest.mark.parametrize(
+        "bad_type", ["meal", "", "FOOD", "note ", None]
+    )
+    async def test_type_invalid(self, session: AsyncSession, user: User, bad_type) -> None:
+        session.add(self._event(user.id, type=bad_type))
+        await _flush_fails(session)
+
+    @pytest.mark.parametrize("good_type", ["food", "stress", "sleep", "activity", "note"])
+    async def test_type_valid(self, session: AsyncSession, user: User, good_type: str) -> None:
+        session.add(self._event(user.id, type=good_type))
+        await session.commit()
+
+    async def test_note_boundary_ok(self, session: AsyncSession, user: User) -> None:
+        session.add(self._event(user.id, note="х" * 500))
+        await session.commit()
+
+    async def test_note_too_long(self, session: AsyncSession, user: User) -> None:
+        session.add(self._event(user.id, note="х" * 501))
+        await _flush_fails(session)
+
+    async def test_cascade_delete_user(self, session: AsyncSession, user: User) -> None:
+        session.add(self._event(user.id))
+        await session.commit()
+        await session.delete(user)
+        await session.commit()
+        rows = (await session.execute(DiaryEvent.__table__.select())).all()
+        assert rows == []
+
+    async def test_measurement_set_null(self, session: AsyncSession, user: User) -> None:
+        """Удаление измерения снимает привязку, событие остаётся (§4.18)."""
+        measurement = make_measurement(user.id)
+        session.add(measurement)
+        await session.commit()
+        event = self._event(user.id, measurement_id=measurement.id, type="stress")
+        session.add(event)
+        await session.commit()
+        await session.delete(measurement)
+        await session.commit()
+        session.expire_all()  # SET NULL делает БД — перечитать объекты из identity map
+        rows = (
+            await session.execute(
+                select(DiaryEvent).execution_options(populate_existing=True)
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+        assert rows[0].measurement_id is None
