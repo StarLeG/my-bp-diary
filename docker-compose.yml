@@ -25,7 +25,9 @@ services:
     build: .
     image: my-bp-diary:latest
     container_name: bp-diary-cabinet
-    command: ["uvicorn", "web.cabinet.app:app", "--host", "0.0.0.0", "--port", "8000"]
+    # Два воркера: рендер кабинета — CPU-bound, один процесс сериализует
+    # запросы (окно конкуренции 100 операций, SPEC §22 «Окно конкуренции»).
+    command: ["uvicorn", "web.cabinet.app:app", "--host", "0.0.0.0", "--port", "8000", "--workers", "2"]
     stop_grace_period: 30s
     env_file: .env
     environment:

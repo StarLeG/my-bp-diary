@@ -1028,8 +1028,13 @@ def create_app(
         ap_cards = list(ap_upcoming) + [item[0] for item in ap_awaiting] + [
             item[0] for month in ap_months for item in month["items"]
         ]
+        # Заключения — одним запросом на все карточки (без N+1: на базе «три
+        # года» по запросу на событие добавлял ~10 мс и 30 обращений к БД).
+        by_appointment = await appointments_service.conclusions_by_appointment(
+            db, [appt.id for appt in ap_cards]
+        )
         for appt in ap_cards:
-            items = await appointments_service.list_conclusions(db, appt.id)
+            items = by_appointment.get(appt.id, ())
             ap_conclusions[appt.id] = items
             line = appointments_service.fmt_conclusion_line(items)
             if line:

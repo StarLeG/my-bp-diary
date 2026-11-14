@@ -945,3 +945,29 @@ async def conclusions_in_period(
         if items:
             result.append((appt, items))
     return result
+
+
+async def conclusions_by_appointment(
+    session: AsyncSession, appointment_ids: Sequence[int]
+) -> dict[int, list[AppointmentConclusion]]:
+    """Все заключения событий одним запросом (ЛК: без N+1, §16.2, 0.5.11).
+
+    Ключи — `appointment_id`; порядок записей — как в `list_conclusions`.
+    """
+    if not appointment_ids:
+        return {}
+    rows = (
+        (
+            await session.execute(
+                select(AppointmentConclusion)
+                .where(AppointmentConclusion.appointment_id.in_(appointment_ids))
+                .order_by(AppointmentConclusion.created_at, AppointmentConclusion.id)
+            )
+        )
+        .scalars()
+        .all()
+    )
+    grouped: dict[int, list[AppointmentConclusion]] = {}
+    for row in rows:
+        grouped.setdefault(row.appointment_id, []).append(row)
+    return grouped
