@@ -5,11 +5,15 @@
 `Dispatcher.feed_update`: весь стек middleware (сессия БД, debounce,
 throttle) и хендлеры, сеть Telegram подменена (`make_fake_telegram`).
 
-Флоу каждого: `/start` → 10 записей калькулятором (на последней «Готово»
-жмётся дважды — debounce обязан отсечь второе нажатие) → правка последней ×3
-→ «Приняли лекарство?» → «Да» → мультивыбор → «Готово» → 2 архивные записи
-(по кнопкам и быстрым вводом) → «Принял всё ✓» по слоту с лекарствами →
-«Дневник за сегодня» → «Статистика» 7 и 30 дней → экспорт CSV.
+Флоу каждого: `/start` → 10 записей (быстрый ввод «120/80 72» + 9
+калькулятором; на последней «Готово» жмётся дважды — debounce обязан отсечь
+второе нажатие) → «➕ Фактор» к записи → правка последней ×3 → «Приняли
+лекарство?» → «Да» → мультивыбор → «Готово» → 2 архивные записи (по кнопкам и
+быстрым вводом) → «Принял всё ✓» по слоту с лекарствами → «➕ Добавить запись»
+(0.6.0): прогулка, питание, стресс, заметка, сон — с проверками «Отмена»/«Назад»
+на каждом шаге (SPEC §6.14: с первого шага — в «➕ Добавить запись», со следующих
+— на предыдущий шаг, из ввода ЧЧ:ММ — на вызвавший экран) → «Дневник за
+сегодня» → «Статистика» 7 и 30 дней → экспорт CSV.
 
 «Принял всё ✓» нажимается как на доставленном напоминании (`rem:all:{slot}`):
 обычная доставка слота после свежих записей подавляется правилом «не дёргаем
@@ -23,7 +27,9 @@ throttle) и хендлеры, сеть Telegram подменена (`make_fake_
 Критерии: все пользователи проходят флоу без исключений; ровно 12 новых
 строк на пользователя (10 обычных + 2 архивные, всего 240 в полном
 профиле); правки — UPDATE последней записи; `measurement_medications`
-заполнена; «Принял всё ✓» — ровно один набор логов слота за день.
+заполнена; «Принял всё ✓» — ровно один набор логов слота за день; события
+нововедений — ровно 7 на пользователя (5 событий «Добавить запись» + 2
+фактора «➕ Фактор»).
 """
 from __future__ import annotations
 
@@ -42,7 +48,14 @@ from aiogram.types import User as TgUser
 from sqlalchemy import func, select
 
 from bot import texts
-from bot.models import Measurement, MeasurementMedication, Medication, MedicationLog, User
+from bot.models import (
+    DiaryEvent,
+    Measurement,
+    MeasurementMedication,
+    Medication,
+    MedicationLog,
+    User,
+)
 from bot.services import measurements as measurements_service
 from bot.services.measurements import day_bounds_utc
 from qa.seed import load_patients
@@ -50,6 +63,11 @@ from qa.seed import load_patients
 #: Записей калькулятором на пользователя и архивных записей (SPEC §22, уровень 3).
 RECORDS = 10
 ARCHIVE_RECORDS = 2
+
+#: Событий дневника на пользователя (0.6.0): 5 событий «Добавить запись»
+#: (прогулка, питание, стресс, заметка, сон) + 2 события «➕ Фактор» (B6:
+#: метки salt+stress складываются в группы food и stress).
+NOVELTY_EVENTS = 7
 
 #: Значения правок «последней записи» (три прохода; итог — последний набор).
 EDITS = ((150, 95, 80), (151, 96, 81), (152, 97, 82))
@@ -150,20 +168,29 @@ class VirtualUser:
         )
 
     async def keypad(self, *values: Optional[int], double_ok_last: bool = False) -> None:
-        """Калькулятор: цифры + «Готово» на каждое значение (None — «Пропустить»)."""
+        """Одноэкранный калькулятор (0.6.0, §6.3): значения по полям + «Готово».
+
+        Фокус в поле — тап `m:field:{sys|dia|pulse}` (коммитит буфер предыдущего),
+        цифры — в буфер активного поля, «Готово» (`m:key:ok`) — один раз в конце
+        (сохраняет запись). `None` — поле не трогать («Пропустить» убрано, R7).
+        `double_ok_last` — двойной тап «Готово» на последней записи: debounce
+        обязан отсечь второе нажатие (§7.2).
+        """
+        fields = ("sys", "dia", "pulse")
         for index, value in enumerate(values):
+            if index:
+                await self.tap(f"m:field:{fields[index]}")
             if value is None:
-                await self.tap("m:key:skip")
                 continue
             for digit in str(value):
                 await self.tap(f"m:key:{digit}", tick=False)  # цифры — без debounce (§6.3)
-            if double_ok_last and index == len(values) - 1:
-                self.clock.tick()
-                await asyncio.gather(
-                    self.tap("m:key:ok", tick=False), self.tap("m:key:ok", tick=False)
-                )
-            else:
-                await self.tap("m:key:ok")
+        if double_ok_last:
+            self.clock.tick()
+            await asyncio.gather(
+                self.tap("m:key:ok", tick=False), self.tap("m:key:ok", tick=False)
+            )
+        else:
+            await self.tap("m:key:ok")
 
     def answered(self, text: str) -> int:
         """Сколько раз бот ответил на callback'и этого пользователя этим текстом."""
@@ -175,13 +202,57 @@ class VirtualUser:
             and call.text == text
         )
 
+    def _last_screen(self):
+        """Последний экран бота (`EditMessageText`/`SendMessage`) в чате пользователя."""
+        for call in reversed(self.app.bot.session.for_chat(self.chat.id)):
+            if isinstance(call, (EditMessageText, SendMessage)):
+                return call
+        return None
+
+    def last_text(self) -> str:
+        """Текст последнего экрана бота — для проверок навигации (SPEC §6.14)."""
+        screen = self._last_screen()
+        return (screen.text if screen else "") or ""
+
+    def last_buttons(self) -> set[str]:
+        """`callback_data` кнопок последнего экрана."""
+        screen = self._last_screen()
+        markup = getattr(screen, "reply_markup", None) if screen else None
+        if markup is None:
+            return set()
+        return {
+            button.callback_data
+            for row in markup.inline_keyboard
+            for button in row
+            if button.callback_data
+        }
+
+    def last_labels(self) -> set[str]:
+        """Тексты кнопок последнего экрана (метки «✓ …», radio времени)."""
+        screen = self._last_screen()
+        markup = getattr(screen, "reply_markup", None) if screen else None
+        if markup is None:
+            return set()
+        return {
+            button.text for row in markup.inline_keyboard for button in row
+        }
+
 
 async def run_flow(vu: VirtualUser, regular_med_id: int, slot: str) -> None:
     """Полный флоу одного пользователя (см. докстринг модуля)."""
     await vu.send("/start")
-    for k in range(RECORDS):
+    # Быстрый ввод «120/80 72» (B5) — одна из 10 записей вместо калькулятора.
+    await vu.tap("menu:measure")
+    await vu.send("120/80 72")
+    await vu.tap("m:key:ok")
+    for k in range(1, RECORDS):
         await vu.tap("menu:measure")
         await vu.keypad(120 + k, 75 + k % 10, 60 + k, double_ok_last=k == RECORDS - 1)
+    # «➕ Фактор» (B6): метки к последней записи.
+    await vu.tap("m:fact")
+    await vu.tap("m:fact:pick:salt", tick=False)
+    await vu.tap("m:fact:pick:stress", tick=False)
+    await vu.tap("m:fact:done")
     for systolic, diastolic, pulse in EDITS:
         await vu.tap("m:edit")
         await vu.keypad(systolic, diastolic, pulse)
@@ -198,11 +269,74 @@ async def run_flow(vu: VirtualUser, regular_med_id: int, slot: str) -> None:
     await vu.tap("set:archive:quick")
     await vu.send(ARCHIVE_QUICK)
     await vu.tap(f"rem:all:{slot}")
+    await run_add_record_scenario(vu, regular_med_id)
     await vu.tap("menu:diary")
     await vu.tap("menu:stats")
     await vu.tap("stats:7")
     await vu.tap("stats:30")
     await vu.tap("csv:30")
+
+
+async def run_add_record_scenario(vu: VirtualUser, regular_med_id: int) -> None:
+    """«➕ Добавить запись» (0.6.0): все типы событий + «Отмена»/«Назад» (SPEC §6.14).
+
+    Каждый «Отмена» проверяет свой маршрут: V5 — с первого шага типа в «Добавить
+    запись»; V8 — со шага времени на предыдущий шаг с сохранением значений;
+    M2 — из ввода `ЧЧ:ММ` на вызвавший экран (у «Питания» — с метками и radio
+    «Сейчас»); из шага статуса мед-фасада — к списку приёмов.
+    """
+    # Прогулка: «Отмена» с первого шага (V5) → назад в «Добавить запись».
+    await vu.tap("add:menu")
+    await vu.tap("add:walk")
+    await vu.tap("add:cancel")
+    assert texts.EVENT_MENU_ASK in vu.last_text(), "V5: add:cancel не вернул в меню типов"
+    # Прогулка: «Назад» со шага времени (V8) → шаг длительности, значение цело.
+    await vu.tap("add:walk")
+    await vu.tap("add:walk:20")
+    await vu.tap("add:back")
+    assert texts.WALK_ASK in vu.last_text(), "V8: add:back не вернул к длительности"
+    assert "add:walk:20" in vu.last_buttons(), "V8: пресет длительности исчез"
+    await vu.tap("add:walk:20")
+    await vu.tap("add:time:now")  # событие «Прогулка»
+    # Питание: «Назад» из ввода ЧЧ:ММ (M2) → экран с метками и «Сейчас».
+    await vu.tap("add:menu")
+    await vu.tap("add:food")
+    await vu.tap("add:food:pick:salt", tick=False)
+    await vu.tap("add:food:time:other")
+    await vu.tap("add:back")
+    assert "Питание" in vu.last_text(), "M2: add:back не вернул на экран питания"
+    assert f"✓ {texts.FACTOR_LABELS['salt']}" in vu.last_labels(), "M2: метка потеряна"
+    assert f"✓ {texts.EVENT_TIME_NOW}" in vu.last_labels(), "M2: radio «Сейчас» сбит"
+    await vu.tap("add:food:done")  # событие «Питание»
+    # Стресс: «Назад» с обязательного текста (V1/M6) → шаг варианта.
+    await vu.tap("add:menu")
+    await vu.tap("add:stress")
+    await vu.tap("add:stress:other")
+    await vu.tap("add:back")
+    assert texts.STRESS_ASK in vu.last_text(), "add:back не вернул к вариантам стресса"
+    await vu.tap("add:stress:anxiety")
+    await vu.tap("add:text:skip")
+    await vu.tap("add:time:now")  # событие «Стресс»
+    # Заметка: «Назад» с текста (первый шаг) → в «Добавить запись».
+    await vu.tap("add:menu")
+    await vu.tap("add:note")
+    await vu.tap("add:back")
+    assert texts.EVENT_MENU_ASK in vu.last_text(), "add:back с заметки не вернул в меню"
+    await vu.tap("add:note")
+    await vu.send("После обеда")
+    await vu.tap("add:time:now")  # событие «Заметка»
+    # Сон: оценка без времени (одна на сутки).
+    await vu.tap("add:menu")
+    await vu.tap("add:sleep")
+    await vu.tap("add:sleep:little")  # событие «Сон»
+    # Лекарство: «Назад» со статуса (§6.14) → список приёмов; «Отмена» → меню типов.
+    await vu.tap("add:menu")
+    await vu.tap("add:med")
+    await vu.tap(f"add:med:pick:{regular_med_id}")
+    await vu.tap("add:back")
+    assert texts.MED_PICK_ASK in vu.last_text(), "add:back не вернул к списку приёмов"
+    await vu.tap("add:cancel")
+    assert texts.EVENT_MENU_ASK in vu.last_text(), "add:cancel не вернул в меню типов"
 
 
 def local_moment(day: date, hhmm: str, tz_name: str) -> datetime:
@@ -324,6 +458,18 @@ async def test_bot_flow(bot_app, virtual_clock, shifted_utcnow, load_scale, load
             debounced = vu.answered(texts.DEBOUNCE_NOTICE)
             if debounced != 1:  # двойное «Готово» — второе нажатие отсечено
                 violations.append({"user_id": user.id, "check": "debounce", "got": debounced})
+            novelty_events = (
+                await session.execute(
+                    select(func.count())
+                    .select_from(DiaryEvent)
+                    .where(DiaryEvent.user_id == user.id)
+                )
+            ).scalar_one()
+            if novelty_events != NOVELTY_EVENTS:
+                violations.append(
+                    {"user_id": user.id, "check": "novelty_events",
+                     "expected": NOVELTY_EVENTS, "got": novelty_events}
+                )
 
     durations = [ms for vu in virtual_users for ms in vu.durations]
     async with factory() as session:

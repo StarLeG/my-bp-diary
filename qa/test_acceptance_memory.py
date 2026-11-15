@@ -7,7 +7,11 @@ aiosqlite-пул заполняются на первых циклах), зат�
 пауза 60 с, снова `gc.collect()` и замер. Допуск — ±10% или ±20 МБ (по
 большему). Второй сигнал — `tracemalloc` (снимки до/после): прирост
 Python-heap > 5 МБ — FAIL (аллокатор может держать арены, RSS это не видит).
-Итог — `qa/reports/load/acceptance_memory.json`.
+
+С0.6.0 цикл включает и новые пути хранения (сценарий нововедений): сохранение
+→ «➕ Фактор» (`create_factor_events`) → событие дневника (`create_event`) →
+чтение истории и «Ленты дня» (`day_feed`) — иначе утечка в них осталась бы
+вне проверки. Итог — `qa/reports/load/acceptance_memory.json`.
 """
 from __future__ import annotations
 
@@ -20,6 +24,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from bot.services import events as events_service
 from qa.acceptance_common import (
     ACCEPTANCE_ENV,
     copy_stand,
@@ -64,11 +69,16 @@ async def _run(db) -> dict:
     async def one_cycle(user) -> None:
         nonlocal moment
         async with create_session_factory(engine)() as session:
-            await save_measurement(session, user, 128, 82, timestamp=moment)
+            measurement = await save_measurement(session, user, 128, 82, timestamp=moment)
+            await events_service.create_factor_events(
+                session, user, measurement.id, {"salt", "stress"}, moment
+            )
+            await events_service.create_event(session, user, "note", moment)
             await session.commit()
         end = moment + timedelta(days=1)
         async with create_session_factory(engine)() as session:
             await measurements_for_period(session, user, moment.date() - timedelta(days=2), end.date())
+            await events_service.day_feed(session, user, moment.date())
         moment += timedelta(minutes=1)
 
     try:
