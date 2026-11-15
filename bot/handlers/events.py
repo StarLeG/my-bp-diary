@@ -294,26 +294,8 @@ async def cb_add_med(
     «Добавить» (C10).
     """
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-    meds = await medications_service.list_medications(session, user)
     await state.clear()
-    if not meds:
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            texts.MEDS_NONE_HINT, reply_markup=keyboards.meds_none_kb()
-        )
-        await callback.answer()
-        return
-    builder = InlineKeyboardBuilder()
-    for med in meds:
-        builder.row(
-            InlineKeyboardButton(
-                text=texts.fmt_intake_item(med.name, med.dosage, med.slot),
-                callback_data=f"add:med:pick:{med.id}",
-            )
-        )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MED_PICK_ASK, reply_markup=builder.as_markup()
-    )
+    await _med_pick_screen(callback.message, session, user)  # type: ignore[arg-type]
     await callback.answer()
 
 
@@ -344,6 +326,7 @@ async def cb_add_med_time(
         await callback.answer(texts.STALE_MESSAGE)
         return
     await state.set_state(EventInput.time)
+    await state.update_data(**{EV_TIME_MODE: "other"})
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.EVENT_TIME_ASK,
         reply_markup=keyboards.event_text_kb(required=True),
@@ -362,28 +345,11 @@ async def cb_add_med_pick(
         await callback.answer(texts.STALE_MESSAGE)
         return
     med_id = int(raw)
-    meds = await medications_service.list_medications(session, user)
-    med = next((m for m in meds if m.id == med_id), None)
-    if med is None:
+    await state.update_data(**{EV_DATA: med_id})
+    if not await _med_status_screen(callback.message, session, user, med_id):  # type: ignore[arg-type]
+        await state.clear()
         await callback.answer(texts.NOT_YOUR_RECORD)
         return
-    await state.update_data(**{EV_DATA: med_id})
-    builder = InlineKeyboardBuilder()
-    for status, label in (
-        ("taken", "Принял"),
-        ("skipped", "Пропустил"),
-        ("partial", "Частично"),
-    ):
-        builder.row(
-            InlineKeyboardButton(
-                text=label, callback_data=f"add:med:status:{status}:{med_id}"
-            )
-        )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
-    await callback.message.edit_text(  # type: ignore[union-attr]
-        f"{texts.fmt_intake_item(med.name, med.dosage, med.slot)} — как прошло?",
-        reply_markup=builder.as_markup(),
-    )
     await callback.answer()
 
 
@@ -400,18 +366,8 @@ async def cb_add_med_status(
     await state.update_data(**{EV_DATA: int(raw_id), EV_TYPE: status})
     await state.set_state(EventInput.time)
     await state.update_data(**{EV_TIME_MODE: "now"})
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text=texts.EVENT_TIME_NOW, callback_data="add:med:time:now")
-    )
-    builder.row(
-        InlineKeyboardButton(
-            text=texts.EVENT_TIME_OTHER, callback_data="add:med:time:other"
-        )
-    )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.EVENT_TIME_ASK, reply_markup=builder.as_markup()
+        texts.EVENT_TIME_ASK, reply_markup=_med_time_kb()
     )
     await callback.answer()
 
@@ -785,6 +741,7 @@ async def cb_add_time_other(
 ) -> None:
     """«Другое время» — FSM-ввод `ЧЧ:ММ` без сохранения (K1)."""
     await state.set_state(EventInput.time)
+    await state.update_data(**{EV_TIME_MODE: "other"})
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     await callback.message.edit_text(  # type: ignore[union-attr]
         texts.EVENT_TIME_ASK,
@@ -793,46 +750,159 @@ async def cb_add_time_other(
     await callback.answer()
 
 
+async def _med_pick_screen(
+    message: Message, session: AsyncSession, user: User
+) -> None:
+    """Список приёмов лекарств фасада (B3); пусто — подсказка C10."""
+    meds = await medications_service.list_medications(session, user)
+    if not meds:
+        await message.edit_text(  # type: ignore[union-attr]
+            texts.MEDS_NONE_HINT, reply_markup=keyboards.meds_none_kb()
+        )
+        return
+    builder = InlineKeyboardBuilder()
+    for med in meds:
+        builder.row(
+            InlineKeyboardButton(
+                text=texts.fmt_intake_item(med.name, med.dosage, med.slot),
+                callback_data=f"add:med:pick:{med.id}",
+            )
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    await message.edit_text(  # type: ignore[union-attr]
+        texts.MED_PICK_ASK, reply_markup=builder.as_markup()
+    )
+
+
+async def _med_status_screen(
+    message: Message, session: AsyncSession, user: User, med_id: int
+) -> bool:
+    """Экран статуса приёма («… — как прошло?»); `False` — приём не найден (§7.1)."""
+    meds = await medications_service.list_medications(session, user)
+    med = next((m for m in meds if m.id == med_id), None)
+    if med is None:
+        return False
+    builder = InlineKeyboardBuilder()
+    for status, label in (
+        ("taken", "Принял"),
+        ("skipped", "Пропустил"),
+        ("partial", "Частично"),
+    ):
+        builder.row(
+            InlineKeyboardButton(
+                text=label, callback_data=f"add:med:status:{status}:{med.id}"
+            )
+        )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:back"))
+    await message.edit_text(  # type: ignore[union-attr]
+        f"{texts.fmt_intake_item(med.name, med.dosage, med.slot)} — как прошло?",
+        reply_markup=builder.as_markup(),
+    )
+    return True
+
+
+def _med_time_kb() -> InlineKeyboardMarkup:
+    """Шаг времени мед-фасада (C4): «Сейчас» / «Другое время» + «Отмена»."""
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.EVENT_TIME_NOW, callback_data="add:med:time:now")
+    )
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.EVENT_TIME_OTHER, callback_data="add:med:time:other"
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:back"))
+    return builder.as_markup()
+
+
 @router.callback_query(F.data == "add:back")
 async def cb_add_back(
     callback: CallbackQuery, state: FSMContext, session: AsyncSession
 ) -> None:
-    """«Отмена» FSM-ввода — на предыдущий шаг с сохранением значений (V8, M2)."""
+    """«Отмена» (§6.14; V8, M2): из FSM-ввода — на экран, откуда ввод вызван;
+    со шага — на предыдущий шаг с сохранением значений; первый шаг типа —
+    в «➕ Добавить запись» (как `add:cancel`, V5)."""
     data = await state.get_data()
     type_ = data.get(EV_TYPE)
+    edit_id = data.get(EV_EDIT_ID)
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
-    await state.set_state(None)
-    if type_ == "food":
-        await state.update_data(**{EV_TIME_MODE: "now", EV_MOMENT: None})
-        await callback.message.edit_text(  # type: ignore[union-attr]
-            texts.EVENT_TYPE_LABELS["food"] + "?",
-            reply_markup=keyboards.food_kb(set(data.get(EV_DATA, [])), "now"),
-        )
-    elif type_ == "activity":
-        await _start_time_step(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
+    current = await state.get_state()
+    if data.get(EV_TIME_MODE) == "other":
+        # «Отмена» ввода `ЧЧ:ММ` — на экран, откуда ввод вызван (M2).
+        keep = edit_id is not None
+        await state.update_data(**{EV_TIME_MODE: "keep" if keep else "now"})
+        if type_ == "food":
+            if not keep:
+                await state.update_data(**{EV_MOMENT: None})
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.EVENT_TYPE_LABELS["food"] + "?",
+                reply_markup=keyboards.food_kb(
+                    set(data.get(EV_DATA, [])), "keep" if keep else "now"
+                ),
+            )
+        elif type_ in ("taken", "skipped", "partial"):
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.EVENT_TIME_ASK, reply_markup=_med_time_kb()
+            )
+        else:
+            await _start_time_step(callback.message, state, large=user.ui_large)  # type: ignore[arg-type]
+        await callback.answer()
         return
-    elif type_ == "stress":
-        required = data.get(EV_TEXT_REQUIRED, False)
-        prompt = texts.EVENT_TEXT_REQUIRED if required else texts.EVENT_TEXT_PROMPT
-        await _start_text_step(
-            callback.message,  # type: ignore[arg-type]
-            state,
-            required=required,
-            prompt=prompt,
-            large=user.ui_large,
-        )
+    if current == EventInput.text.state:
+        # «Отмена» шага текста: стресс — к варианту; заметка (первый шаг) — в меню.
+        if type_ == "stress":
+            await state.set_state(None)
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.STRESS_ASK, reply_markup=keyboards.stress_kb()
+            )
+        else:
+            await state.clear()
+            await _show_menu(callback.message)  # type: ignore[arg-type]
+        await callback.answer()
         return
-    elif type_ == "note":
-        await _start_text_step(
-            callback.message,  # type: ignore[arg-type]
-            state,
-            required=True,
-            prompt=texts.NOTE_ASK,
-            large=user.ui_large,
-        )
+    if current == EventInput.time.state:
+        # «Отмена» шага времени — на предыдущий шаг с сохранением значений (V8).
+        if type_ == "activity":
+            await state.set_state(None)
+            await callback.message.edit_text(  # type: ignore[union-attr]
+                texts.WALK_ASK, reply_markup=keyboards.walk_kb()
+            )
+        elif type_ in ("stress", "note"):
+            required = (data.get(EV_DATA) == "other") if type_ == "stress" else True
+            prompt = (
+                (texts.EVENT_TEXT_REQUIRED if required else texts.EVENT_TEXT_PROMPT)
+                if type_ == "stress"
+                else texts.NOTE_ASK
+            )
+            await _start_text_step(
+                callback.message,  # type: ignore[arg-type]
+                state,
+                required=required,
+                prompt=prompt,
+                large=user.ui_large,
+            )
+        elif type_ in ("taken", "skipped", "partial"):
+            await state.set_state(None)
+            med_id = data.get(EV_DATA)
+            if not (
+                isinstance(med_id, int)
+                and await _med_status_screen(callback.message, session, user, med_id)  # type: ignore[arg-type]
+            ):
+                await state.clear()
+                await _show_menu(callback.message)  # type: ignore[arg-type]
+        else:
+            await state.clear()
+            await _show_menu(callback.message)  # type: ignore[arg-type]
+        await callback.answer()
         return
-    else:
-        await _show_menu(callback.message)  # type: ignore[arg-type]
+    # Шаг статуса мед-фасада (без FSM) — назад к списку приёмов.
+    if type_ is None and isinstance(data.get(EV_DATA), int):
+        await _med_pick_screen(callback.message, session, user)  # type: ignore[arg-type]
+        await callback.answer()
+        return
+    await state.clear()
+    await _show_menu(callback.message)  # type: ignore[arg-type]
     await callback.answer()
 
 

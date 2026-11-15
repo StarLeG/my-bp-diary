@@ -563,3 +563,217 @@ class TestMedFacade:
         logs = (await session.execute(select(MedicationLog))).scalars().all()
         assert [log.status for log in logs] == ["skipped"]
         reminders.ensure_remeasure.assert_not_awaited()
+
+
+class TestCancelRouting:
+    """«Отмена» (§6.14): из ввода — на вызвавший экран, со шага — на предыдущий."""
+
+    @staticmethod
+    def _cb_data(markup) -> set[str]:
+        return {
+            b.callback_data
+            for row in markup.inline_keyboard
+            for b in row
+            if b.callback_data
+        }
+
+    async def test_back_first_step_to_add_menu(self, session, edit, cb_answer) -> None:
+        """V5: «Отмена» с первого шага типа — в «➕ Добавить запись»."""
+        state = make_state()
+        await call(
+            events.cb_add_walk, callback=make_callback("add:walk"), state=state, session=session
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.EVENT_MENU_ASK
+
+    async def test_back_from_walk_time_to_duration(
+        self, session, edit, cb_answer
+    ) -> None:
+        """V8: «Отмена» шага времени прогулки — к выбору длительности (значения целы)."""
+        state = make_state()
+        await call(
+            events.cb_add_walk, callback=make_callback("add:walk"), state=state, session=session
+        )
+        await call(
+            events.cb_add_walk_pick,
+            callback=make_callback("add:walk:20"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.WALK_ASK
+        assert "add:walk:20" in self._cb_data(edit.call_args.kwargs["reply_markup"])
+        assert (await session.execute(select(DiaryEvent))).scalars().all() == []
+
+    async def test_back_from_stress_text_to_variant(
+        self, session, edit, cb_answer
+    ) -> None:
+        """«Отмена» шага текста стресса — к варианту (не в меню)."""
+        state = make_state()
+        await call(
+            events.cb_add_stress, callback=make_callback("add:stress"), state=state, session=session
+        )
+        await call(
+            events.cb_add_stress_pick,
+            callback=make_callback("add:stress:other"),
+            state=state,
+            session=session,
+        )
+        assert edit.call_args.args[0] == texts.EVENT_TEXT_REQUIRED
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.STRESS_ASK
+        assert "add:stress:other" in self._cb_data(edit.call_args.kwargs["reply_markup"])
+
+    async def test_back_from_stress_time_to_text(
+        self, session, edit, cb_answer
+    ) -> None:
+        """V8: «Отмена» шага времени стресса — к тексту с сохранением варианта."""
+        state = make_state()
+        await call(
+            events.cb_add_stress, callback=make_callback("add:stress"), state=state, session=session
+        )
+        await call(
+            events.cb_add_stress_pick,
+            callback=make_callback("add:stress:anxiety"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_text_skip,
+            callback=make_callback("add:text:skip"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.EVENT_TEXT_PROMPT  # вариант сохранён
+
+    async def test_back_from_note_text_to_menu(self, session, edit, cb_answer) -> None:
+        """«Отмена» текста заметки (первый шаг) — в «➕ Добавить запись»."""
+        state = make_state()
+        await call(
+            events.cb_add_note, callback=make_callback("add:note"), state=state, session=session
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.EVENT_MENU_ASK
+
+    async def test_back_from_time_input_to_time_step(
+        self, session, edit, cb_answer, answer
+    ) -> None:
+        """M2: «Отмена» ввода ЧЧ:ММ — на шаг времени, откуда ввод вызван."""
+        state = make_state()
+        await call(
+            events.cb_add_note, callback=make_callback("add:note"), state=state, session=session
+        )
+        await call(
+            events.msg_event_text, message=make_message("метка"), state=state, session=session
+        )
+        await call(
+            events.cb_add_time_other,
+            callback=make_callback("add:time:other"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.EVENT_TIME_ASK
+        data = self._cb_data(edit.call_args.kwargs["reply_markup"])
+        assert "add:time:now" in data and "add:time:other" in data
+        assert (await state.get_data()).get(events.EV_TIME_MODE) == "now"
+
+    async def test_back_from_med_status_to_pick(
+        self, session, edit, cb_answer
+    ) -> None:
+        """«Отмена» экрана статуса приёма — к списку приёмов."""
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        med = Medication(user_id=user.id, name="Лозартан", dosage="50 мг", slot="morning")
+        session.add(med)
+        await session.commit()
+        state = make_state()
+        await call(
+            events.cb_add_med_pick,
+            callback=make_callback(f"add:med:pick:{med.id}"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.MED_PICK_ASK
+        assert f"add:med:pick:{med.id}" in self._cb_data(
+            edit.call_args.kwargs["reply_markup"]
+        )
+
+    async def test_back_from_med_time_to_status(
+        self, session, edit, cb_answer
+    ) -> None:
+        """V8: «Отмена» шага времени приёма — к статусу («… — как прошло?»)."""
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        med = Medication(user_id=user.id, name="Амлодипин", dosage="5 мг", slot="evening")
+        session.add(med)
+        await session.commit()
+        state = make_state()
+        await call(
+            events.cb_add_med_pick,
+            callback=make_callback(f"add:med:pick:{med.id}"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_med_status,
+            callback=make_callback(f"add:med:status:taken:{med.id}"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert "как прошло?" in edit.call_args.args[0]
+        assert f"add:med:status:taken:{med.id}" in self._cb_data(
+            edit.call_args.kwargs["reply_markup"]
+        )
+
+    async def test_back_from_med_time_input_to_time_step(
+        self, session, edit, cb_answer, reminders
+    ) -> None:
+        """M2: «Отмена» ввода ЧЧ:ММ приёма — на шаг «Сейчас» / «Другое время»."""
+        user = await measurements_service.get_or_create_user(session, TG_ID)
+        med = Medication(user_id=user.id, name="Лозартан", dosage="50 мг", slot="morning")
+        session.add(med)
+        await session.commit()
+        state = make_state()
+        await call(
+            events.cb_add_med_pick,
+            callback=make_callback(f"add:med:pick:{med.id}"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_med_status,
+            callback=make_callback(f"add:med:status:taken:{med.id}"),
+            state=state,
+            session=session,
+        )
+        await call(
+            events.cb_add_med_time,
+            callback=make_callback("add:med:time:other"),
+            state=state,
+            session=session,
+            reminders=reminders,
+        )
+        await call(
+            events.cb_add_back, callback=make_callback("add:back"), state=state, session=session
+        )
+        assert edit.call_args.args[0] == texts.EVENT_TIME_ASK
+        data = self._cb_data(edit.call_args.kwargs["reply_markup"])
+        assert "add:med:time:now" in data and "add:med:time:other" in data
