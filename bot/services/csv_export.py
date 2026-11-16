@@ -13,13 +13,15 @@ from __future__ import annotations
 import asyncio
 import csv
 import io
+import json
 from datetime import date, datetime
 from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models import Measurement, MedicationLog, User
+from bot.models import DiaryEvent, Measurement, MedicationLog, User
+from bot.services import events as events_service
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 
@@ -42,6 +44,9 @@ MEASUREMENTS_HEADER = (
 
 #: Колонки файла приёмов лекарств.
 MEDS_HEADER = ("timestamp_local", "medication", "dosage", "status")
+
+#: Колонки файла событий (0.6.2, §10): `summary` — только payload-часть.
+EVENTS_HEADER = ("moment", "type", "summary", "note")
 
 _MED_FLAG_TEXT = {True: "да", False: "нет", None: ""}
 
@@ -93,6 +98,85 @@ def build_meds_csv(
         for log, name, dosage in logs
     ]
     return _render(MEDS_HEADER, rows)
+
+
+#: Метки `food` в порядке §4.18.
+_FOOD_MARK_TEXT = {"salt": "Солёное", "coffee": "Кофе", "alcohol": "Алкоголь"}
+_FOOD_MARK_ORDER = ("salt", "coffee", "alcohol")
+
+#: Варианты `stress` (§4.18, §6.14).
+_STRESS_VARIANT_TEXT = {
+    "stress": "Стресс",
+    "anxiety": "Тревога",
+    "headache": "Головная боль",
+    "weakness": "Слабость",
+    "dizziness": "Головокружение",
+    "other": "Другое",
+}
+
+#: Оценки `sleep` (§4.18).
+_SLEEP_RATING_TEXT = {"little": "Мало спал", "normal": "Нормально", "much": "Много"}
+
+
+def event_summary(event: DiaryEvent) -> str:
+    """`summary` — только payload-часть по словарю §10, без эмодзи и префикса типа.
+
+    У `note`-события пусто (текст — в `note`); у `stress` свободный текст — тоже
+    в `note`. Синхронная функция — вызывается из `build_events_csv`.
+    """
+    try:
+        payload = json.loads(event.payload) if event.payload else {}
+    except ValueError:
+        payload = {}
+    if event.type == "food":
+        marks = payload.get("marks") or []
+        return ", ".join(
+            _FOOD_MARK_TEXT[mark]
+            for mark in _FOOD_MARK_ORDER
+            if mark in marks and mark in _FOOD_MARK_TEXT
+        )
+    if event.type == "stress":
+        return _STRESS_VARIANT_TEXT.get(str(payload.get("variant", "")), "")
+    if event.type == "sleep":
+        return _SLEEP_RATING_TEXT.get(str(payload.get("rating", "")), "")
+    if event.type == "activity":
+        duration = payload.get("duration_min")
+        return f"{duration} минут" if duration else ""
+    return ""  # note
+
+
+def build_events_csv(events: Sequence[DiaryEvent], tz_name: str) -> bytes:
+    """Файл событий: moment, type, summary, note (0.6.2, §10).
+
+    Строки — по `moment` возрастанию (§10).
+    """
+    rows = [
+        (
+            _format_local(event.moment, tz_name),
+            event.type,
+            event_summary(event),
+            event.note or "",
+        )
+        for event in sorted(events, key=lambda item: item.moment)
+    ]
+    return _render(EVENTS_HEADER, rows)
+
+
+async def export_events(
+    session: AsyncSession,
+    user: User,
+    start_day: Optional[date],
+    end_day: Optional[date],
+    limit: Optional[int] = None,
+) -> Optional[bytes]:
+    """CSV событий за период; `start_day=None` — «всё время» (лимит — §10)."""
+    if start_day is None or end_day is None:
+        events = await events_service.events_all(session, user)
+    else:
+        events = await events_service.events_for_period(session, user, start_day, end_day)
+    if limit is not None and len(events) > limit:
+        return None
+    return await asyncio.to_thread(build_events_csv, events, user.timezone)
 
 
 def file_name(kind: str, start_day: date, end_day: date, ext: str = "csv") -> str:

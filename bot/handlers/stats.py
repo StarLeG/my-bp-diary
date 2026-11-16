@@ -50,6 +50,7 @@ SUPPORT_FOOTER_INTERVAL = timedelta(hours=24)
 #: Область файлов экспорта (имена: `<область>_<дата1>-<дата2>.csv`, §10).
 CSV_KIND_MEASUREMENTS = "bp_diary"
 CSV_KIND_MEDS = "bp_meds"
+CSV_KIND_EVENTS = "bp_events"
 
 
 # ─────────────────────────── Экраны ───────────────────────────
@@ -507,7 +508,13 @@ async def cb_csv_menu(callback: CallbackQuery) -> None:
 async def _all_time_range(
     session: AsyncSession, user: User, today: date
 ) -> tuple[date, date]:
-    """Даты для имени файла «всё время» — фактический диапазон записей."""
+    """Даты для имени файла «всё время» — фактический диапазон записей.
+
+    Измерений нет — диапазон по событиям (§10, 0.6.2); и того, и другого
+    нет — сегодняшний день.
+    """
+    from bot.models import DiaryEvent
+
     row = (
         await session.execute(
             select(func.min(Measurement.timestamp), func.max(Measurement.timestamp)).where(
@@ -516,14 +523,23 @@ async def _all_time_range(
         )
     ).one()
     if row[0] is None:
-        return today, today
+        ev = (
+            await session.execute(
+                select(func.min(DiaryEvent.moment), func.max(DiaryEvent.moment)).where(
+                    DiaryEvent.user_id == user.id
+                )
+            )
+        ).one()
+        if ev[0] is None:
+            return today, today
+        row = ev
     tz = ZoneInfo(user.timezone)
     return row[0].astimezone(tz).date(), row[1].astimezone(tz).date()
 
 
 @router.callback_query(F.data.in_({"csv:7", "csv:30", "csv:all"}))
 async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Выгрузка: два CSV документами (измерения и приёмы лекарств, §10)."""
+    """Выгрузка: три CSV документами (измерения, приёмы, события — §10)."""
     period = callback.data.split(":", 1)[1]  # type: ignore[union-attr]
     tg_id = callback.from_user.id
     user = await measurements_service.get_or_create_user(session, tg_id)
@@ -540,7 +556,8 @@ async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
         start, end, limit = range_start, range_end, None
     content = await csv_export.export_measurements(session, user, start, end, limit=limit)
     meds = await csv_export.export_medications(session, user, start, end, limit=limit)
-    if content is None or meds is None:
+    events = await csv_export.export_events(session, user, start, end, limit=limit)
+    if content is None or meds is None or events is None:
         await callback.message.edit_text(  # type: ignore[union-attr]
             texts.CSV_TOO_MANY, reply_markup=keyboards.csv_period_kb()
         )
@@ -555,6 +572,12 @@ async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.message.answer_document(  # type: ignore[union-attr]
         BufferedInputFile(
             meds, filename=csv_export.file_name(CSV_KIND_MEDS, range_start, range_end)
+        ),
+        caption=texts.CSV_FILE_CAPTION,
+    )
+    await callback.message.answer_document(  # type: ignore[union-attr]
+        BufferedInputFile(
+            events, filename=csv_export.file_name(CSV_KIND_EVENTS, range_start, range_end)
         ),
         caption=texts.CSV_FILE_CAPTION,
     )

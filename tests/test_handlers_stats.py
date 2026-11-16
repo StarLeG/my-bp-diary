@@ -252,22 +252,25 @@ class TestCsv:
         assert edit.call_args.args[0] == texts.CSV_ASK
         assert edit.call_args.kwargs["reply_markup"] == keyboards.csv_period_kb()
 
-    async def test_export_7_sends_two_documents(
+    async def test_export_7_sends_three_documents(
         self, session, user, doc, cb_answer
     ) -> None:
         await add_row(session, user)
         today = today_of(user)
         await stats.cb_csv_export(make_callback("csv:7", make_message()), session)
-        assert doc.await_count == 2
+        assert doc.await_count == 3
         start = today - timedelta(days=6)
-        first, second = doc.await_args_list
+        first, second, third = doc.await_args_list
         assert first.args[0].filename == (
             f"bp_diary_{start:%Y%m%d}-{today:%Y%m%d}.csv"
         )
         assert second.args[0].filename == (
             f"bp_meds_{start:%Y%m%d}-{today:%Y%m%d}.csv"
         )
-        for call in (first, second):
+        assert third.args[0].filename == (
+            f"bp_events_{start:%Y%m%d}-{today:%Y%m%d}.csv"
+        )
+        for call in (first, second, third):
             assert call.kwargs["caption"] == texts.CSV_FILE_CAPTION
 
     async def test_export_all_time_uses_actual_range(
@@ -276,7 +279,7 @@ class TestCsv:
         stamp = utcnow().replace(second=0, microsecond=0)
         await add_row(session, user, timestamp=stamp)
         await stats.cb_csv_export(make_callback("csv:all", make_message()), session)
-        assert doc.await_count == 2
+        assert doc.await_count == 3
         day = stamp.astimezone(ZoneInfo(user.timezone)).date()
         assert doc.await_args_list[0].args[0].filename == (
             f"bp_diary_{day:%Y%m%d}-{day:%Y%m%d}.csv"
@@ -287,7 +290,7 @@ class TestCsv:
     ) -> None:
         today = today_of(user)
         await stats.cb_csv_export(make_callback("csv:all", make_message()), session)
-        assert doc.await_count == 2
+        assert doc.await_count == 3
         assert doc.await_args_list[0].args[0].filename == (
             f"bp_diary_{today:%Y%m%d}-{today:%Y%m%d}.csv"
         )

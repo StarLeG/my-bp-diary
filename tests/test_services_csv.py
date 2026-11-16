@@ -8,8 +8,9 @@ from datetime import date, datetime, timezone
 import pytest
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from bot.models import Measurement, MedicationLog, User
+from bot.models import DiaryEvent, Measurement, MedicationLog, User
 from bot.services import csv_export as service
+from bot.services import events as events_service
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 
@@ -221,3 +222,106 @@ class TestExport:
         content = await service.export_measurements(session, other, None, None)
         assert content is not None
         assert len(decode(content)) == 1  # только заголовок
+
+
+class TestBuildEventsCsv:
+    def _event(
+        self,
+        type_: str,
+        payload: str | None = None,
+        note: str | None = None,
+    ) -> DiaryEvent:
+        return DiaryEvent(
+            user_id=1,
+            type=type_,
+            moment=aware(2026, 11, 4, 7, 5),
+            note=note,
+            payload=payload,
+        )
+
+    def test_header(self) -> None:
+        content = service.build_events_csv([], "Europe/Minsk")
+        assert decode(content)[0] == list(service.EVENTS_HEADER)
+
+    def test_food_summary_order_and_text(self) -> None:
+        # порядок меток — канон §4.18 (соль, кофе, алкоголь), не порядок в payload
+        event = self._event(
+            "food", payload=events_service.event_payload("food", marks=["coffee", "salt"])
+        )
+        row = decode(service.build_events_csv([event], "Europe/Minsk"))[1]
+        assert row == ["04.11.2026 10:05", "food", "Солёное, Кофе", ""]
+
+    def test_stress_summary_with_note(self) -> None:
+        event = self._event(
+            "stress",
+            payload=events_service.event_payload("stress", variant="anxiety"),
+            note="болела голова",
+        )
+        row = decode(service.build_events_csv([event], "Europe/Minsk"))[1]
+        assert row == ["04.11.2026 10:05", "stress", "Тревога", "болела голова"]
+
+    def test_sleep_and_activity_summary(self) -> None:
+        sleep = self._event("sleep", payload=events_service.event_payload("sleep", rating="normal"))
+        walk = self._event(
+            "activity", payload=events_service.event_payload("activity", duration_min=20)
+        )
+        rows = decode(service.build_events_csv([sleep, walk], "Europe/Minsk"))
+        assert rows[1][2] == "Нормально"
+        assert rows[2][2] == "20 минут"
+
+    def test_note_event_summary_empty(self) -> None:
+        event = self._event("note", note="текст с ; и \"кавычками\"")
+        row = decode(service.build_events_csv([event], "Europe/Minsk"))[1]
+        assert row == ["04.11.2026 10:05", "note", "", 'текст с ; и "кавычками"']
+
+    def test_rows_sorted_by_moment(self) -> None:
+        early = self._event("note", note="раньше")
+        early.moment = aware(2026, 11, 4, 7, 5)
+        late = self._event("note", note="позже")
+        late.moment = aware(2026, 11, 4, 9, 5)
+        rows = decode(service.build_events_csv([late, early], "Europe/Minsk"))
+        assert [r[3] for r in rows[1:]] == ["раньше", "позже"]
+
+
+class TestExportEvents:
+    async def _populate(self, session: AsyncSession, user: User) -> None:
+        await events_service.create_event(
+            session,
+            user,
+            "food",
+            aware(2026, 11, 1, 7, 5),
+            payload=events_service.event_payload("food", marks=["salt"]),
+        )
+        await events_service.create_event(
+            session, user, "note", aware(2026, 11, 3, 9, 5), note="заметка"
+        )
+        await session.flush()
+
+    async def test_export_period(self, session: AsyncSession, user: User) -> None:
+        await self._populate(session, user)
+        content = await service.export_events(session, user, date(2026, 11, 1), date(2026, 11, 1))
+        assert content is not None
+        rows = decode(content)
+        assert len(rows) == 2  # заголовок + одно событие
+        assert rows[1][1] == "food"
+
+    async def test_export_all_time_and_limit(self, session: AsyncSession, user: User) -> None:
+        await self._populate(session, user)
+        content = await service.export_events(session, user, None, None)
+        assert content is not None
+        assert len(decode(content)) == 3
+        assert await service.export_events(session, user, None, None, limit=1) is None
+
+    async def test_export_foreign_events_hidden(self, session: AsyncSession, user: User) -> None:
+        other = User(telegram_id=222_222)
+        session.add(other)
+        await session.flush()
+        await self._populate(session, user)
+        await events_service.create_event(
+            session, other, "note", aware(2026, 11, 2, 9, 5), note="чужое"
+        )
+        await session.flush()
+        content = await service.export_events(session, user, None, None)
+        assert content is not None
+        text = content.decode("utf-8-sig")
+        assert "заметка" in text and "чужое" not in text

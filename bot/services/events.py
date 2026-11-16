@@ -281,6 +281,40 @@ async def events_for_day(
     )
 
 
+async def events_for_period(
+    session: AsyncSession, user: User, start_day: date, end_day: date
+) -> list[DiaryEvent]:
+    """События за период локальных дат (CSV «События», §10; 0.6.2)."""
+    start, _ = day_bounds_utc(user.timezone, start_day)
+    _, end = day_bounds_utc(user.timezone, end_day)
+    return list(
+        (
+            await session.execute(
+                select(DiaryEvent)
+                .where(
+                    DiaryEvent.user_id == user.id,
+                    DiaryEvent.moment >= start,
+                    DiaryEvent.moment < end,
+                )
+                .order_by(DiaryEvent.moment, DiaryEvent.id)
+            )
+        ).scalars()
+    )
+
+
+async def events_all(session: AsyncSession, user: User) -> list[DiaryEvent]:
+    """Все события пользователя по возрастанию момента (экспорт «всё время»)."""
+    return list(
+        (
+            await session.execute(
+                select(DiaryEvent)
+                .where(DiaryEvent.user_id == user.id)
+                .order_by(DiaryEvent.moment, DiaryEvent.id)
+            )
+        ).scalars()
+    )
+
+
 async def upsert_sleep(
     session: AsyncSession,
     user: User,
