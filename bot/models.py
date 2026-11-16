@@ -268,12 +268,16 @@ class MedicationLog(Base):
     timestamp: Mapped[datetime] = mapped_column(UTCDateTime(), nullable=False)
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     slot: Mapped[str] = mapped_column(String(16), nullable=False)
+    source: Mapped[str] = mapped_column(
+        String(16), nullable=False, default="bot", server_default="bot"
+    )
 
     __table_args__ = (
         Index("ix_medication_logs_user_timestamp", "user_id", "timestamp"),
         CheckConstraint(
             "status IN ('taken', 'skipped', 'partial')", name="ck_medication_logs_status"
         ),
+        CheckConstraint("source IN ('bot', 'cabinet')", name="ck_medication_logs_source"),
     )
 
 

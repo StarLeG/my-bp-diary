@@ -48,9 +48,11 @@ RETRY_BASE_DELAY = 0.05
 #:     (§4.17, 0.5.11; `create_all`).
 #: 11 — записи дневника: таблица `diary_events` (§4.18, 0.6.0; `create_all`),
 #:     `users.meds_ask_shown_at` (§4.1, K2).
-SCHEMA_VERSION = 11
+#: 12 — признак создателя приёма: `medication_logs.source` (`bot` / `cabinet`,
+#:     §4.5, 0.6.2; правило правки standalone-строк в ЛК, M3 = В).
+SCHEMA_VERSION = 12
 
-#: Колонки поколений 4–7 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3).
+#: Колонки поколений 4–12 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3, §4.5).
 _ADDED_COLUMNS = (
     ("users", "deletion_requested_at", "DATETIME"),
     ("doctors", "consent_version", "VARCHAR(32)"),
@@ -84,6 +86,12 @@ _ADDED_COLUMNS = (
     ("users", "reminders_paused_until", "DATE"),
     ("users", "ui_large", "BOOLEAN NOT NULL DEFAULT 0"),
     ("users", "meds_ask_shown_at", "DATETIME"),
+    (
+        "medication_logs",
+        "source",
+        "VARCHAR(16) NOT NULL DEFAULT 'bot' CONSTRAINT ck_medication_logs_source "
+        "CHECK (source IN ('bot', 'cabinet'))",
+    ),
 )
 
 T = TypeVar("T")
