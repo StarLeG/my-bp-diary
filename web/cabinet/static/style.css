@@ -283,7 +283,7 @@ td.actions {
 /* Подсветка строк «Истории записей» по худшей из зон САД/ДАД (§16.2): заливка
    — из chart_zones.py через --zone-fill; строки в норме не подсвечиваются.
    Одно правило и для строк-карточек на узких экранах: оно специфичнее фона
-   `.stacked-table tr` из @media (max-width: 767px). */
+   `.stacked-table tr` из @media (max-width: 827px). */
 .stacked-table tr.zone-row {
   background: var(--zone-fill);
 }
@@ -783,8 +783,12 @@ details.history-day[open] > summary .history-day-title::before {
     font-size: 1.05rem;
     gap: 12px 18px;
   }
+}
 
-  /* История записей — карточками, без горизонтального скролла */
+/* История записей и «Средние по дням» — карточками до 827px включительно:
+   таблица истории (8 колонок с действиями) не помещается в 768–827 и получала
+   горизонтальную прокрутку (визуальная проверка 2026-11-16). */
+@media (max-width: 827px) {
   .stacked-table thead {
     display: none;
   }

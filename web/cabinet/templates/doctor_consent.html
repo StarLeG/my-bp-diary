@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Кабинет врача — Дневник гипертоника</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 <body class="auth-body">
@@ -17,7 +18,7 @@
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <input type="hidden" name="next" value="{{ next_url }}">
       <label class="consent-check">
-        <input type="checkbox" name="agree" value="1" required id="consent-agree">
+        <input type="checkbox" name="agree" value="1" required id="consent-agree" autocomplete="off">
         {{ checkbox_text }}
         <a href="{{ privacy_url }}#policy" target="_blank" rel="noopener">{{ policy_text }}</a>
       </label>

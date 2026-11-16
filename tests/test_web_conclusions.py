@@ -192,7 +192,7 @@ class TestAdd:
         assert '<h4 class="event-edit-title">Добавить заключение</h4>' in page
         form = page.split("Добавить заключение", 1)[1].split("</form>", 1)[0]
         assert f'action="/appointments/{appt_id}/conclusions"' in form
-        assert '<textarea name="text" maxlength="4000" rows="6" required></textarea>' in form
+        assert '<textarea name="text" maxlength="4000" rows="6" required autocomplete="off"></textarea>' in form
         assert '<button type="submit" class="btn">Сохранить</button>' in form
         assert 'class="btn btn-ghost" href="/#appointments">Отмена</a>' in form
 

@@ -32,11 +32,11 @@
         </div>
       </details>
     </div>
-    <form method="post" action="/appointments/{{ ap.id }}/moved" class="event-moved">
+    <form method="post" action="/appointments/{{ ap.id }}/moved" class="event-moved" autocomplete="off">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
       <span class="event-moved-label">Перенесли на…</span>
-      <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
-      <input type="time" name="time">
+      <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required autocomplete="off">
+      <input type="time" name="time" autocomplete="off">
       <button type="submit" class="btn btn-ghost">Перенести</button>
     </form>
   {% else %}
@@ -79,7 +79,7 @@
   {# Правка события (§16.2): та же форма, что «➕ Добавить», предзаполненная.
      Вид изменяем — в отличие от бота (Н4, §6.13). #}
   <h4 class="event-edit-title">Изменить событие</h4>
-  <form method="post" action="/appointments/{{ ap.id }}" class="stack form-narrow event-edit-form">
+  <form method="post" action="/appointments/{{ ap.id }}" class="stack form-narrow event-edit-form" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>
       Вид
@@ -91,19 +91,19 @@
     </label>
     <label>
       Название
-      <input type="text" name="title" value="{{ ap.title }}" maxlength="60" list="ap-suggestions" required>
+      <input type="text" name="title" value="{{ ap.title }}" maxlength="60" list="ap-suggestions" required autocomplete="off">
     </label>
     <label>
       Дата
-      <input type="date" name="date" value="{{ ap.starts_on.isoformat() }}" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
+      <input type="date" name="date" value="{{ ap.starts_on.isoformat() }}" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required autocomplete="off">
     </label>
     <label>
       Время (необязательно)
-      <input type="time" name="time" value="{{ ap.starts_at or '' }}">
+      <input type="time" name="time" value="{{ ap.starts_at or '' }}" autocomplete="off">
     </label>
     <label>
       Заметка (необязательно)
-      <input type="text" name="note" value="{{ ap.note }}" maxlength="200" placeholder="Адрес, кабинет, что взять с собой">
+      <input type="text" name="note" value="{{ ap.note }}" maxlength="200" placeholder="Адрес, кабинет, что взять с собой" autocomplete="off">
     </label>
     <div class="row">
       <button type="submit" class="btn">Сохранить</button>
@@ -116,11 +116,11 @@
 {% if history_can_edit and add_conc_ap == ap.id %}
   {# Форма заключения (0.5.11, §16.2): `?add_conc={id}`, textarea ≤ 4000. #}
   <h4 class="event-edit-title">Добавить заключение</h4>
-  <form method="post" action="/appointments/{{ ap.id }}/conclusions" class="stack form-narrow event-edit-form">
+  <form method="post" action="/appointments/{{ ap.id }}/conclusions" class="stack form-narrow event-edit-form" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>
       Текст заключения
-      <textarea name="text" maxlength="4000" rows="6" required></textarea>
+      <textarea name="text" maxlength="4000" rows="6" required autocomplete="off"></textarea>
     </label>
     <div class="row">
       <button type="submit" class="btn">Сохранить</button>
@@ -132,11 +132,11 @@
 {% if history_can_edit and edit_conc and edit_conc.appointment_id == ap.id %}
   {# Правка заключения (0.5.11, §16.2): `?edit_conc={cid}`, та же форма. #}
   <h4 class="event-edit-title">Изменить заключение</h4>
-  <form method="post" action="/conclusions/{{ edit_conc.id }}" class="stack form-narrow event-edit-form">
+  <form method="post" action="/conclusions/{{ edit_conc.id }}" class="stack form-narrow event-edit-form" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>
       Текст заключения
-      <textarea name="text" maxlength="4000" rows="6" required>{{ edit_conc.text }}</textarea>
+      <textarea name="text" maxlength="4000" rows="6" required autocomplete="off">{{ edit_conc.text }}</textarea>
     </label>
     <div class="row">
       <button type="submit" class="btn">Сохранить</button>

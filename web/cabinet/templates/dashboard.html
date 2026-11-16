@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Личный кабинет — Дневник гипертоника</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
 </head>
@@ -142,26 +143,26 @@
       {% if personal.message %}
         <p class="alert {{ 'alert-ok' if personal.ok else 'alert-error' }}">{{ personal.message }}</p>
       {% endif %}
-      <form method="post" action="/profile/personal" class="stack form-narrow">
+      <form method="post" action="/profile/personal" class="stack form-narrow" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="row">
           <label>
             Фамилия
-            <input type="text" name="last_name" maxlength="50" value="{{ user.last_name or '' }}" required>
+            <input type="text" name="last_name" maxlength="50" value="{{ user.last_name or '' }}" required autocomplete="off">
           </label>
           <label>
             Имя
-            <input type="text" name="first_name" maxlength="50" value="{{ user.first_name or '' }}" required>
+            <input type="text" name="first_name" maxlength="50" value="{{ user.first_name or '' }}" required autocomplete="off">
           </label>
         </div>
         <label>
           Отчество
-          <input type="text" name="middle_name" maxlength="50" value="{{ user.middle_name or '' }}">
+          <input type="text" name="middle_name" maxlength="50" value="{{ user.middle_name or '' }}" autocomplete="off">
         </label>
         <div class="row">
           <label>
             Дата рождения
-            <input type="date" name="birth_date" min="1900-01-01" value="{{ user.birth_date.isoformat() if user.birth_date else '' }}" required>
+            <input type="date" name="birth_date" min="1900-01-01" value="{{ user.birth_date.isoformat() if user.birth_date else '' }}" required autocomplete="off">
           </label>
           <label>
             Пол
@@ -182,28 +183,28 @@
       {% endif %}
 
       <h3>Настройки профиля</h3>
-      <form method="post" action="/profile" class="stack form-narrow">
+      <form method="post" action="/profile" class="stack form-narrow" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="row">
           <label>
             Цель: систолическое
-            <input type="number" name="target_systolic" min="70" max="260" value="{{ user.target_systolic }}" required>
+            <input type="number" name="target_systolic" min="70" max="260" value="{{ user.target_systolic }}" required autocomplete="off">
           </label>
           <label>
             Цель: диастолическое
-            <input type="number" name="target_diastolic" min="40" max="160" value="{{ user.target_diastolic }}" required>
+            <input type="number" name="target_diastolic" min="40" max="160" value="{{ user.target_diastolic }}" required autocomplete="off">
           </label>
         </div>
         <label>
           Часовой пояс (IANA)
-          <input type="text" name="timezone" value="{{ user.timezone }}" maxlength="64" required>
+          <input type="text" name="timezone" value="{{ user.timezone }}" maxlength="64" required autocomplete="off">
         </label>
         <label>
           Новый пароль (оставьте пустым, чтобы не менять)
           <input type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password">
         </label>
         <label class="check">
-          <input type="checkbox" name="ui_large" value="1" {% if user.ui_large %}checked{% endif %}>
+          <input type="checkbox" name="ui_large" value="1" {% if user.ui_large %}checked{% endif %} autocomplete="off">
           Крупный режим
         </label>
         <button type="submit" class="btn">Сохранить</button>
@@ -225,11 +226,11 @@
         </label>
         <label>
           С
-          <input type="date" name="date_from" value="{{ date_from }}">
+          <input type="date" name="date_from" value="{{ date_from }}" autocomplete="off">
         </label>
         <label>
           По
-          <input type="date" name="date_to" value="{{ date_to }}">
+          <input type="date" name="date_to" value="{{ date_to }}" autocomplete="off">
         </label>
         <button type="submit" class="btn btn-ghost">Показать</button>
       </form>
@@ -307,35 +308,35 @@
         <h3>{% if edit_measurement %}Изменить запись{% else %}Добавить запись{% endif %}</h3>
         <form method="post"
               action="{% if edit_measurement %}/measurements/{{ edit_measurement.id }}{% else %}/measurements{% endif %}"
-              class="stack form-narrow" id="measurement-form">
+              class="stack form-narrow" id="measurement-form" autocomplete="off">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <div class="row">
             <label>
               Дата
-              <input type="date" name="date" value="{{ form_values.date }}" max="{{ today.isoformat() }}" required>
+              <input type="date" name="date" value="{{ form_values.date }}" max="{{ today.isoformat() }}" required autocomplete="off">
             </label>
             <label>
               Время
-              <input type="time" name="time" value="{{ form_values.time }}" required>
+              <input type="time" name="time" value="{{ form_values.time }}" required autocomplete="off">
             </label>
           </div>
           <div class="row">
             <label>
               Систолическое
-              <input type="number" name="systolic" min="70" max="260" value="{{ form_values.systolic }}" required>
+              <input type="number" name="systolic" min="70" max="260" value="{{ form_values.systolic }}" required autocomplete="off">
             </label>
             <label>
               Диастолическое
-              <input type="number" name="diastolic" min="40" max="160" value="{{ form_values.diastolic }}" required>
+              <input type="number" name="diastolic" min="40" max="160" value="{{ form_values.diastolic }}" required autocomplete="off">
             </label>
             <label>
               Пульс (необязательно)
-              <input type="number" name="pulse" min="30" max="220" value="{{ form_values.pulse }}">
+              <input type="number" name="pulse" min="30" max="220" value="{{ form_values.pulse }}" autocomplete="off">
             </label>
           </div>
           <label class="check">
             <input type="checkbox" name="medication_taken" value="1"
-                   {% if form_values.medication_taken %}checked{% endif %}>
+                   {% if form_values.medication_taken %}checked{% endif %} autocomplete="off">
             Принял лекарство
           </label>
           {# Выбор лекарств (§16.2): виден при отмеченной галочке (CSS :has),
@@ -354,7 +355,7 @@
                         <label class="check">
                           <input type="checkbox" name="medication_ids" value="{{ med.id }}"
                                  data-slot="{{ slot }}"
-                                 {% if med.id in form_medication_ids %}checked{% endif %}>
+                                 {% if med.id in form_medication_ids %}checked{% endif %} autocomplete="off">
                           {{ med.name }}{{ " (" + med.dosage + ")" if med.dosage else "" }}
                         </label>
                       {% endfor %}
@@ -380,11 +381,11 @@
           </label>
           <label>
             Текст для «Другое» (сохранится в заметку)
-            <input type="text" name="feeling_other" maxlength="500" placeholder="Например: лёгкое недомогание">
+            <input type="text" name="feeling_other" maxlength="500" placeholder="Например: лёгкое недомогание" autocomplete="off">
           </label>
           <label>
             Заметка (до 500 символов)
-            <textarea name="note" maxlength="500" rows="3">{{ form_values.note }}</textarea>
+            <textarea name="note" maxlength="500" rows="3" autocomplete="off">{{ form_values.note }}</textarea>
           </label>
           <div class="row">
             <button type="submit" class="btn">
@@ -460,14 +461,14 @@
             </ul>
           {% endif %}
         {% endif %}
-        <form method="post" action="/import" enctype="multipart/form-data" class="stack form-narrow">
+        <form method="post" action="/import" enctype="multipart/form-data" class="stack form-narrow" autocomplete="off">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <input type="hidden" name="days" value="{{ days }}">
           <input type="hidden" name="date_from" value="{{ date_from }}">
           <input type="hidden" name="date_to" value="{{ date_to }}">
           <label>
             Файл CSV
-            <input type="file" name="file" accept=".csv,text/csv" required>
+            <input type="file" name="file" accept=".csv,text/csv" required autocomplete="off">
           </label>
           <button type="submit" class="btn">Импортировать</button>
         </form>
@@ -630,7 +631,7 @@
       </datalist>
 
       <h3>➕ Добавить</h3>
-      <form method="post" action="/appointments" class="stack form-narrow">
+      <form method="post" action="/appointments" class="stack form-narrow" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <label>
           Вид
@@ -640,19 +641,19 @@
         </label>
         <label>
           Название
-          <input type="text" name="title" maxlength="60" list="ap-suggestions" required placeholder="Например: Кардиолог">
+          <input type="text" name="title" maxlength="60" list="ap-suggestions" required placeholder="Например: Кардиолог" autocomplete="off">
         </label>
         <label>
           Дата
-          <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required>
+          <input type="date" name="date" min="{{ today.isoformat() }}" max="{{ ap_max_day.isoformat() }}" required autocomplete="off">
         </label>
         <label>
           Время (необязательно)
-          <input type="time" name="time">
+          <input type="time" name="time" autocomplete="off">
         </label>
         <label>
           Заметка (необязательно)
-          <input type="text" name="note" maxlength="200" placeholder="Адрес, кабинет, что взять с собой">
+          <input type="text" name="note" maxlength="200" placeholder="Адрес, кабинет, что взять с собой" autocomplete="off">
         </label>
         <button type="submit" class="btn">Добавить</button>
       </form>
@@ -685,7 +686,7 @@
     <section class="card" id="reminders">
       <h2>Напоминания</h2>
       <p class="muted">Те же слоты, что в боте. Изменения подхватываются ботом при следующем срабатывании или перезапуске.</p>
-      <form method="post" action="/settings" class="stack">
+      <form method="post" action="/settings" class="stack" autocomplete="off">
         <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
         <div class="row">
           <label>
@@ -711,13 +712,13 @@
           <div class="row slot-row">
             <label class="check">
               <input type="checkbox" name="slot_{{ slot }}_enabled" value="1"
-                     {% if reminder and reminder.enabled %}checked{% endif %}>
+                     {% if reminder and reminder.enabled %}checked{% endif %} autocomplete="off">
               {{ slot_labels[slot] }}
             </label>
             <label>
               Время
               <input type="time" name="slot_{{ slot }}_time"
-                     value="{{ reminder.local_time if reminder and reminder.local_time else '08:00' }}">
+                     value="{{ reminder.local_time if reminder and reminder.local_time else '08:00' }}" autocomplete="off">
             </label>
             <label>
               О чём напоминать
@@ -747,7 +748,7 @@
           </select>
         </label>
         <label class="check">
-          <input type="checkbox" name="followup_enabled" value="1" {% if user.followup_enabled %}checked{% endif %}>
+          <input type="checkbox" name="followup_enabled" value="1" {% if user.followup_enabled %}checked{% endif %} autocomplete="off">
           Повторять, если не ответил (через 60 минут, без звука)
         </label>
         <button type="submit" class="btn">Сохранить напоминания</button>

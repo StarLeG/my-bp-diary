@@ -6,16 +6,16 @@
    только просмотр (M3 = В). CSRF — hidden-поле. #}
 {% if show_intake_form %}
   <h3>💊 Отметить приём</h3>
-  <form method="post" action="/intakes" class="stack form-narrow" id="intake-form">
+  <form method="post" action="/intakes" class="stack form-narrow" id="intake-form" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <div class="row">
       <label>
         Дата
-        <input type="date" name="date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
+        <input type="date" name="date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required autocomplete="off">
       </label>
       <label>
         Время
-        <input type="time" name="time" value="{{ now_local.strftime('%H:%M') }}" required>
+        <input type="time" name="time" value="{{ now_local.strftime('%H:%M') }}" required autocomplete="off">
       </label>
     </div>
     {% if not intake_meds %}
@@ -56,7 +56,7 @@
 
 {% if intake_edit %}
   <h3>Изменить приём</h3>
-  <form method="post" action="/intakes/{{ intake_edit.log.id }}" class="stack form-narrow" id="intake-edit-form">
+  <form method="post" action="/intakes/{{ intake_edit.log.id }}" class="stack form-narrow" id="intake-edit-form" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <p class="muted">
       {{ intake_edit.name }}{{ " (" + intake_edit.dosage + ")" if intake_edit.dosage else "" }}
@@ -67,12 +67,12 @@
         Дата
         <input type="date" name="date"
                value="{{ intake_edit.log.timestamp.astimezone(user_zone).strftime('%Y-%m-%d') }}"
-               max="{{ today.isoformat() }}" required>
+               max="{{ today.isoformat() }}" required autocomplete="off">
       </label>
       <label>
         Время
         <input type="time" name="time"
-               value="{{ intake_edit.log.timestamp.astimezone(user_zone).strftime('%H:%M') }}" required>
+               value="{{ intake_edit.log.timestamp.astimezone(user_zone).strftime('%H:%M') }}" required autocomplete="off">
       </label>
     </div>
     <label>

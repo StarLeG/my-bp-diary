@@ -4,15 +4,15 @@
    выбранный слот, кнопка «Добавить»). #}
 {% if edit_medication %}
   <h3>Изменить лекарство</h3>
-  <form method="post" action="/medications/{{ edit_medication.id }}" class="stack form-narrow">
+  <form method="post" action="/medications/{{ edit_medication.id }}" class="stack form-narrow" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>
       Название
-      <input type="text" name="name" value="{{ edit_medication.name }}" maxlength="100" required>
+      <input type="text" name="name" value="{{ edit_medication.name }}" maxlength="100" required autocomplete="off">
     </label>
     <label>
       Дозировка (необязательно)
-      <input type="text" name="dosage" value="{{ edit_medication.dosage }}" maxlength="50" placeholder="Без дозировки">
+      <input type="text" name="dosage" value="{{ edit_medication.dosage }}" maxlength="50" placeholder="Без дозировки" autocomplete="off">
     </label>
     <label>
       Когда принимать
@@ -29,21 +29,21 @@
   </form>
 {% else %}
   <h3>Добавить лекарство</h3>
-  <form method="post" action="/medications" class="stack form-narrow">
+  <form method="post" action="/medications" class="stack form-narrow" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     <label>
       Название
-      <input type="text" name="name" maxlength="100" required placeholder="Например: Лозартан">
+      <input type="text" name="name" maxlength="100" required placeholder="Например: Лозартан" autocomplete="off">
     </label>
     <label>
       Дозировка (необязательно)
-      <input type="text" name="dosage" maxlength="50" placeholder="Например: 50 мг">
+      <input type="text" name="dosage" maxlength="50" placeholder="Например: 50 мг" autocomplete="off">
     </label>
     <fieldset class="checks">
       <legend>Когда принимать</legend>
       {% for slot in med_slot_order %}
         <label class="check">
-          <input type="checkbox" name="slot_{{ slot }}" value="1"> {{ slot_labels[slot] }}
+          <input type="checkbox" name="slot_{{ slot }}" value="1" autocomplete="off"> {{ slot_labels[slot] }}
         </label>
       {% endfor %}
     </fieldset>

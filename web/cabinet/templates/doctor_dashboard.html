@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>Кабинет врача — Дневник гипертоника</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
   <link rel="stylesheet" href="/static/style.css">
   {% if view == "patient" %}
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
@@ -148,11 +149,11 @@
           </label>
           <label>
             С
-            <input type="date" name="date_from" value="{{ date_from }}">
+            <input type="date" name="date_from" value="{{ date_from }}" autocomplete="off">
           </label>
           <label>
             По
-            <input type="date" name="date_to" value="{{ date_to }}">
+            <input type="date" name="date_to" value="{{ date_to }}" autocomplete="off">
           </label>
           <button type="submit" class="btn btn-ghost">Показать</button>
         </form>
@@ -284,12 +285,12 @@
         <h2>Заметки врача</h2>
         <p class="muted">Заметки видны пациенту в его личном кабинете.</p>
 
-        <form method="post" action="/doctor/patient/{{ user.id }}/note" class="stack form-narrow">
+        <form method="post" action="/doctor/patient/{{ user.id }}/note" class="stack form-narrow" autocomplete="off">
           <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
           <label>
             Новая заметка
             <textarea name="text" rows="3" maxlength="1000" required
-                      placeholder="Например: продолжайте измерять давление утром и вечером"></textarea>
+                      placeholder="Например: продолжайте измерять давление утром и вечером" autocomplete="off"></textarea>
           </label>
           <button type="submit" class="btn">Сохранить заметку</button>
         </form>

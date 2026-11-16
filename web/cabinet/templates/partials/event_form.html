@@ -15,18 +15,18 @@
   <h3>{% if edit_event %}Изменить событие{% else %}Добавить событие{% endif %}</h3>
   <form method="post"
         action="{% if edit_event %}/events/{{ edit_event.id }}{% else %}/events{% endif %}"
-        class="stack form-narrow" id="event-form">
+        class="stack form-narrow" id="event-form" autocomplete="off">
     <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
     {% if not edit_event %}<input type="hidden" name="type" value="{{ event_type }}">{% endif %}
     {% if event_form_moment %}
       <div class="row">
         <label>
           Дата
-          <input type="date" name="date" value="{{ event_form.date }}" max="{{ today.isoformat() }}" required>
+          <input type="date" name="date" value="{{ event_form.date }}" max="{{ today.isoformat() }}" required autocomplete="off">
         </label>
         <label>
           Время
-          <input type="time" name="time" value="{{ event_form.time }}" required>
+          <input type="time" name="time" value="{{ event_form.time }}" required autocomplete="off">
         </label>
       </div>
     {% endif %}
@@ -35,7 +35,7 @@
         <legend>Питание (метки 1–3)</legend>
         {% for mark, label in food_mark_labels.items() %}
           <label class="check">
-            <input type="checkbox" name="marks" value="{{ mark }}" {% if mark in event_form.marks %}checked{% endif %}>
+            <input type="checkbox" name="marks" value="{{ mark }}" {% if mark in event_form.marks %}checked{% endif %} autocomplete="off">
             {{ label }}
           </label>
         {% endfor %}
@@ -71,7 +71,7 @@
     <label>
       Заметка (до 500 символов)
       <textarea name="note" maxlength="500" rows="3"
-                {% if event_type == "note" %}required{% endif %}>{{ event_form.note }}</textarea>
+                {% if event_type == "note" %}required{% endif %} autocomplete="off">{{ event_form.note }}</textarea>
     </label>
     <div class="row">
       <button type="submit" class="btn">
