@@ -15,7 +15,14 @@
 × 1000 — чтение заполненных суток отдельно. У сценария моменты сдвигаются на
 минуту от третьих суток EPOCH (дедуп §7.2 не мешает), лента читает сутки
 первого дня EPOCH — они заполнены циклом сохранений и не растут во время
-замера (иначе замерилась бы деградация данных, а не кода). Итог —
+замера (иначе замерилась бы деградация данных, а не кода).
+
+И сценарий синхронизации кабинетов 0.6.2 (п. 27): «Сценарий 0.6.2» × 1000 —
+«💊 Отметить приём» из ЛК (`log_slot_intake`, `source='cabinet'`, апгрейд) →
+строка повтора замера (`insert_remeasure_row`, job — тик бота) → CRUD события
+из ЛК (`create_event` → `update_event` → `delete_event`, чистый след — данные
+не растут); и CSV событий × 250 (HTTP `/export/events.csv`). Моменты —
+с шагом минуты от `SYNC_EPOCH`. Итог —
 `qa/reports/load/acceptance_degradation.json`.
 """
 from __future__ import annotations
@@ -76,6 +83,12 @@ NOVELTY_PAYLOADS = {
     "stress": events_service.event_payload("stress", variant="stress"),
     "note": events_service.event_payload("note"),
 }
+
+#: Сценарий 0.6.2 (синхронизация кабинетов, п. 27): приёмы из ЛК, повтор замера, CRUD событий.
+SYNC_CALLS = 1000
+
+#: Моменты сценария 0.6.2 — с пятых суток EPOCH: вне окон других сценариев.
+SYNC_EPOCH = datetime(2000, 1, 5, tzinfo=timezone.utc)
 
 
 def _check(name: str, durations_ms: list[float]) -> dict:
@@ -166,6 +179,58 @@ async def _novelty_cycles(db) -> list[float]:
     return durations
 
 
+async def _sync_cycles(db) -> list[float]:
+    """1000 сценариев 0.6.2 (п. 27): приём из ЛК → повтор замера → CRUD события.
+
+    Путь пользователя ЛК: `log_slot_intake` (`source='cabinet'`, апгрейд
+    skipped→taken — семантика дневника) → `insert_remeasure_row` (строка
+    NULL-повтора, job ставит тик бота) → `create_event` → `update_event` →
+    `delete_event` (чистый след: данные не растут во время замера). Моменты —
+    с шагом минуты от `SYNC_EPOCH` (дедуп §7.2 не мешает).
+    """
+    from bot.db import create_engine, create_session_factory
+    from bot.models import User
+    from bot.services import medications as medications_service
+    from bot.services import reminders as reminders_service
+
+    user_id, _ = first_patient(db)
+    engine = create_engine(str(db))
+    durations: list[float] = []
+    try:
+        async with create_session_factory(engine)() as session:
+            user = await session.get(User, user_id)
+            meds = await medications_service.add_medication(
+                session, user, "Лозартан", "50 мг", ("morning",)
+            )
+            await session.commit()
+            med_id = meds[0].id
+        moment = SYNC_EPOCH
+        for _ in range(SYNC_CALLS):
+            async with create_session_factory(engine)() as session:
+                started = time.perf_counter()
+                await medications_service.log_slot_intake(
+                    session,
+                    user,
+                    "morning",
+                    {med_id: "taken"},
+                    timestamp=moment,
+                    upgrade_skipped=True,
+                    source="cabinet",
+                )
+                await reminders_service.insert_remeasure_row(session, user.id, 30)
+                event = await events_service.create_event(
+                    session, user, "note", moment, note="лк"
+                )
+                await events_service.update_event(session, user, event.id, note="лк-правка")
+                await events_service.delete_event(session, user, event.id)
+                await session.commit()
+                durations.append((time.perf_counter() - started) * 1000)
+            moment += timedelta(minutes=1)
+    finally:
+        await engine.dispose()
+    return durations
+
+
 async def _feed_cycles(db) -> list[float]:
     """1000 чтений «Ленты дня» (0.6.0, §6.4) по заполненным суткам EPOCH."""
     from bot.db import create_engine, create_session_factory
@@ -209,7 +274,9 @@ def test_degradation(tmp_path) -> None:
         _check("save_measurement", asyncio.run(_save_cycles(db))),
         _check("dashboard", asyncio.run(_http_cycles(db, tmp_path, "/?days=30", DASHBOARD_CALLS))),
         _check("csv", asyncio.run(_http_cycles(db, tmp_path, "/export/measurements.csv?days=30", CSV_CALLS))),
+        _check("csv_events", asyncio.run(_http_cycles(db, tmp_path, "/export/events.csv?days=30", CSV_CALLS))),
         _check("novelty_scenario", asyncio.run(_novelty_cycles(db))),
+        _check("sync_scenario_062", asyncio.run(_sync_cycles(db))),
         _check("day_feed", asyncio.run(_feed_cycles(db))),
     ]
     write_artifact("degradation", {"operations": results})
