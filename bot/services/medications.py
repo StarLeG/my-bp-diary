@@ -407,13 +407,18 @@ async def log_slot_intake(
     decisions: Mapping[int, str],
     timestamp: Optional[datetime] = None,
     upgrade_skipped: bool = False,
+    source: str = "bot",
 ) -> SlotIntakeResult:
     """Отметить приём лекарств слота одной транзакцией.
 
     `upgrade_skipped` — повторная отметка из дневника (§6.4, 0.5.5): лекарство,
     записанное за эти сутки как не принятое, при решении `taken` переводится
     в `taken` (строка журнала обновляется, момент — `timestamp`); уже принятое
-    не меняется.
+    не меняется. Апгрейд — единственное исключение из правила M3 = В (§16.2):
+    строка чужого `source` обновляется только здесь, `source` не меняется.
+
+    `source` — создатель новых строк (`bot` / `cabinet`, §4.5): ЛК пишет
+    `cabinet` (правка и удаление таких standalone-строк — только в ЛК).
 
     `decisions` — {id лекарства: 'taken' | 'skipped' | 'partial'}.
     Уже отмеченные за сегодня в этом слоте лекарства повторно не логируются:
@@ -464,13 +469,14 @@ async def log_slot_intake(
                 )
             )
             stmt = insert(MedicationLog).from_select(
-                ["user_id", "medication_id", "timestamp", "status", "slot"],
+                ["user_id", "medication_id", "timestamp", "status", "slot", "source"],
                 select(
                     literal(user.id),
                     literal(med_id),
                     literal(moment),
                     literal(status),
                     literal(slot),
+                    literal(source),
                 ).where(~duplicate),
             )
             inserted = await session.execute(stmt)
@@ -564,12 +570,17 @@ async def _own_measurement(session: AsyncSession, user: User, measurement_id: in
 
 
 async def _insert_manual_logs(
-    session: AsyncSession, user: User, medications: list[Medication], moment: datetime
+    session: AsyncSession,
+    user: User,
+    medications: list[Medication],
+    moment: datetime,
+    source: str = "bot",
 ) -> int:
     """Вставить недостающие `medication_logs` (`taken`) за локальные сутки момента.
 
     Вызывается **только под уже захваченным** `_current_intake_lock` и сам его
-    не берёт. Возвращает число новых строк.
+    не берёт. `source` — создатель строк (`bot` / `cabinet`, §4.5): ЛК пишет
+    `cabinet`. Возвращает число новых строк.
     """
     local_day = moment.astimezone(ZoneInfo(user.timezone)).date()
     day_start, day_end = day_bounds_utc(user.timezone, local_day)
@@ -588,13 +599,14 @@ async def _insert_manual_logs(
             )
         )
         stmt = insert(MedicationLog).from_select(
-            ["user_id", "medication_id", "timestamp", "status", "slot"],
+            ["user_id", "medication_id", "timestamp", "status", "slot", "source"],
             select(
                 literal(user.id),
                 literal(medication.id),
                 literal(moment),
                 literal("taken"),
                 literal(medication.slot),
+                literal(source),
             ).where(~duplicate),
         )
         inserted = await session.execute(stmt)
@@ -639,14 +651,16 @@ async def log_manual_intake(
     medication_ids: Iterable[int],
     *,
     timestamp: Optional[datetime] = None,
+    source: str = "bot",
 ) -> ManualIntakeResult:
     """Отметить приём выбранных лекарств вручную («Готово» мультивыбора, §6.3).
 
     По одной записи `medication_logs` (`status='taken'`, слот — из строки
-    лекарства) на каждый отмеченный приём. Повторная отметка того же приёма за
-    те же локальные сутки новые записи не создаёт (§7.2): проверка «уже
-    отмечено» и вставка атомарны — под `_current_intake_lock` и запросом
-    `INSERT … WHERE NOT EXISTS`. Чужие и удалённые id тихо игнорируются.
+    лекарства, `source` — создатель: `bot` / `cabinet`, §4.5) на каждый
+    отмеченный приём. Повторная отметка того же приёма за те же локальные сутки
+    новые записи не создаёт (§7.2): проверка «уже отмечено» и вставка атомарны —
+    под `_current_intake_lock` и запросом `INSERT … WHERE NOT EXISTS`. Чужие и
+    удалённые id тихо игнорируются.
 
     Возвращает подписи всех отмеченных (для «💊 Принято: …») и признак того,
     что всё уже было отмечено (`already_logged`).
@@ -661,7 +675,7 @@ async def log_manual_intake(
     moment = _as_utc(timestamp)
     medications = await _user_medications(session, user, wanted)
     async with _current_intake_lock():
-        new_logs = await _insert_manual_logs(session, user, medications, moment)
+        new_logs = await _insert_manual_logs(session, user, medications, moment, source)
         await session.flush()
     return _manual_result(medications, new_logs)
 
@@ -700,6 +714,7 @@ async def record_manual_intake(
     medication_ids: Iterable[int],
     *,
     timestamp: Optional[datetime] = None,
+    source: str = "bot",
 ) -> ManualIntakeResult:
     """«Готово» мультивыбора: журнал приёмов и связи с записью — одной операцией (§6.3).
 
@@ -718,7 +733,7 @@ async def record_manual_intake(
     medications = await _user_medications(session, user, wanted)
     own_measurement = await _own_measurement(session, user, measurement_id)
     async with _current_intake_lock():
-        new_logs = await _insert_manual_logs(session, user, medications, moment)
+        new_logs = await _insert_manual_logs(session, user, medications, moment, source)
         if own_measurement:
             await _insert_measurement_links(
                 session, measurement_id, [medication.id for medication in medications]
@@ -1023,8 +1038,13 @@ async def adherence(
 async def logs_for_period(
     session: AsyncSession, user: User, start_day: date, end_day: date
 ) -> list[tuple[MedicationLog, str, str]]:
-    """Логи приёмов за период с названием и дозировкой (для CSV, §10)."""
-    start, end = day_bounds_utc(user.timezone, start_day)
+    """Логи приёмов за период с названием и дозировкой (для CSV, §10).
+
+    Границы — по обеим датам периода: начало `start_day`, конец — конец
+    `end_day` (иначе в выборку попадал только первый день).
+    """
+    start, _ = day_bounds_utc(user.timezone, start_day)
+    _, end = day_bounds_utc(user.timezone, end_day)
     rows = await session.execute(
         select(MedicationLog, Medication.name, Medication.dosage)
         .join(Medication, Medication.id == MedicationLog.medication_id)

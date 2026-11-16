@@ -1538,15 +1538,110 @@ class TestTick:
         assert await tick_svc.tick() == 0
         assert sent == []
 
-    async def test_remeasure_and_followup_untouched(self, session, user, tick_svc, tick_scheduler) -> None:
+    async def test_remeasure_job_recreated_and_followup_untouched(
+        self, session, user, tick_svc, tick_scheduler
+    ) -> None:
+        """0.6.2 (п. 27): тик сверяет и `med_remeasure`; повторы «если не ответил» не трогает."""
         measurement = await add_measurement(session, user, now_utc())
         remeasure = await make_remeasure(session, user, measurement.id)
+        reminder = await make_slot(session, user, next_time=now_utc() + timedelta(hours=1))
         await session.commit()
+        assert await tick_svc.tick() == 2  # job слота + job повтора без job'а (в т.ч. из ЛК)
+        job = tick_scheduler.get_job(f"reminder:{remeasure.id}")
+        assert job is not None
+        assert job["args"] == [remeasure.id, rem.MODE_REMEASURE]
+        assert await tick_svc.tick() == 0  # job уже стоит — не трогаем
+        tick_svc._add_job(reminder.id, now_utc() + timedelta(minutes=5), rem.MODE_FOLLOWUP)
         assert await tick_svc.tick() == 0
+        assert tick_scheduler.get_job(f"reminder:{reminder.id}:followup") is not None
+
+    async def test_remeasure_from_cabinet_gets_job(
+        self, session, user, tick_svc, tick_scheduler
+    ) -> None:
+        """Строка ЛК (`insert_remeasure_row`) без job'а — job появляется тиком (§16.2)."""
+        assert await rem.insert_remeasure_row(session, user.id, 30) is True
+        await session.commit()
+        row = (
+            await session.execute(
+                select(Reminder).where(
+                    Reminder.user_id == user.id, Reminder.type == "med_remeasure"
+                )
+            )
+        ).scalar_one()
+        assert row.measurement_id is None and row.enabled is True
+        assert await tick_svc.tick() == 1
+        job = tick_scheduler.get_job(f"reminder:{row.id}")
+        assert job is not None
+        assert job["args"] == [row.id, rem.MODE_REMEASURE]
+
+    async def test_insert_remeasure_row_idempotent(self, session, user) -> None:
+        """Один активный NULL-повтор на пользователя (C2/C18): условная вставка (§4.3)."""
+        assert await rem.insert_remeasure_row(session, user.id, 30) is True
+        await session.commit()
+        assert await rem.insert_remeasure_row(session, user.id, 60) is False
+        rows = (
+            await session.execute(
+                select(Reminder).where(
+                    Reminder.user_id == user.id, Reminder.type == "med_remeasure"
+                )
+            )
+        ).scalars().all()
+        assert len(rows) == 1
+
+    async def test_remeasure_deleted_row_job_removed(
+        self, session, user, tick_svc, tick_scheduler
+    ) -> None:
+        """«Не надо» / удаление отметки из ЛК: строки нет — job снимается."""
+        measurement = await add_measurement(session, user, now_utc())
+        remeasure = await make_remeasure(
+            session, user, measurement.id, next_time=now_utc() + timedelta(minutes=30)
+        )
+        await session.commit()
+        tick_svc._add_job(remeasure.id, remeasure.next_trigger_time, rem.MODE_REMEASURE)
+        await session.delete(remeasure)
+        await session.commit()
+        assert await tick_svc.tick() == 1
         assert tick_scheduler.get_job(f"reminder:{remeasure.id}") is None
-        tick_svc._add_job(999, now_utc() + timedelta(minutes=5), rem.MODE_FOLLOWUP)
-        assert await tick_svc.tick() == 0
-        assert tick_scheduler.get_job("reminder:999:followup") is not None
+
+    async def test_remeasure_disabled_job_removed(
+        self, session, user, tick_svc, tick_scheduler
+    ) -> None:
+        measurement = await add_measurement(session, user, now_utc())
+        remeasure = await make_remeasure(
+            session,
+            user,
+            measurement.id,
+            next_time=now_utc() + timedelta(minutes=30),
+        )
+        await move_row(session, remeasure, remeasure.next_trigger_time, enabled=False)
+        tick_svc._add_job(remeasure.id, remeasure.next_trigger_time, rem.MODE_REMEASURE)
+        assert await tick_svc.tick() == 1
+        assert tick_scheduler.get_job(f"reminder:{remeasure.id}") is None
+
+    async def test_remeasure_overdue_beyond_window_dropped(
+        self, session, user, tick_svc, tick_scheduler, sent
+    ) -> None:
+        """Просроченный больше окна — удаляется без отправки (как при старте)."""
+        measurement = await add_measurement(session, user, now_utc())
+        remeasure = await make_remeasure(
+            session, user, measurement.id, next_time=now_utc() - timedelta(hours=7)
+        )
+        await session.commit()
+        assert await tick_svc.tick() == 1
+        assert sent == []
+        assert (await reload_reminder(session, remeasure.id)) is None
+
+    async def test_remeasure_overdue_within_window_catchup(
+        self, session, user, tick_svc, tick_scheduler, sent
+    ) -> None:
+        """Просроченный в окне catch-up — доставляется (как при старте)."""
+        measurement = await add_measurement(session, user, now_utc())
+        await make_remeasure(
+            session, user, measurement.id, next_time=now_utc() - timedelta(minutes=10)
+        )
+        await session.commit()
+        assert await tick_svc.tick() == 1
+        assert len(sent) == 1
 
     def test_schedule_tick(self, tick_svc, tick_scheduler) -> None:
         from apscheduler.triggers.interval import IntervalTrigger

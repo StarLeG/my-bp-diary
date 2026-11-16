@@ -1346,3 +1346,73 @@ class TestDaySlotStatuses:
             session, user, "morning", {med.id: "skipped"}, upgrade_skipped=True
         )
         assert result.skipped == [] and result.already == ["Лозартан"]
+
+
+class TestSourceColumn:
+    """`medication_logs.source` — создатель строки (§4.5, поколение 12, 0.6.2)."""
+
+    async def _med(self, session: AsyncSession, user: User, slot: str) -> Medication:
+        meds = await service.add_medication(session, user, "Лозартан", "50 мг", (slot,))
+        await session.flush()
+        return meds[0]
+
+    async def test_slot_intake_sources(self, session, user) -> None:
+        morning = await self._med(session, user, "morning")
+        evening = await self._med(session, user, "evening")
+        await service.log_slot_intake(session, user, "morning", {morning.id: "taken"})
+        await service.log_slot_intake(
+            session, user, "evening", {evening.id: "taken"}, source="cabinet"
+        )
+        await session.flush()
+        sources = {
+            log.medication_id: log.source
+            for log in (await session.execute(select(MedicationLog))).scalars()
+        }
+        assert sources == {morning.id: "bot", evening.id: "cabinet"}
+
+    async def test_upgrade_keeps_source(self, session, user) -> None:
+        """Апгрейд (M3 = В): статус и момент обновляются, `source` не меняется."""
+        med = await self._med(session, user, "morning")
+        await service.log_slot_intake(session, user, "morning", {med.id: "skipped"})
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {med.id: "taken"}, upgrade_skipped=True, source="cabinet"
+        )
+        await session.flush()
+        log = (await session.execute(select(MedicationLog))).scalar_one()
+        assert log.status == "taken" and log.source == "bot"
+
+    async def test_record_manual_intake_source(self, session, user) -> None:
+        from bot.services import measurements as measurements_service
+
+        med = await self._med(session, user, "morning")
+        measurement = await measurements_service.save_measurement(
+            session, user, 135, 85, 72
+        )
+        await session.flush()
+        await service.record_manual_intake(
+            session, user, measurement.id, [med.id], source="cabinet"
+        )
+        await session.flush()
+        log = (await session.execute(select(MedicationLog))).scalar_one()
+        assert log.source == "cabinet"
+
+
+class TestLogsForPeriod:
+    """Границы периода — по обеим датам: раньше в выборку попадал только первый день."""
+
+    async def test_covers_whole_period(self, session, user) -> None:
+        meds = await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        med_id = meds[0].id
+        first = datetime(2026, 11, 1, 5, 0, tzinfo=timezone.utc)
+        last = datetime(2026, 11, 5, 5, 0, tzinfo=timezone.utc)
+        await service.log_slot_intake(session, user, "morning", {med_id: "taken"}, timestamp=first)
+        await service.log_slot_intake(session, user, "morning", {med_id: "taken"}, timestamp=last)
+        await session.flush()
+        rows = await service.logs_for_period(session, user, date(2026, 11, 1), date(2026, 11, 5))
+        assert [log.timestamp for log, _name, _dosage in rows] == [first, last]
+        only_first = await service.logs_for_period(
+            session, user, date(2026, 11, 1), date(2026, 11, 1)
+        )
+        assert [log.timestamp for log, _n, _d in only_first] == [first]

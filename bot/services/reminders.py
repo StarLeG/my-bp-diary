@@ -47,7 +47,7 @@ from zoneinfo import ZoneInfo
 
 from apscheduler.jobstores.base import JobLookupError
 from apscheduler.triggers.date import DateTrigger
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, exists, insert, literal, null, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.orm.attributes import set_committed_value
@@ -111,6 +111,63 @@ MarkupClearer = Callable[[int, int], Awaitable[None]]
 
 _remeasure_lock: Optional[asyncio.Lock] = None
 _remeasure_lock_loop: Optional[asyncio.AbstractEventLoop] = None
+
+
+def _reminder_id_from_job_id(job_id: str) -> Optional[int]:
+    """`reminder:{id}` / `reminder:{id}:followup` → id строки; чужие id — None.
+
+    Job тика (`reminders:tick`) и прочие id не распознаются — их сверка
+    не трогает (§6.7).
+    """
+    if not job_id.startswith("reminder:"):
+        return None
+    core = job_id[len("reminder:") :]
+    if core.endswith(":followup"):
+        core = core[: -len(":followup")]
+    return int(core) if core.isdigit() else None
+
+
+async def insert_remeasure_row(
+    session: AsyncSession,
+    user_id: int,
+    delay_minutes: int,
+    now: Optional[datetime] = None,
+) -> bool:
+    """Строка NULL-повтора замера **без job'а** — «кабинет пишет только строки» (§16.2).
+
+    Отметка приёма из ЛК при `status='taken'` и заданном
+    `users.med_remeasure_delay` (0.6.2, п. 27). Условная вставка: один
+    активный (`enabled=1`) `med_remeasure` с `measurement_id IS NULL` на
+    пользователя (C2/C18; в SQLite NULL-значения не уникальны — правило
+    обеспечивается этой вставкой, §4.3). Job ставит тик бота
+    (`reminders:tick`, §6.7) в течение минуты. Момент срабатывания —
+    `now + delay` (канон `ensure_remeasure`: от момента сохранения, не от
+    момента приёма). Возвращает False, если активный повтор уже есть.
+    Коммитит вызывающий.
+    """
+    now = now or datetime.now(timezone.utc)
+    duplicate = exists(
+        select(literal(1)).where(
+            Reminder.user_id == user_id,
+            Reminder.type == TYPE_REMEASURE,
+            Reminder.measurement_id.is_(None),
+            Reminder.enabled.is_(True),
+        )
+    )
+    stmt = insert(Reminder).from_select(
+        ["user_id", "type", "local_time", "next_trigger_time", "enabled", "measurement_id"],
+        select(
+            literal(user_id),
+            literal(TYPE_REMEASURE),
+            null(),
+            literal(now + timedelta(minutes=delay_minutes)),
+            literal(True),
+            null(),
+        ).where(~duplicate),
+    )
+    result = await session.execute(stmt)
+    await session.flush()
+    return bool(result.rowcount)
 
 
 def _current_remeasure_lock() -> asyncio.Lock:
@@ -898,29 +955,60 @@ class RemindersService:
     # ─────────────────────────── Catch-up при старте ───────────────────────────
 
     async def tick(self) -> int:
-        """Сверка job'ов слотов со строками `reminders` (§6.7, 0.5.7).
+        """Сверка job'ов со строками `reminders` (§6.7, 0.5.7; `med_remeasure` — 0.6.2).
 
         Личный кабинет — отдельный процесс и меняет только строки: без сверки
         время слота, изменённое в ЛК, доходило до бота лишь после перезапуска.
         Job'ы читаются одним вызовом `get_jobs()`. Включённый слот без job'а
         или с job'ом не на `next_trigger_time` — job ставится заново; job
         выключенного слота снимается; просроченный слот без job'а (дольше
-        `TICK_GRACE`) — как при старте: catch-up в окне, иначе перенос. Повторы
-        замера и «если не ответил» не трогаются. Возвращает число исправлений.
+        `TICK_GRACE`) — как при старте: catch-up в окне, иначе перенос.
+        Повторы замера (`med_remeasure`) тоже сверяются (п. 27): строка
+        `enabled=1` без job'а (в т.ч. написанная ЛК) получает job на
+        `next_trigger_time` — просроченная в окне `CATCHUP_WINDOW`
+        доставляется, за окном удаляется; строки нет или `enabled=0` — job
+        снимается (удаление «Не надо» из ЛК). Повторы «если не ответил» не
+        трогаются. Возвращает число исправлений.
         """
         now = datetime.now(timezone.utc)
         async with self._session_factory() as session:
             rows = (
                 await session.execute(
-                    select(Reminder.id, Reminder.enabled, Reminder.next_trigger_time).where(
-                        Reminder.type.in_(SLOT_TYPES)
+                    select(
+                        Reminder.id,
+                        Reminder.type,
+                        Reminder.enabled,
+                        Reminder.next_trigger_time,
                     )
                 )
             ).all()
+        by_id = {row.id: row for row in rows}
         jobs = {job.id: job for job in self._scheduler.get_jobs()}
         fixed = 0
-        for reminder_id, enabled, next_time in rows:
+        # Job'ы строк, которых больше нет (удаление «Не надо» / отметки из ЛК).
+        for job_id, job in jobs.items():
+            reminder_id = _reminder_id_from_job_id(job_id)
+            if reminder_id is not None and reminder_id not in by_id:
+                self._remove_job(reminder_id, followup=job_id.endswith(":followup"))
+                fixed += 1
+        for reminder_id, reminder_type, enabled, next_time in rows:
             job = jobs.get(self._job_id(reminder_id))
+            if reminder_type == TYPE_REMEASURE:
+                if not enabled:
+                    if job is not None:
+                        self._remove_job(reminder_id)
+                        fixed += 1
+                    continue
+                if job is not None:
+                    continue
+                fixed += 1
+                if next_time > now:
+                    self._add_job(reminder_id, next_time, MODE_REMEASURE)
+                elif now - next_time > CATCHUP_WINDOW:
+                    await self._drop_undelivered_remeasure(reminder_id)
+                else:
+                    await self._deliver(reminder_id, MODE_CATCHUP)
+                continue
             if not enabled:
                 if job is not None:
                     self._remove_job(reminder_id)
