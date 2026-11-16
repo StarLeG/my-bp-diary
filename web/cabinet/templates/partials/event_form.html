@@ -1,0 +1,96 @@
+{# Формы событий дневника (0.6.2, §16.2, S1 = Г): шаг выбора типа и форма типа.
+   Добавление двухшаговое (?add_ev=1 → ?add_ev={type}), правка — сразу форма
+   типа (?edit_ev={id}). Момент не показывается у «Сна» (как в боте, C22) и у
+   linked-событий (их момент не редактируется). CSRF — hidden-поле. #}
+{% if show_event_type_picker %}
+  <h3>Добавить событие</h3>
+  <div class="row">
+    {% for key, label in event_type_choices %}
+      <a class="btn" href="/?add_ev={{ key }}#history">{{ label }}</a>
+    {% endfor %}
+  </div>
+{% endif %}
+
+{% if show_event_form %}
+  <h3>{% if edit_event %}Изменить событие{% else %}Добавить событие{% endif %}</h3>
+  <form method="post"
+        action="{% if edit_event %}/events/{{ edit_event.id }}{% else %}/events{% endif %}"
+        class="stack form-narrow" id="event-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% if not edit_event %}<input type="hidden" name="type" value="{{ event_type }}">{% endif %}
+    {% if event_form_moment %}
+      <div class="row">
+        <label>
+          Дата
+          <input type="date" name="date" value="{{ event_form.date }}" max="{{ today.isoformat() }}" required>
+        </label>
+        <label>
+          Время
+          <input type="time" name="time" value="{{ event_form.time }}" required>
+        </label>
+      </div>
+    {% endif %}
+    {% if event_type == "food" %}
+      <fieldset class="checks">
+        <legend>Питание (метки 1–3)</legend>
+        {% for mark, label in food_mark_labels.items() %}
+          <label class="check">
+            <input type="checkbox" name="marks" value="{{ mark }}" {% if mark in event_form.marks %}checked{% endif %}>
+            {{ label }}
+          </label>
+        {% endfor %}
+      </fieldset>
+    {% elif event_type == "stress" %}
+      <label>
+        Что чувствуете?
+        <select name="variant">
+          {% for key, label in stress_variant_labels.items() %}
+            <option value="{{ key }}" {% if event_form.variant == key %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% elif event_type == "sleep" %}
+      <label>
+        Как спали?
+        <select name="rating">
+          {% for key, label in sleep_rating_labels.items() %}
+            <option value="{{ key }}" {% if event_form.rating == key %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% elif event_type == "activity" %}
+      <label>
+        Как долго гуляли?
+        <select name="duration_min">
+          {% for minutes in (10, 20, 30, 60) %}
+            <option value="{{ minutes }}" {% if event_form.duration_min == minutes %}selected{% endif %}>{{ minutes }} минут</option>
+          {% endfor %}
+        </select>
+      </label>
+    {% endif %}
+    <label>
+      Заметка (до 500 символов)
+      <textarea name="note" maxlength="500" rows="3"
+                {% if event_type == "note" %}required{% endif %}>{{ event_form.note }}</textarea>
+    </label>
+    <div class="row">
+      <button type="submit" class="btn">
+        {% if edit_event %}Сохранить{% else %}Добавить{% endif %}
+      </button>
+      <a class="btn btn-ghost" href="/#history">Отмена</a>
+    </div>
+  </form>
+{% endif %}
+
+{% if confirm_delete_ev %}
+  <div class="alert alert-error">
+    <p>Удалить «{{ event_preview(confirm_delete_ev) }}»? Это действие нельзя отменить.</p>
+    <div class="row">
+      <form method="post" action="/events/{{ confirm_delete_ev.id }}/delete" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-danger">Удалить</button>
+      </form>
+      <a class="btn btn-ghost" href="/#history">Отмена</a>
+    </div>
+  </div>
+{% endif %}

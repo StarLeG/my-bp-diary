@@ -197,7 +197,23 @@
 
       <section class="card" id="history">
         <h2>История записей</h2>
-        {% if not measurements %}
+
+        {% if ev_view %}
+          {# Карточка просмотра события (0.6.2, §21): полный note и payload, без правки. #}
+          <div class="alert ev-view">
+            <p>
+              <strong>{{ ev_view.emoji }} {{ ev_view.kind_line }}</strong>
+              {%- if ev_view.moment_str %} · {{ ev_view.moment_str }}{% endif %}
+            </p>
+            {% if ev_view.note %}<p class="ev-view-note">{{ ev_view.note }}</p>{% endif %}
+            <div class="row">
+              <a class="btn btn-ghost"
+                 href="/doctor/patient/{{ user.id }}?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}#history">Назад</a>
+            </div>
+          </div>
+        {% endif %}
+
+        {% if not history.days %}
           <p>За этот период записей нет.</p>
         {% else %}
           {% include "partials/history_zone_legend.html" %}
@@ -236,6 +252,31 @@
               })();
             </script>
           {% endif %}
+        {% endif %}
+      </section>
+
+      {# «Лекарства пациента» (0.6.2, §21, D1 = Б): Название · Дозировка · Слот,
+         только чтение — как в «Личной карточке» ЛК, включая слот «Кризис». #}
+      <section class="card" id="patient-meds">
+        <h2>Лекарства пациента</h2>
+        {% if not medications %}
+          <p>Лекарства не добавлены.</p>
+        {% else %}
+          <div class="med-groups">
+            {% for slot in med_slot_order %}
+              {% set group = medications | selectattr("slot", "equalto", slot) | list %}
+              {% if group %}
+                <div class="med-group">
+                  <span class="med-group-title">{{ slot_labels[slot] }}</span>
+                  <ul class="med-list">
+                    {% for med in group %}
+                      <li>{{ med.name }}{{ " (" + med.dosage + ")" if med.dosage else "" }}</li>
+                    {% endfor %}
+                  </ul>
+                </div>
+              {% endif %}
+            {% endfor %}
+          </div>
         {% endif %}
       </section>
 

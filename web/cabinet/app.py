@@ -10,14 +10,17 @@ HTTP-запрос (`Depends`); модели — из `bot/models.py` (SPEC.md, �
 Содержимое: личная карточка, история с фильтрами, сводка с графиком и CSV,
 CRUD лекарств, настройки напоминаний, добавление/правка/удаление записей,
 импорт CSV архива (§16.2) и заключения к «Визитам и анализам» (0.5.11,
-§6.13, §4.17 — текст, до 5 на событие; фото только в Telegram). Платёжных
+§6.13, §4.17 — текст, до 5 на событие; фото только в Telegram). С 0.6.2
+(п. 27): смешанная лента дня (события дневника и standalone-приёмы), CRUD
+событий, отметка приёма без измерения, блок «Мой врач» (отзыв доступа),
+крупный режим `ui_large` и третий CSV «События» (§16.2, §10). Платёжных
 данных нет — только ссылка на внешнюю страницу поддержки из бота.
 """
 from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import AsyncIterator, Mapping, Optional
 from urllib.parse import urlencode
@@ -39,9 +42,12 @@ from bot.db import create_engine, create_session_factory, init_db
 from bot.models import (
     Appointment,
     AppointmentConclusion,
+    DiaryEvent,
     Doctor,
     Measurement,
     Medication,
+    MedicationLog,
+    MeasurementMedication,
     Reminder,
     User,
     WebSession,
@@ -51,12 +57,14 @@ from bot.services import consent as consent_service
 from bot.services import csv_export
 from bot.services import doctor as doctor_service
 from bot.services import appointments as appointments_service
+from bot.services import events as events_service
 from bot.services import medications as medications_service
 from bot.services import pdf_report
 from bot.services import profile as profile_service
 from bot.services import stats
 from bot.services.measurements import (
     DuplicateMeasurementError,
+    day_bounds_utc,
     delete_measurement,
     get_measurement,
     measurements_for_period,
@@ -64,8 +72,13 @@ from bot.services.measurements import (
     update_measurement_values,
 )
 from bot.services.medications import MedicationNotFoundError
-from bot.services.reminders import DEFAULT_SLOT_TIMES, enable_slot_row, next_slot_occurrence
-from web.cabinet import auth, csv_import, doctor_auth
+from bot.services.reminders import (
+    DEFAULT_SLOT_TIMES,
+    enable_slot_row,
+    insert_remeasure_row,
+    next_slot_occurrence,
+)
+from web.cabinet import auth, csv_import, diary_feed, doctor_auth
 from web.cabinet.chart_zones import CHART_ZONES, day_zone, row_zone, table_legend
 
 #: Имя сессионной cookie (SPEC.md, раздел 16.2: HTTP-only, 7 дней).
@@ -99,6 +112,18 @@ _templates.env.globals["patient_card_title"] = profile_service.card_title
 _templates.env.globals["patient_card_details"] = profile_service.card_details
 # Превью заключения в подтверждении удаления (0.5.11, §16.2).
 _templates.env.globals["conclusion_preview"] = appointments_service.conclusion_preview
+# Смешанная лента дня (0.6.2, §16.2): строки событий/приёмов и чипы «Фактор».
+_templates.env.globals["event_row_text"] = diary_feed.event_row_text
+_templates.env.globals["intake_row_text"] = diary_feed.intake_row_text
+_templates.env.globals["event_chips"] = diary_feed.event_chips
+_templates.env.globals["event_preview"] = diary_feed.event_preview
+_templates.env.globals["intake_label"] = diary_feed.intake_label
+# Словари подписей полей форм событий (§6.14) — дословно из `bot.texts`.
+_templates.env.globals["food_mark_labels"] = {
+    mark: texts.FACTOR_LABELS[mark] for mark in diary_feed.FOOD_MARK_ORDER
+}
+_templates.env.globals["stress_variant_labels"] = texts.STRESS_VARIANT_LABELS
+_templates.env.globals["sleep_rating_labels"] = texts.SLEEP_RATING_LABELS
 
 
 # ─────────────────────────── Вспомогательное ───────────────────────────
@@ -211,6 +236,13 @@ AP_CANCEL_LABELS = {
     "exam": "Отменить обследование",
 }
 
+#: Статусы связи «Мой врач» дословно (§16.2, W1 = Б).
+DOCTOR_LINK_STATUS_LABELS = {
+    "pending": "ожидает подтверждения",
+    "active": "активен",
+    "revoked": "доступ отозван",
+}
+
 
 def _conc_block_visible(appt: Appointment, current: date, has_conclusions: bool) -> bool:
     """Блок и формы заключений в карточке события (0.5.11, §6.13; Р2, Р3).
@@ -241,6 +273,124 @@ def _plural(count: int, one: str, few: str, many: str) -> str:
     return many
 
 
+async def _linked_med_ids(
+    db: AsyncSession, user: User, measurements: list[Measurement]
+) -> dict[int, set[int]]:
+    """Id отмеченных приёмов по записям (`measurement_medications`, §4.11).
+
+    Нужны и для колонки «Лекарство», и для ленты: пара `medication_id +
+    timestamp` этих связей — журнал записи (§16.2).
+    """
+    ids = [m.id for m in measurements]
+    if not ids:
+        return {}
+    rows = await db.execute(
+        select(MeasurementMedication.measurement_id, MeasurementMedication.medication_id)
+        .join(Medication, Medication.id == MeasurementMedication.medication_id)
+        .where(
+            MeasurementMedication.measurement_id.in_(ids),
+            Medication.user_id == user.id,
+        )
+    )
+    result: dict[int, set[int]] = {}
+    for measurement_id, medication_id in rows.all():
+        result.setdefault(measurement_id, set()).add(medication_id)
+    return result
+
+
+def _standalone_intakes(
+    logs: list[tuple[MedicationLog, str, str]],
+    measurements: list[Measurement],
+    linked_med_ids: Mapping[int, set[int]],
+) -> list[diary_feed.IntakeEditRow]:
+    """Standalone-строки приёмов: журнал измерений в ленту не идёт (§4.11, §16.2).
+
+    Правка и удаление — только своих строк `source='cabinet'` (M3 = В).
+    """
+    rows: list[diary_feed.IntakeEditRow] = []
+    for log, name, dosage in logs:
+        if diary_feed.is_journal_log(log, measurements, linked_med_ids):
+            continue
+        rows.append(
+            diary_feed.IntakeEditRow(
+                log=log, name=name, dosage=dosage, editable=log.source == "cabinet"
+            )
+        )
+    return rows
+
+
+async def _intake_is_journal(db: AsyncSession, user: User, log: MedicationLog) -> bool:
+    """Строка — журнал записи измерения (пара §4.11): правится формой измерения."""
+    measurement_ids = list(
+        (
+            await db.execute(
+                select(Measurement.id).where(
+                    Measurement.user_id == user.id, Measurement.timestamp == log.timestamp
+                )
+            )
+        ).scalars()
+    )
+    if not measurement_ids:
+        return False
+    linked = await db.execute(
+        select(MeasurementMedication.medication_id).where(
+            MeasurementMedication.measurement_id.in_(measurement_ids)
+        )
+    )
+    return log.medication_id in set(linked.scalars())
+
+
+async def _owned_intake(
+    db: AsyncSession, user: User, log_id: int
+) -> Optional[MedicationLog]:
+    """Строка приёма по id с проверкой владельца: чужая выглядит как отсутствующая (§7.1)."""
+    return (
+        await db.execute(
+            select(MedicationLog).where(
+                MedicationLog.id == log_id, MedicationLog.user_id == user.id
+            )
+        )
+    ).scalar_one_or_none()
+
+
+async def _logs_for_feed(
+    db: AsyncSession, user: User, start_day: date, end_day: date
+) -> list[tuple[MedicationLog, str, str]]:
+    """Логи приёмов за период локальных дат (данные ленты, §16.2).
+
+    Границы — все локальные сутки периода (`day_bounds_utc` обеих дат):
+    у `medications_service.logs_for_period` окно — только первый день (его
+    контракт для CSV менять нельзя), ленте нужны обе границы.
+    """
+    start, _ = day_bounds_utc(user.timezone, start_day)
+    _, end = day_bounds_utc(user.timezone, end_day)
+    rows = await db.execute(
+        select(MedicationLog, Medication.name, Medication.dosage)
+        .join(Medication, Medication.id == MedicationLog.medication_id)
+        .where(
+            MedicationLog.user_id == user.id,
+            MedicationLog.timestamp >= start,
+            MedicationLog.timestamp < end,
+        )
+        .order_by(MedicationLog.timestamp, MedicationLog.id)
+    )
+    return [(log, name, dosage) for log, name, dosage in rows.all()]
+
+
+async def _feed_data(
+    db: AsyncSession,
+    user: User,
+    start_day: date,
+    end_day: date,
+    measurements: list[Measurement],
+) -> tuple[list[DiaryEvent], list[diary_feed.IntakeEditRow], dict[int, set[int]]]:
+    """Данные смешанной ленты за период: события, standalone-приёмы, связи (§16.2)."""
+    linked = await _linked_med_ids(db, user, measurements)
+    events = await events_service.events_for_period(db, user, start_day, end_day)
+    logs = await _logs_for_feed(db, user, start_day, end_day)
+    return events, _standalone_intakes(logs, measurements, linked), linked
+
+
 def _history_context(
     measurements: list[Measurement],
     tz_name: str,
@@ -248,12 +398,20 @@ def _history_context(
     start_day: date,
     end_day: date,
     shown: str,
+    *,
+    events: Optional[list[DiaryEvent]] = None,
+    intakes: Optional[list[diary_feed.IntakeEditRow]] = None,
+    linked_med_ids: Optional[Mapping[int, set[int]]] = None,
+    filt: str = "all",
 ) -> dict:
     """Дни «Истории записей» аккордеоном (§16.2, 0.5.9) — общий для ЛК и врача.
 
     Группы — по локальной дате, новые сверху; строки внутри дня — по времени.
-    Заголовок дня: дата, число записей, округлённые средние САД/ДАД и точка
-    зоны (`chart_zones.day_zone`, «худшая из зон»). Развёрнуты дни за последние
+    С 0.6.2 (п. 27) — смешанная лента: измерения, события дневника и
+    standalone-приёмы (`diary_feed.build_feed`) под чип-фильтром `filt`
+    («Все» / «Давление» / «Лекарства» / «Факторы» / «Другое»); журнал записи
+    отдельно не рендерится. Заголовок дня (число записей, средние, точка
+    зоны) — по-прежнему только по измерениям. Развёрнуты дни за последние
     `HISTORY_EXPAND_DAYS` дней от сегодня; период короче недели — без свёртки
     (`flat`). Период длиннее `HISTORY_DAYS_DEFAULT` дней — срез `shown`
     последних дней периода («Показать ещё 30 дней», состояние — `?shown=N`);
@@ -271,28 +429,50 @@ def _history_context(
         moment = m.timestamp.astimezone(tz)
         if window_start <= moment.date() <= end_day:
             by_day.setdefault(moment.date(), []).append(m)
+    feed = diary_feed.build_feed(
+        measurements,
+        events or [],
+        intakes or [],
+        linked_med_ids or {},
+        filt,
+        tz_name,
+        window_start,
+        end_day,
+    )
+    # Чипы «Фактор» строк измерений (§16.2): по всем событиям с привязкой,
+    # независимо от чип-фильтра (атрибут строки измерения).
+    chips: dict[int, list[tuple[str, str]]] = {}
+    for event in events or []:
+        if event.measurement_id is not None:
+            chips.setdefault(event.measurement_id, []).extend(diary_feed.event_chips(event))
     days: list[dict] = []
-    for day in sorted(by_day, reverse=True):
-        rows = sorted(by_day[day], key=lambda m: m.timestamp)
-        sys_avg = round(sum(m.systolic for m in rows) / len(rows))
-        dia_avg = round(sum(m.diastolic for m in rows) / len(rows))
-        days.append(
-            {
-                "date": day,
-                "label": f"{_WEEKDAYS_SHORT[day.weekday()]}, {day:%d.%m}",
-                "count": len(rows),
-                "count_text": f"{len(rows)} {_plural(len(rows), 'запись', 'записи', 'записей')}",
-                "avg": f"{sys_avg}/{dia_avg}",
-                "zone": day_zone(sys_avg, dia_avg),
-                "open": (today - day).days < HISTORY_EXPAND_DAYS,
-                "rows": rows,
-            }
-        )
+    for day in sorted(feed, reverse=True):
+        rows = sorted(by_day.get(day, ()), key=lambda m: m.timestamp)
+        entry: dict = {
+            "date": day,
+            "label": f"{_WEEKDAYS_SHORT[day.weekday()]}, {day:%d.%m}",
+            "count": len(rows),
+            "open": (today - day).days < HISTORY_EXPAND_DAYS,
+            "rows": rows,
+            "feed": feed[day],
+        }
+        if rows:
+            sys_avg = round(sum(m.systolic for m in rows) / len(rows))
+            dia_avg = round(sum(m.diastolic for m in rows) / len(rows))
+            entry.update(
+                {
+                    "count_text": f"{len(rows)} {_plural(len(rows), 'запись', 'записи', 'записей')}",
+                    "avg": f"{sys_avg}/{dia_avg}",
+                    "zone": day_zone(sys_avg, dia_avg),
+                }
+            )
+        days.append(entry)
     return {
         "days": days,
         "flat": flat,
         "period_days": period_days,
         "shown": visible,
+        "chips": chips,
         "more_shown": min(visible + HISTORY_DAYS_STEP, period_days) if visible < period_days else None,
     }
 
@@ -979,16 +1159,21 @@ def create_app(
         *,
         user: User,
         shown: str = "",
+        filt: str = "all",
     ) -> Response:
         """Собрать страницу дашборда; `extra` — контекст форм записи/импорта (§16.2).
 
         `user` — пользователь бота, уже загруженный вызывающим хендлером
-        (`load_user`), чтобы не запрашивать его повторно.
+        (`load_user`), чтобы не запрашивать его повторно. `filt` — чип-фильтр
+        смешанной ленты (0.6.2, §16.2).
         """
         tz = ZoneInfo(user.timezone)
         now_local = datetime.now(tz)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
+        feed_events, feed_intakes, linked_med_ids = await _feed_data(
+            db, user, start_day, end_day, measurements
+        )
         summary = await stats.summary(db, user, start_day, end_day)
         daily = _daily_averages(measurements, user.timezone, start_day, end_day)
         medication_cells = await medications_service.medication_cells(db, user, measurements)
@@ -1042,6 +1227,16 @@ def create_app(
             if _conc_block_visible(appt, now_local.date(), bool(items)):
                 ap_conc_open.add(appt.id)
         doctor_notes = await doctor_service.notes_for_patient(db, user.id)
+        # «Мой врач» (0.6.2, §16.2, W1 = Б): связи со статусами, только пациент.
+        doctor_links = [
+            {
+                "id": link.doctor_id,
+                "label": doctor_service.doctor_label(doctor),
+                "status": link.status,
+                "status_label": DOCTOR_LINK_STATUS_LABELS.get(link.status, link.status),
+            }
+            for link, doctor in (await doctor_service.links_for_patient(db, user.id))
+        ]
         consent = await consent_service.current_processing(db, user.id)
         personal_messages = {
             "personal_name": (texts.PROFILE_NAME_BAD, False),
@@ -1141,9 +1336,19 @@ def create_app(
             "import_error": "",
             # «История записей» по дням и формы/подтверждения 0.5.9 (§16.2)
             "history": _history_context(
-                measurements, user.timezone, now_local.date(), start_day, end_day, shown
+                measurements,
+                user.timezone,
+                now_local.date(),
+                start_day,
+                end_day,
+                shown,
+                events=feed_events,
+                intakes=feed_intakes,
+                linked_med_ids=linked_med_ids,
+                filt=filt,
             ),
             "history_can_edit": True,
+            "history_view_prefix": "",
             "edit_medication": None,
             "confirm_delete_med": None,
             "edit_ap_id": None,
@@ -1153,6 +1358,26 @@ def create_app(
             "add_conc_ap": None,
             "edit_conc": None,
             "confirm_delete_conc": None,
+            # смешанная лента и события дневника (0.6.2, §16.2, п. 27)
+            "filt": filt,
+            "filter_order": diary_feed.FILTER_ORDER,
+            "filter_labels": diary_feed.FILTER_LABELS,
+            "show_event_type_picker": False,
+            "show_event_form": False,
+            "event_type": "",
+            "edit_event": None,
+            "event_type_choices": diary_feed.EVENT_TYPE_CHOICES,
+            "confirm_delete_ev": None,
+            # приём лекарства без измерения (0.6.2, §16.2, M1–M3)
+            "show_intake_form": False,
+            "intake_edit": None,
+            "confirm_delete_int": None,
+            "intake_meds": [],
+            "intake_status_labels": diary_feed.INTAKE_STATUS_LABELS,
+            "intake_status_order": diary_feed.INTAKE_STATUS_ORDER,
+            # «Мой врач» (0.6.2, §16.2, W1 = Б)
+            "doctor_links": doctor_links,
+            "confirm_revoke": None,
         }
         if extra:
             context.update(extra)
@@ -1173,6 +1398,29 @@ def create_app(
             else:
                 slot = prefill_slot(context["form_values"]["time"], context["slot_times"])
                 context["form_medication_ids"] = {m.id for m in medications if m.slot == slot}
+        # Форма события (0.6.2, §16.2): момент показывается всегда, кроме правки
+        # `sleep` и linked-событий (их момент редактировать нельзя). У сна момент
+        # при создании определяет сутки оценки (S6 = Б: задним числом — можно).
+        edit_event = context.get("edit_event")
+        context["event_form"] = diary_feed.event_form_values(edit_event, tz, now_local)
+        context["event_form_moment"] = edit_event is None or (
+            edit_event.measurement_id is None and edit_event.type != "sleep"
+        )
+        # Форма «💊 Отметить приём»: уже `taken` за сутки — отмечено и заблокировано.
+        if context["show_intake_form"]:
+            taken_today = await medications_service.taken_intake_ids_today(db, user)
+            context["intake_meds"] = [
+                (
+                    slot,
+                    [
+                        diary_feed.IntakeMedRow(med, taken_today=med.id in taken_today)
+                        for med in medications
+                        if med.slot == slot
+                    ],
+                )
+                for slot in medications_service.SLOTS
+                if any(m.slot == slot for m in medications)
+            ]
         response = _templates.TemplateResponse(request, "dashboard.html", context)
         response.set_cookie(
             CSRF_COOKIE,
@@ -1206,6 +1454,14 @@ def create_app(
         edit_conc: str = Query(""),
         confirm_delete_conc: str = Query(""),
         shown: str = Query(""),
+        add_ev: str = Query(""),
+        edit_ev: str = Query(""),
+        confirm_delete_ev: str = Query(""),
+        intake: str = Query(""),
+        edit_int: str = Query(""),
+        confirm_delete_int: str = Query(""),
+        confirm_revoke: str = Query(""),
+        filt: str = Query(""),
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
@@ -1220,9 +1476,17 @@ def create_app(
         по дням («Показать ещё 30 дней»). С 0.5.11 (§16.2): `?add_conc={id}` —
         форма добавления заключения к событию, `?edit_conc={id}` — форма правки
         заключения (`?edit={id}` занят правкой измерения), `?confirm_delete_conc`
-        — подтверждение удаления заключения; всё — с дня события.
+        — подтверждение удаления заключения; всё — с дня события. С 0.6.2
+        (п. 27): `?add_ev=1|{type}` — добавление события (шаг типа / форма),
+        `?edit_ev={id}` / `?confirm_delete_ev={id}` — правка и удаление события,
+        `?intake=1` — «💊 Отметить приём», `?edit_int={id}` /
+        `?confirm_delete_int={id}` — правка и удаление standalone-приёма,
+        `?confirm_revoke={doctor_id}` — подтверждение отзыва доступа врача,
+        `?filt=bp|med|fact|other|all` — чип-фильтр смешанной ленты.
         """
         user = await load_user(db, web_user)
+        if filt not in diary_feed.FILTER_LABELS:
+            filt = "all"
         extra: dict = {}
         if add or error in ("measurement", "duplicate", "medication_missing"):
             extra["show_add_form"] = True
@@ -1269,9 +1533,69 @@ def create_app(
                     owner = await appointments_service.get_owned(db, user, conc.appointment_id)
                     if owner is not None and await _conc_visible(db, owner, user):
                         extra[key] = conc
+        # События дневника (0.6.2, §16.2, S1 = Г): шаг типа, форма, подтверждение.
+        if edit_ev.isdigit():
+            event = await events_service.get_event(db, user, int(edit_ev))
+            if event is not None:
+                extra["show_event_form"] = True
+                extra["event_type"] = event.type
+                extra["edit_event"] = event
+        elif add_ev == "1":
+            extra["show_event_type_picker"] = True
+        elif add_ev in diary_feed.EVENT_TYPES:
+            extra["show_event_form"] = True
+            extra["event_type"] = add_ev
+        elif add_ev or error in ("event", "event_future"):
+            extra["show_event_type_picker"] = True
+        if confirm_delete_ev.isdigit():
+            event = await events_service.get_event(db, user, int(confirm_delete_ev))
+            if event is not None:
+                extra["confirm_delete_ev"] = event
+        # Приём лекарства без измерения (0.6.2, §16.2, M1–M3): форма добавления
+        # не открывается поверх формы правки (ошибка правки — в её URL).
+        if not edit_int.isdigit() and (
+            intake or error in ("intake", "intake_future", "intake_measurement")
+        ):
+            extra["show_intake_form"] = True
+        if edit_int.isdigit():
+            log = await _owned_intake(db, user, int(edit_int))
+            if log is not None and log.source == "cabinet" and not await _intake_is_journal(
+                db, user, log
+            ):
+                med = next((m for m in medications if m.id == log.medication_id), None)
+                if med is not None:
+                    extra["intake_edit"] = diary_feed.IntakeEditRow(
+                        log=log, name=med.name, dosage=med.dosage, editable=True
+                    )
+        if confirm_delete_int.isdigit():
+            log = await _owned_intake(db, user, int(confirm_delete_int))
+            if log is not None and log.source == "cabinet" and not await _intake_is_journal(
+                db, user, log
+            ):
+                med = next((m for m in medications if m.id == log.medication_id), None)
+                if med is not None:
+                    extra["confirm_delete_int"] = diary_feed.IntakeEditRow(
+                        log=log, name=med.name, dosage=med.dosage, editable=True
+                    )
+        if confirm_revoke.isdigit():
+            pair = next(
+                (
+                    pair
+                    for pair in (await doctor_service.links_for_patient(db, user.id))
+                    if pair[0].doctor_id == int(confirm_revoke)
+                    and pair[0].status in ("pending", "active")
+                ),
+                None,
+            )
+            if pair is not None:
+                link, doctor = pair
+                extra["confirm_revoke"] = {
+                    "id": link.doctor_id,
+                    "label": doctor_service.doctor_label(doctor),
+                }
         return await _dashboard_response(
             request, db, web_user, days, date_from, date_to, error, saved, extra,
-            user=user, shown=shown,
+            user=user, shown=shown, filt=filt,
         )
 
     # ───────────────────── Профиль ─────────────────────
@@ -1306,6 +1630,9 @@ def create_app(
         user.target_systolic = target_systolic
         user.target_diastolic = target_diastolic
         user.timezone = tz_name
+        # Крупный режим (0.6.2, §16.2, U1 = Б): общая настройка с ботом
+        # (`users.ui_large`, не `web_users`).
+        user.ui_large = bool(form.get("ui_large"))
         await db.flush()
         return RedirectResponse(url="/?saved=profile", status_code=303)
 
@@ -1826,6 +2153,307 @@ def create_app(
             await db.commit()
         return RedirectResponse(url="/?saved=measurement#history", status_code=303)
 
+    # ───────────────────── События дневника (0.6.2, §16.2, §4.18) ─────────────────────
+
+    async def _moment_has_measurement(
+        db: AsyncSession, user: User, moment: datetime
+    ) -> bool:
+        """Есть ли измерение в минутном слоте момента (§16.2, §7.2: секунды не считаются).
+
+        Запрет совпадения момента формы приёма с моментом любого измерения —
+        UX-защита standalone-редактора от «конверсии» в журнал записи (§4.11).
+        """
+        start = moment.astimezone(timezone.utc).replace(second=0, microsecond=0)
+        row = (
+            await db.execute(
+                select(Measurement.id)
+                .where(
+                    Measurement.user_id == user.id,
+                    Measurement.timestamp >= start,
+                    Measurement.timestamp < start + timedelta(minutes=1),
+                )
+                .limit(1)
+            )
+        ).first()
+        return row is not None
+
+    @app.post("/events")
+    async def event_add(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Добавить событие дневника (§16.2, S1 = Г): момент — любой прошедший.
+
+        `measurement_id` никогда не заполняется — привязку к измерению создаёт
+        только бот («➕ Фактор», §6.3). Событие `sleep` — не более одной оценки
+        на локальные сутки момента: повтор (в т.ч. задним числом) обновляет
+        (`upsert_sleep` по локальной дате момента, §7.2).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        type_ = str(form.get("type", ""))
+        try:
+            values = diary_feed.parse_event_form(form, type_, user.timezone, with_moment=True)
+        except diary_feed.EventFormError as exc:
+            code = "event_future" if exc.code == "future" else "event"
+            return RedirectResponse(
+                url=f"/?add_ev={type_ or '1'}&error={code}#history", status_code=303
+            )
+        moment = values["moment"] or datetime.now(timezone.utc)
+        if type_ == "sleep":
+            event = await events_service.upsert_sleep(
+                db,
+                user,
+                moment.astimezone(ZoneInfo(user.timezone)).date(),
+                str(form.get("rating", "")),
+                moment,
+            )
+            if values["note"] is not None:
+                event.note = values["note"]
+            await db.flush()
+        else:
+            await events_service.create_event(
+                db, user, type_, moment, note=values["note"], payload=values["payload"]
+            )
+        await db.commit()
+        return RedirectResponse(url="/?saved=event#history", status_code=303)
+
+    @app.post("/events/{event_id}")
+    async def event_update(
+        event_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Правка события (§16.2): меняются только `payload` / `note` / момент.
+
+        Момент linked-события и `sleep` не редактируется (поле не показывается);
+        привязку `measurement_id` сменить нельзя — ни снять, ни добавить. Чужое
+        или удалённое событие — 404 (§7.1); события, созданные ботом, править
+        можно (общие данные, §1).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        event = await events_service.get_event(db, user, event_id)
+        if event is None:
+            raise HTTPException(status_code=404)
+        with_moment = event.measurement_id is None and event.type != "sleep"
+        try:
+            values = diary_feed.parse_event_form(
+                form, event.type, user.timezone, with_moment=with_moment
+            )
+        except diary_feed.EventFormError as exc:
+            code = "event_future" if exc.code == "future" else "event"
+            return RedirectResponse(
+                url=f"/?edit_ev={event_id}&error={code}#history", status_code=303
+            )
+        updated = await events_service.update_event(
+            db,
+            user,
+            event_id,
+            moment=values["moment"],
+            note=values["note"],
+            payload=values["payload"],
+        )
+        if updated is None:  # pragma: no cover — удалено между чтением и UPDATE
+            raise HTTPException(status_code=404)
+        if values["note"] is None:
+            updated.note = None  # update_event не пишет None («поле не передано»)
+        await db.commit()
+        return RedirectResponse(url="/?saved=event#history", status_code=303)
+
+    @app.post("/events/{event_id}/delete")
+    async def event_delete(
+        event_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Удалить событие целиком (§16.2): чип «Фактор» исчезает, запись цела.
+
+        Только после подтверждения блоком; чужое или уже удалённое событие —
+        404 (§7.1).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        if not await events_service.delete_event(db, user, event_id):
+            raise HTTPException(status_code=404)
+        await db.commit()
+        return RedirectResponse(url="/?saved=event#history", status_code=303)
+
+    # ───────────────────── Приём лекарства без измерения (0.6.2, §16.2) ─────────────────────
+
+    @app.post("/intakes")
+    async def intake_add(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """«💊 Отметить приём» без измерения (§16.2, M1–M3).
+
+        На каждый слот — `log_slot_intake` (`upgrade_skipped=True`,
+        `source='cabinet'`): дедуп за локальные сутки по `medication_id`,
+        «пропущено» / «частично» при решении «Принято» переводится в `taken`
+        (апгрейд действует и на строки бота — исключение из M3, §16.2).
+        Момент не может совпадать до минуты с моментом любого измерения.
+        Создана хотя бы одна строка `taken` (включая апгрейд) и задан
+        `users.med_remeasure_delay` — строка NULL-повтора замера
+        (`insert_remeasure_row`, §6.7): job поставит тик бота (до минуты).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        try:
+            moment, decisions = diary_feed.parse_intake_form(form, user.timezone)
+        except diary_feed.IntakeFormError as exc:
+            code = "intake_future" if exc.code == "future" else "intake"
+            return RedirectResponse(
+                url=f"/?intake=1&error={code}#history", status_code=303
+            )
+        if await _moment_has_measurement(db, user, moment):
+            return RedirectResponse(
+                url="/?intake=1&error=intake_measurement#history", status_code=303
+            )
+        slots = {
+            med.id: med.slot for med in await medications_service.list_medications(db, user)
+        }
+        any_taken = False
+        for slot in medications_service.SLOTS:
+            slot_decisions = {
+                med_id: status
+                for med_id, status in decisions.items()
+                if slots.get(med_id) == slot
+            }
+            if not slot_decisions:
+                continue
+            result = await medications_service.log_slot_intake(
+                db,
+                user,
+                slot,
+                slot_decisions,
+                timestamp=moment,
+                upgrade_skipped=True,
+                source="cabinet",
+            )
+            any_taken = any_taken or bool(result.taken)
+            await db.commit()  # короткие транзакции; лок приёмов берёт сервис
+        if any_taken and user.med_remeasure_delay:
+            await insert_remeasure_row(db, user.id, user.med_remeasure_delay)
+            await db.commit()
+        return RedirectResponse(url="/?saved=intake#history", status_code=303)
+
+    async def _intake_guard(
+        db: AsyncSession, user: User, log: MedicationLog
+    ) -> Optional[Response]:
+        """Права standalone-правки строки приёма (§16.2, M3 = В): None — можно.
+
+        Журнал записи (пара §4.11) — «формой измерения»; строка `source='bot'`
+        — только просмотр; чужая строка сюда не доходит (`_owned_intake`).
+        """
+        if await _intake_is_journal(db, user, log):
+            return RedirectResponse(url="/?error=intake_linked#history", status_code=303)
+        if log.source != "cabinet":
+            return RedirectResponse(url="/?error=intake_viewonly#history", status_code=303)
+        return None
+
+    @app.post("/intakes/{log_id}")
+    async def intake_update(
+        log_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Правка standalone-приёма (§16.2): статус и момент, с валидациями момента.
+
+        Только свои строки `source='cabinet'`, не являющиеся журналом записи
+        (`WHERE id=? AND user_id=?`; чужая — 404, §7.1).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        log = await _owned_intake(db, user, log_id)
+        if log is None:
+            raise HTTPException(status_code=404)
+        denied = await _intake_guard(db, user, log)
+        if denied is not None:
+            return denied
+        try:
+            status, moment = diary_feed.parse_intake_edit(form, user.timezone)
+        except diary_feed.IntakeFormError as exc:
+            code = "intake_future" if exc.code == "future" else "intake"
+            return RedirectResponse(
+                url=f"/?edit_int={log_id}&error={code}#history", status_code=303
+            )
+        if await _moment_has_measurement(db, user, moment):
+            return RedirectResponse(
+                url=f"/?edit_int={log_id}&error=intake_measurement#history",
+                status_code=303,
+            )
+        async with medications_service.intake_lock():
+            log.status = status
+            log.timestamp = moment
+            await db.flush()
+            await db.commit()
+        return RedirectResponse(url="/?saved=intake#history", status_code=303)
+
+    @app.post("/intakes/{log_id}/delete")
+    async def intake_delete(
+        log_id: int,
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """Удалить standalone-приём (§16.2): только после подтверждения блоком.
+
+        Те же права, что у правки (M3 = В); чужая строка — 404 (§7.1). Удаление
+        отметки снимает job повтора замера — тик бота (§6.7).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        log = await _owned_intake(db, user, log_id)
+        if log is None:
+            raise HTTPException(status_code=404)
+        denied = await _intake_guard(db, user, log)
+        if denied is not None:
+            return denied
+        async with medications_service.intake_lock():
+            await db.delete(log)
+            await db.flush()
+            await db.commit()
+        return RedirectResponse(url="/?saved=intake#history", status_code=303)
+
+    # ───────────────────── Мой врач (0.6.2, §16.2, W1 = Б) ─────────────────────
+
+    @app.post("/doctor/revoke")
+    async def doctor_revoke(
+        request: Request,
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """«Отозвать доступ» врача из ЛК: `doctor_patients.status='revoked'`.
+
+        И закрытие согласия на врача — как «Отозвать доступ» в боте (§21).
+        Уведомление врачу в Telegram не отправляется (кабинет пишет только
+        строки, §6.13); доступ закрывается немедленно, отзыв обратим повторным
+        приглашением врача (§16.2).
+        """
+        form = await request.form()
+        check_csrf(request, str(form.get("csrf_token", "")))
+        user = await load_user(db, web_user)
+        raw = str(form.get("doctor_id", ""))
+        if not raw.isdigit():
+            return RedirectResponse(url="/?error=doctor#doctor", status_code=303)
+        doctor_id = int(raw)
+        if not await doctor_service.revoke_access(db, user.id, doctor_id):
+            return RedirectResponse(url="/?error=doctor#doctor", status_code=303)
+        await consent_service.withdraw_doctor(db, user.id, doctor_id)
+        return RedirectResponse(url="/?saved=doctor#doctor", status_code=303)
+
     # ───────────────────── Импорт CSV ─────────────────────
 
     @app.post("/import")
@@ -2023,6 +2651,38 @@ def create_app(
             headers={
                 "Content-Disposition": (
                     f'attachment; filename="{csv_export.file_name("meds", start_day, end_day)}"'
+                )
+            },
+        )
+
+    @app.get("/export/events.csv")
+    async def export_events_csv(
+        request: Request,
+        days: str = Query("7"),
+        date_from: str = Query(""),
+        date_to: str = Query(""),
+        db: AsyncSession = Depends(get_db),
+        web_user: WebUser = Depends(require_user),
+    ) -> Response:
+        """CSV событий дневника за период (0.6.2, §10): третий файл выгрузки.
+
+        Колонки `moment;type;summary;note` — `summary` только payload-часть
+        по словарю §10 (сервис `csv_export.export_events`); имя файла —
+        `bp_events_<дата1>-<дата2>.csv`.
+        """
+        user = await load_user(db, web_user)
+        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        payload = await csv_export.export_events(
+            db, user, start_day, end_day, limit=CSV_EXPORT_LIMIT
+        )
+        if payload is None:
+            return RedirectResponse(url="/?error=too_many", status_code=303)
+        return Response(
+            content=payload,
+            media_type="text/csv; charset=utf-8",
+            headers={
+                "Content-Disposition": (
+                    f'attachment; filename="{csv_export.file_name("bp_events", start_day, end_day)}"'
                 )
             },
         )
@@ -2300,6 +2960,7 @@ def create_app(
         date_from: str = Query(""),
         date_to: str = Query(""),
         shown: str = Query(""),
+        ev: str = Query(""),
         db: AsyncSession = Depends(get_db),
         doctor: Doctor = Depends(require_doctor),
     ) -> Response:
@@ -2307,8 +2968,11 @@ def create_app(
 
         Только чтение: врач не редактирует записи пациента, добавляет лишь
         заметки (§21, «Логика для врача»). История — тем же компонентом по
-        дням, что в ЛК (§16.2, 0.5.9), без колонки действий; `?shown=N` —
-        глубина показа как в ЛК.
+        дням, что в ЛК (§16.2, 0.5.9), без колонки действий; с 0.6.2 (п. 27) —
+        смешанная лента событий и standalone-приёмов с чипами «Фактор» (только
+        чтение, §21) и блок «Лекарства пациента»; `?ev={id}` — карточка
+        просмотра события (полный `note` и payload). `?shown=N` — глубина
+        показа как в ЛК.
         """
         user = await require_patient_link(db, doctor, user_id)
         start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
@@ -2317,6 +2981,29 @@ def create_app(
         daily = _daily_averages(measurements, user.timezone, start_day, end_day)
         medication_cells = await medications_service.medication_cells(db, user, measurements)
         notes = await doctor_service.notes_for_patient(db, user.id)
+        medications = await medications_service.list_medications(db, user)
+        feed_events, feed_intakes, linked_med_ids = await _feed_data(
+            db, user, start_day, end_day, measurements
+        )
+        # Карточка просмотра события (§21): полный `note` и payload, без правки.
+        ev_view: Optional[dict] = None
+        if ev.isdigit():
+            event = await events_service.get_event(db, user, int(ev))
+            if event is not None:
+                payload = diary_feed.payload_dict(event)
+                ev_view = {
+                    "event": event,
+                    "emoji": texts.EVENT_EMOJI.get(event.type, "📝"),
+                    "kind_line": texts.event_kind_line(event.type, payload),
+                    "moment_str": (
+                        None
+                        if event.type == "sleep"
+                        else event.moment.astimezone(ZoneInfo(user.timezone)).strftime(
+                            "%d.%m.%Y %H:%M"
+                        )
+                    ),
+                    "note": event.note or "",
+                }
         csrf_token = csrf.issue()
         response = _templates.TemplateResponse(
             request,
@@ -2333,6 +3020,9 @@ def create_app(
                 "daily": daily,
                 "daily_max_days": DAILY_AVERAGES_MAX_DAYS,
                 "notes": notes,
+                "medications": medications,
+                "med_slot_order": medications_service.SLOTS,
+                "slot_labels": texts.SLOT_LABELS,
                 "chart": _chart_payload(measurements, user.timezone),
                 "chart_zones": CHART_ZONES,
                 "days": days,
@@ -2347,8 +3037,14 @@ def create_app(
                     start_day,
                     end_day,
                     shown,
+                    events=feed_events,
+                    intakes=feed_intakes,
+                    linked_med_ids=linked_med_ids,
                 ),
                 "history_can_edit": False,
+                "history_view_prefix": f"/doctor/patient/{user.id}",
+                "intake_status_labels": diary_feed.INTAKE_STATUS_LABELS,
+                "ev_view": ev_view,
                 "error": request.query_params.get("error", ""),
                 "saved": request.query_params.get("saved", ""),
                 "csrf_token": csrf_token,

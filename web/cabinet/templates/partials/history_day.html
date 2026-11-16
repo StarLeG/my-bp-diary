@@ -1,6 +1,11 @@
 {# Один день «Истории записей» (§16.2, 0.5.9): общий partial ЛК и врача (§21).
    У врача history_can_edit = false — без колонки действий (только чтение).
-   Период ≤ 7 дней — без свёртки (history.flat), иначе — <details>. #}
+   С 0.6.2 (п. 27) — смешанная лента дня: измерения (текущая таблица), события
+   дневника и standalone-приёмы строками «💊 Приём лекарств: …» по времени;
+   журнал записи измерений отдельно не рендерится (§4.11). Чипы «Фактор»
+   («☕ Кофе») — в строке своего измерения; у врача событие открывает карточку
+   просмотра `?ev={id}`. Период ≤ 7 дней — без свёртки (history.flat),
+   иначе — <details>. #}
 {% set day_table %}
   <div class="table-scroll">
     <table class="stacked-table">
@@ -17,23 +22,57 @@
         </tr>
       </thead>
       <tbody>
-        {% for m in day.rows %}
-          {% set zone = row_zone(m.systolic, m.diastolic) %}
-          <tr{% if zone %} class="zone-row {{ zone.css_class }}" style="--zone-fill: {{ zone.fill }}" title="{{ zone.title }}"{% endif %}>
-            <td data-label="Время">{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
-            <td data-label="Сист.">{{ m.systolic }}</td>
-            <td data-label="Диаст.">{{ m.diastolic }}</td>
-            <td data-label="Пульс">{{ m.pulse if m.pulse is not none else "—" }}</td>
-            <td data-label="Лекарство">{{ medication_cells[m.id] }}</td>
-            <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
-            <td data-label="Заметка" class="note">{{ m.note or "" }}</td>
-            {% if history_can_edit %}
-              <td data-label="Действия" class="actions">
-                <a class="btn btn-ghost" href="/?edit={{ m.id }}#history" title="Изменить">✏️</a>
-                <a class="btn-del" href="/?confirm_delete={{ m.id }}#history" title="Удалить">🗑</a>
+        {% for item in day.feed %}
+          {% if item.kind == "bp" %}
+            {% set m = item.measurement %}
+            {% set zone = row_zone(m.systolic, m.diastolic) %}
+            <tr{% if zone %} class="zone-row {{ zone.css_class }}" style="--zone-fill: {{ zone.fill }}" title="{{ zone.title }}"{% endif %}>
+              <td data-label="Время">{{ m.timestamp.astimezone(user_zone).strftime("%H:%M") }}</td>
+              <td data-label="Сист.">{{ m.systolic }}</td>
+              <td data-label="Диаст.">{{ m.diastolic }}</td>
+              <td data-label="Пульс">{{ m.pulse if m.pulse is not none else "—" }}</td>
+              <td data-label="Лекарство">{{ medication_cells[m.id] }}</td>
+              <td data-label="Самочувствие">{{ feeling_labels.get(m.feeling, "—") if m.feeling else "—" }}</td>
+              <td data-label="Заметка" class="note">
+                {%- for chip_emoji, chip_label in history.chips.get(m.id, []) %}
+                  <span class="factor-chip">{{ chip_emoji }} {{ chip_label }}</span>
+                {%- endfor %}
+                {{- m.note or "" -}}
               </td>
-            {% endif %}
-          </tr>
+              {% if history_can_edit %}
+                <td data-label="Действия" class="actions">
+                  <a class="btn btn-ghost" href="/?edit={{ m.id }}#history" title="Изменить">✏️</a>
+                  <a class="btn-del" href="/?confirm_delete={{ m.id }}#history" title="Удалить">🗑</a>
+                </td>
+              {% endif %}
+            </tr>
+          {% elif item.kind == "event" %}
+            <tr class="feed-row feed-event">
+              <td class="feed-line" colspan="{{ 8 if history_can_edit else 7 }}">
+                {% if history_can_edit %}
+                  <span class="feed-text">{{ event_row_text(item.event, user.timezone) }}</span>
+                  <span class="actions">
+                    <a class="btn btn-ghost" href="/?edit_ev={{ item.event.id }}#history" title="Изменить">✏️</a>
+                    <a class="btn-del" href="/?confirm_delete_ev={{ item.event.id }}#history" title="Удалить">🗑</a>
+                  </span>
+                {% else %}
+                  <a class="feed-link" href="{{ history_view_prefix }}?ev={{ item.event.id }}#history">{{ event_row_text(item.event, user.timezone) }}</a>
+                {% endif %}
+              </td>
+            </tr>
+          {% else %}
+            <tr class="feed-row feed-intake">
+              <td class="feed-line" colspan="{{ 8 if history_can_edit else 7 }}">
+                <span class="feed-text">{{ intake_row_text(item.intake, user.timezone) }}</span>
+                {% if history_can_edit and item.intake.editable %}
+                  <span class="actions">
+                    <a class="btn btn-ghost" href="/?edit_int={{ item.intake.log.id }}#history" title="Изменить">✏️</a>
+                    <a class="btn-del" href="/?confirm_delete_int={{ item.intake.log.id }}#history" title="Удалить">🗑</a>
+                  </span>
+                {% endif %}
+              </td>
+            </tr>
+          {% endif %}
         {% endfor %}
       </tbody>
     </table>
@@ -41,8 +80,10 @@
 {% endset %}
 {% set day_head %}
   <span class="history-day-title">{{ day.label }}</span>
-  <span class="history-day-meta">· {{ day.count_text }} · в среднем {{ day.avg }} ·</span>
-  <span class="day-dot" title="{{ day.zone.title }}">{{ day.zone.dot }}</span>
+  {% if day.count %}
+    <span class="history-day-meta">· {{ day.count_text }} · в среднем {{ day.avg }} ·</span>
+    <span class="day-dot" title="{{ day.zone.title }}">{{ day.zone.dot }}</span>
+  {% endif %}
 {% endset %}
 {% if history.flat %}
   <section class="history-day history-day-flat">

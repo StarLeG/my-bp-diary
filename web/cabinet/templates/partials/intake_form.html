@@ -1,0 +1,108 @@
+{# «💊 Отметить приём» без измерения и правка standalone-приёма (0.6.2, §16.2,
+   M1–M3). Лекарства по слотам со статусом каждого; момент — «Сейчас» по
+   умолчанию (поля даты и времени текущими значениями) или любой прошедший.
+   Уже `taken` за локальные сутки — отмечено и заблокировано (повторная отметка
+   ничего не меняет). У строки `source='bot'` и журнала записи правки нет —
+   только просмотр (M3 = В). CSRF — hidden-поле. #}
+{% if show_intake_form %}
+  <h3>💊 Отметить приём</h3>
+  <form method="post" action="/intakes" class="stack form-narrow" id="intake-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <div class="row">
+      <label>
+        Дата
+        <input type="date" name="date" value="{{ today.isoformat() }}" max="{{ today.isoformat() }}" required>
+      </label>
+      <label>
+        Время
+        <input type="time" name="time" value="{{ now_local.strftime('%H:%M') }}" required>
+      </label>
+    </div>
+    {% if not intake_meds %}
+      <p class="muted">
+        У вас пока нет добавленных лекарств.
+        <a href="#medications">Перейти в Управление лекарствами</a>
+      </p>
+    {% else %}
+      {% for slot, rows in intake_meds %}
+        <fieldset class="med-pick-group">
+          <legend class="med-group-title">{{ slot_labels[slot] }}</legend>
+          {% for row in rows %}
+            <div class="intake-row">
+              <span class="intake-name">{{ row.med.name }}{{ " (" + row.med.dosage + ")" if row.med.dosage else "" }}</span>
+              {% if row.taken_today %}
+                <select name="status_{{ row.med.id }}" disabled>
+                  <option value="taken" selected>Принято ✓</option>
+                </select>
+              {% else %}
+                <select name="status_{{ row.med.id }}">
+                  <option value="" selected>—</option>
+                  {% for status in intake_status_order %}
+                    <option value="{{ status }}">{{ intake_status_labels[status] }}</option>
+                  {% endfor %}
+                </select>
+              {% endif %}
+            </div>
+          {% endfor %}
+        </fieldset>
+      {% endfor %}
+    {% endif %}
+    <div class="row">
+      <button type="submit" class="btn">Отметить</button>
+      <a class="btn btn-ghost" href="/#history">Отмена</a>
+    </div>
+  </form>
+{% endif %}
+
+{% if intake_edit %}
+  <h3>Изменить приём</h3>
+  <form method="post" action="/intakes/{{ intake_edit.log.id }}" class="stack form-narrow" id="intake-edit-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <p class="muted">
+      {{ intake_edit.name }}{{ " (" + intake_edit.dosage + ")" if intake_edit.dosage else "" }}
+      · {{ slot_labels[intake_edit.log.slot] }}
+    </p>
+    <div class="row">
+      <label>
+        Дата
+        <input type="date" name="date"
+               value="{{ intake_edit.log.timestamp.astimezone(user_zone).strftime('%Y-%m-%d') }}"
+               max="{{ today.isoformat() }}" required>
+      </label>
+      <label>
+        Время
+        <input type="time" name="time"
+               value="{{ intake_edit.log.timestamp.astimezone(user_zone).strftime('%H:%M') }}" required>
+      </label>
+    </div>
+    <label>
+      Статус
+      <select name="status">
+        {% for status in intake_status_order %}
+          <option value="{{ status }}" {% if intake_edit.log.status == status %}selected{% endif %}>
+            {{ intake_status_labels[status] }}
+          </option>
+        {% endfor %}
+      </select>
+    </label>
+    <div class="row">
+      <button type="submit" class="btn">Сохранить</button>
+      <a class="btn btn-ghost" href="/#history">Отмена</a>
+    </div>
+  </form>
+{% endif %}
+
+{% if confirm_delete_int %}
+  <div class="alert alert-error">
+    <p>
+      Удалить «{{ intake_label(confirm_delete_int) }}»? Это действие нельзя отменить.
+    </p>
+    <div class="row">
+      <form method="post" action="/intakes/{{ confirm_delete_int.log.id }}/delete" class="inline">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        <button type="submit" class="btn btn-danger">Удалить</button>
+      </form>
+      <a class="btn btn-ghost" href="/#history">Отмена</a>
+    </div>
+  </div>
+{% endif %}

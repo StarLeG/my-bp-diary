@@ -7,7 +7,7 @@
   <link rel="stylesheet" href="/static/style.css">
   <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js" defer></script>
 </head>
-<body>
+<body{% if user.ui_large %} class="ui-large"{% endif %}>
   <header class="topbar">
     <div class="container topbar-row">
       <strong>Дневник гипертоника</strong>
@@ -26,6 +26,7 @@
     <a href="#medications">Лекарства</a>
     <a href="#reminders">Напоминания</a>
     <a href="#doctor-notes">Заметки врача</a>
+    <a href="#doctor">Мой врач</a>
   </nav>
 
   <main class="container">
@@ -59,6 +60,20 @@
       <p class="alert alert-error">Слишком длинно — до 4000 символов.</p>
     {% elif error == "conc_limit" %}
       <p class="alert alert-error">Заключений уже 5. Удалите ненужные, чтобы добавить новое.</p>
+    {% elif error == "event" %}
+      <p class="alert alert-error">Не удалось сохранить событие: проверьте поля.</p>
+    {% elif error in ("event_future", "intake_future") %}
+      <p class="alert alert-error">Время измерения не может быть в будущем</p>
+    {% elif error == "intake" %}
+      <p class="alert alert-error">Не удалось отметить приём: проверьте поля.</p>
+    {% elif error == "intake_measurement" %}
+      <p class="alert alert-error">На это время уже есть измерение — отметьте приём в форме измерения</p>
+    {% elif error == "intake_viewonly" %}
+      <p class="alert alert-error">Этот приём можно только просмотреть.</p>
+    {% elif error == "intake_linked" %}
+      <p class="alert alert-error">Приём входит в запись измерения — измените его в форме измерения.</p>
+    {% elif error == "doctor" %}
+      <p class="alert alert-error">Не удалось отозвать доступ.</p>
     {% elif saved == "profile" %}
       <p class="alert alert-ok">Профиль сохранён.</p>
     {% elif saved == "medication" %}
@@ -69,6 +84,12 @@
       <p class="alert alert-ok">Визиты и анализы обновлены.</p>
     {% elif saved == "measurement" %}
       <p class="alert alert-ok">Запись сохранена.</p>
+    {% elif saved == "event" %}
+      <p class="alert alert-ok">Событие сохранено.</p>
+    {% elif saved == "intake" %}
+      <p class="alert alert-ok">Приёмы обновлены.</p>
+    {% elif saved == "doctor" %}
+      <p class="alert alert-ok">Доступ врача отозван.</p>
     {% endif %}
 
     <!-- ── Личная карточка ── -->
@@ -181,6 +202,10 @@
           Новый пароль (оставьте пустым, чтобы не менять)
           <input type="password" name="new_password" minlength="8" maxlength="128" autocomplete="new-password">
         </label>
+        <label class="check">
+          <input type="checkbox" name="ui_large" value="1" {% if user.ui_large %}checked{% endif %}>
+          Крупный режим
+        </label>
         <button type="submit" class="btn">Сохранить</button>
       </form>
     </section>
@@ -242,6 +267,9 @@
         <a class="btn btn-ghost" href="/export/medications.csv?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
           Скачать CSV лекарств
         </a>
+        <a class="btn btn-ghost" href="/export/events.csv?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
+          Скачать CSV событий
+        </a>
         <a class="btn btn-ghost" href="/export/report.pdf?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}">
           Скачать PDF
         </a>
@@ -254,6 +282,8 @@
 
       <div class="row">
         <a class="btn" href="/?add=1#history">➕ Добавить измерение</a>
+        <a class="btn" href="/?add_ev=1#history">➕ Добавить событие</a>
+        <a class="btn" href="/?intake=1#history">💊 Отметить приём</a>
         <a class="btn btn-ghost" href="/?import=1#history">📥 Импорт CSV</a>
       </div>
 
@@ -269,6 +299,9 @@
           </div>
         </div>
       {% endif %}
+
+      {% include "partials/event_form.html" %}
+      {% include "partials/intake_form.html" %}
 
       {% if show_add_form %}
         <h3>{% if edit_measurement %}Изменить запись{% else %}Добавить запись{% endif %}</h3>
@@ -440,8 +473,21 @@
         </form>
       {% endif %}
 
-      {% if not measurements %}
-        <p>За этот период записей нет.</p>
+      {# Чипы-фильтры смешанной ленты (0.6.2, §16.2): «Все» / «Давление» /
+         «Лекарства» / «Факторы» / «Другое» — состояние в URL (?filt=…). #}
+      <div class="filter-chips">
+        {% for key in filter_order %}
+          <a class="filter-chip{% if filt == key %} filter-chip-active{% endif %}"
+             href="/?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}{% if key != 'all' %}&filt={{ key }}{% endif %}#history">{{ filter_labels[key] }}</a>
+        {% endfor %}
+      </div>
+
+      {% if not history.days %}
+        {% if filt != "all" %}
+          <p>В этой категории записей нет</p>
+        {% else %}
+          <p>За этот период записей нет.</p>
+        {% endif %}
       {% else %}
         {% include "partials/history_zone_legend.html" %}
         {% if not history.flat %}
@@ -457,7 +503,7 @@
         </div>
         {% if history.more_shown %}
           <div class="row">
-            <a class="btn btn-ghost" href="/?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}&shown={{ history.more_shown }}#history">
+            <a class="btn btn-ghost" href="/?days={{ days }}&date_from={{ date_from }}&date_to={{ date_to }}&shown={{ history.more_shown }}{% if filt != 'all' %}&filt={{ filt }}{% endif %}#history">
               Показать ещё 30 дней
             </a>
           </div>
@@ -720,6 +766,43 @@
             <li>
               <span class="muted">{{ note.created_at.strftime("%d.%m.%Y %H:%M") }} — {{ note_doctor.name }}</span><br>
               {{ note.text }}
+            </li>
+          {% endfor %}
+        </ul>
+      {% endif %}
+    </section>
+
+    <!-- ── Мой врач (0.6.2, §16.2, W1 = Б; добавление — только в боте) ── -->
+    <section class="card" id="doctor">
+      <h2>Мой врач</h2>
+
+      {% if confirm_revoke %}
+        <div class="alert">
+          <p>Отозвать доступ врача «{{ confirm_revoke.label }}»?</p>
+          <div class="row">
+            <form method="post" action="/doctor/revoke" class="inline">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+              <input type="hidden" name="doctor_id" value="{{ confirm_revoke.id }}">
+              <button type="submit" class="btn">Отозвать доступ</button>
+            </form>
+            <a class="btn btn-ghost" href="/#doctor">Отмена</a>
+          </div>
+        </div>
+      {% endif %}
+
+      {% if not doctor_links %}
+        <p>Врач пока не добавлен. Добавить врача можно в боте.</p>
+      {% else %}
+        <ul class="facts">
+          {% for link in doctor_links %}
+            <li>
+              <strong>{{ link.label }}</strong>
+              <span class="muted">— {{ link.status_label }}</span>
+              {% if link.status in ("pending", "active") %}
+                <div class="row">
+                  <a class="btn btn-danger-ghost" href="/?confirm_revoke={{ link.id }}#doctor">Отозвать доступ</a>
+                </div>
+              {% endif %}
             </li>
           {% endfor %}
         </ul>

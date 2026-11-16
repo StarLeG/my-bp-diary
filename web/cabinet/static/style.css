@@ -924,3 +924,233 @@ details.history-day[open] > summary .history-day-title::before {
   opacity: 0.55;
   cursor: not-allowed;
 }
+
+/* ── 0.6.2: смешанная лента дня, события, приёмы, «Мой врач» (§16.2) ── */
+
+/* Чипы-фильтры над историей («Все» / «Давление» / «Лекарства» / «Факторы» /
+   «Другое») — состояние в URL, без JS. */
+.filter-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 12px 0;
+}
+
+.filter-chip {
+  display: inline-block;
+  padding: 6px 14px;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-surface);
+  color: var(--color-text);
+  text-decoration: none;
+  font-size: 0.92rem;
+}
+
+.filter-chip:hover,
+.filter-chip:focus {
+  background: #e6f0fa;
+}
+
+.filter-chip-active {
+  background: var(--color-primary);
+  border-color: var(--color-primary);
+  color: #ffffff;
+  font-weight: 600;
+}
+
+.filter-chip-active:hover,
+.filter-chip-active:focus {
+  background: var(--color-primary-dark);
+}
+
+/* Чипы «Фактор» в строке измерения («☕ Кофе», §16.2, §6.3). */
+.factor-chip {
+  display: inline-block;
+  padding: 2px 10px;
+  margin: 0 6px 4px 0;
+  border: 1px solid var(--color-border);
+  border-radius: 999px;
+  background: var(--color-bg);
+  color: var(--color-muted);
+  font-size: 0.85rem;
+  white-space: nowrap;
+}
+
+/* Строки событий и standalone-приёмов в таблице дня (§16.2, M1). */
+tr.feed-row td.feed-line {
+  border-bottom: 1px solid var(--color-border);
+}
+
+.feed-text {
+  overflow-wrap: anywhere;
+}
+
+.feed-link {
+  color: var(--color-text);
+  text-decoration: none;
+  overflow-wrap: anywhere;
+}
+
+.feed-link:hover,
+.feed-link:focus {
+  text-decoration: underline;
+}
+
+td.feed-line .actions {
+  margin-left: 12px;
+  white-space: nowrap;
+}
+
+/* Строка лекарства в форме «💊 Отметить приём»: название + статус. */
+.intake-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 12px;
+  align-items: center;
+  justify-content: space-between;
+  margin: 4px 0;
+}
+
+.intake-name {
+  font-weight: 600;
+}
+
+/* Карточка просмотра события у врача (0.6.2, §21): полный note. */
+.ev-view-note {
+  margin: 6px 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* ── Крупный режим ЛК (0.6.2, §16.2, U1 = Б): только рендер, без логики.
+   Глобально масштабируем rem (там, где браузер знает :has), ниже — точечные
+   размеры и отступы всех компонентов ЛК как fallback. ── */
+@supports selector(:has(*)) {
+  html:has(body.ui-large) {
+    font-size: 20px;
+  }
+}
+
+.ui-large {
+  font-size: 1.15rem;
+  line-height: 1.7;
+}
+
+.ui-large .card {
+  padding: 32px;
+}
+
+.ui-large .card h2 {
+  font-size: 1.55rem;
+}
+
+.ui-large .card h3 {
+  font-size: 1.25rem;
+}
+
+.ui-large .nav {
+  font-size: 1.12rem;
+  gap: 18px;
+}
+
+.ui-large table {
+  font-size: 1.12rem;
+}
+
+.ui-large th,
+.ui-large td {
+  padding: 12px 14px;
+}
+
+.ui-large .facts > div {
+  padding: 16px 20px;
+}
+
+.ui-large .facts dt {
+  font-size: 1rem;
+}
+
+.ui-large label {
+  font-size: 1.08rem;
+}
+
+.ui-large input[type="text"],
+.ui-large input[type="email"],
+.ui-large input[type="password"],
+.ui-large input[type="number"],
+.ui-large input[type="date"],
+.ui-large input[type="time"],
+.ui-large select,
+.ui-large textarea {
+  padding: 12px 14px;
+}
+
+.ui-large .btn {
+  padding: 13px 22px;
+}
+
+.ui-large .btn-del {
+  padding: 11px 15px;
+}
+
+.ui-large .alert {
+  font-size: 1.08rem;
+}
+
+.ui-large .muted,
+.ui-large .history-day-meta {
+  font-size: 1.05rem;
+}
+
+.ui-large .filter-chip,
+.ui-large .factor-chip {
+  font-size: 1.02rem;
+  padding: 8px 14px;
+}
+
+.ui-large .feed-text,
+.ui-large .feed-link {
+  font-size: 1.08rem;
+}
+
+.ui-large .med-group-title {
+  font-size: 1rem;
+}
+
+.ui-large .med-list li,
+.ui-large .intake-row {
+  margin: 6px 0;
+}
+
+.ui-large .event-card {
+  padding: 18px 22px;
+}
+
+.ui-large .event-title {
+  font-size: 1.2rem;
+}
+
+.ui-large .history-day {
+  padding: 0 20px 6px;
+}
+
+.ui-large .zone-legend {
+  font-size: 0.92rem;
+}
+
+@media (max-width: 767px) {
+  .ui-large .card {
+    padding: 20px;
+  }
+
+  /* Строки ленты на узких экранах — карточками без подписи-заглушки. */
+  .stacked-table td.feed-line {
+    display: block;
+    text-align: left;
+  }
+
+  .stacked-table td.feed-line::before {
+    content: none;
+  }
+}
