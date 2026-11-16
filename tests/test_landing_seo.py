@@ -116,7 +116,7 @@ class TestHead:
     def test_static_tailwind(self, html: str) -> None:
         assert "cdn.tailwindcss.com" not in html
         assert "tailwind.config" not in html
-        assert '<link rel="stylesheet" href="css/tailwind.css">' in html
+        assert '<link rel="stylesheet" href="css/tailwind.css?v=' in html  # ?v= — сброс 30-дневного кеша nginx
 
 
 @pytest.fixture(scope="module")
