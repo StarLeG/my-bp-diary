@@ -18,10 +18,20 @@ services:
     env_file: ../.env
     environment:
       DB_PATH: /app/data/bot.sqlite3
-      # Ссылки бота открываются браузером QA-контейнера внутри сети стенда.
-      CABINET_URL: http://cabinet:8000
+      # host.docker.internal:8002 — открывается и с машины, и из QA-контейнера
+      # (проба 2026-11-17: Telegram принимает такие имена в URL-кнопках,
+      # `cabinet`/`localhost` — нет). Порт 8001 занят другим сервисом.
+      CABINET_URL: http://host.docker.internal:8002
+      # Анти-спам (§7.2) на тестовом стенде выключен: свободные нажатия
+      # при ручной проверке и роботах (0.7.0).
+      DEBOUNCE_SECONDS: 0
+      THROTTLE_SECONDS: 0
     volumes:
       - qa-data:/app/data
+      # Хартбит статус-строки лендинга (0.7.0, ST2-А): тик пишет
+      # web/landing/status.json — отдаётся статикой локального лендинга.
+      # Путь от compose-файла в qa/ — поэтому `../web/landing`.
+      - ../web/landing:/app/web/landing
     restart: unless-stopped
 
   cabinet:
@@ -33,7 +43,12 @@ services:
     env_file: ../.env
     environment:
       DB_PATH: /app/data/bot.sqlite3
-      CABINET_URL: http://cabinet:8000
+      CABINET_URL: http://host.docker.internal:8002
+    ports:
+      # Для ручной проверки с машины: IP-адрес в ссылках — Telegram принимает
+      # его в URL-кнопках (проба 2026-11-17), `cabinet`/`localhost` — нет.
+      # 8001 занят другим сервисом — здесь 8002.
+      - "127.0.0.1:8002:8000"
     volumes:
       - qa-data:/app/data
     healthcheck:
@@ -68,6 +83,11 @@ services:
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
       TELEGRAM_TEST_PHONE: ${TELEGRAM_TEST_PHONE}
       QA_BOT_USERNAME: ${QA_BOT_USERNAME}
+      # Как у бота: web-E2E сверяет ссылки ЛК и открывает их (ревью 2026-11-17).
+      CABINET_URL: http://host.docker.internal:8002
+    extra_hosts:
+      # Для запуска вне Docker Desktop (Linux): имя хоста → шлюз хоста.
+      - "host.docker.internal:host-gateway"
     volumes:
       - qa-data:/app/data
       - ./reports:/app/qa/reports

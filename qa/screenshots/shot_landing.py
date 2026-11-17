@@ -353,14 +353,18 @@ _DUMP_LAST = """
                     buttons: [...el.querySelectorAll('.reply-markup-button')].map(b => (b.innerText || '').trim())}))
 """
 
-#: Номер inline-кнопки последнего сообщения с подписью `label` (-1 — нет).
+#: Номер inline-кнопки в последнем пузыре **с кнопками** (экран бота).
+#: Посторонние сообщения (команды, ввод) без кнопок не перебивают поиск —
+#: найдено при съёмке 2026-11-17: `/visits` и `/cabinet` пользователя вставали
+#: последними пузырями и тап не находил кнопки экрана.
 _TG_BUTTON_INDEX = """
 (label) => {
   const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
   const text = el => { const c = el.cloneNode(true);
     c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
     return strip(c.textContent); };
-  const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
+  const all = [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')]
+      .filter(b => b.querySelector('.reply-markup-button'));
   if (!all.length) return -1;
   const buttons = [...all[all.length - 1].querySelectorAll('.reply-markup-button')];
   return buttons.findIndex(b => text(b) === strip(label));
@@ -368,14 +372,16 @@ _TG_BUTTON_INDEX = """
 """
 
 #: Как `_TG_BUTTON_INDEX`, но поиск по вхождению подписи — для кнопок с
-#: динамической датой («🩺 Кардиолог · ДД.ММ»).
+#: динамической датой («🩺 Кардиолог · ДД.ММ»). Тот же экран — последний
+#: пузырь с кнопками (устойчивость к посторонним сообщениям, 2026-11-17).
 _TG_BUTTON_INDEX_CONTAINS = """
 (label) => {
   const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
   const text = el => { const c = el.cloneNode(true);
     c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
     return strip(c.textContent); };
-  const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
+  const all = [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')]
+      .filter(b => b.querySelector('.reply-markup-button'));
   if (!all.length) return -1;
   const buttons = [...all[all.length - 1].querySelectorAll('.reply-markup-button')];
   return buttons.findIndex(b => text(b).includes(strip(label)));
@@ -392,17 +398,30 @@ class TelegramDialog:
     def last(self):
         return self.page.locator("#column-center .bubbles-inner .bubble:not(.is-date)").last
 
-    def wait_text(self, text: str, timeout: int = 30_000) -> None:
-        """Дождаться последнего пузыря с текстом (ответ бота или правка сообщения).
+    def _markup_bubble(self):
+        """Последний пузырь **с кнопками** — экран бота.
 
-        Сверка — по тексту с подстановкой `alt` картинок (эмодзи Telegram Web
-        рисует картинками, и «🗂 Прошедшие» в `innerText` выглядит как
-        «Прошедшие») и со схлопыванием пробелов — как у поиска кнопок.
+        Посторонние сообщения (команды, ввод пользователя) без кнопок не
+        перебивают ни поиск, ни ожидание — найдено при съёмке 2026-11-17.
+        """
+        return self.page.locator(
+            "#column-center .bubbles-inner .bubble:not(.is-date):has(.reply-markup-button)"
+        ).last
+
+    def wait_text(self, text: str, timeout: int = 30_000) -> None:
+        """Дождаться экрана бота с текстом (ответ или правка сообщения).
+
+        Экран — последний пузырь с кнопками (устойчивость к посторонним
+        сообщениям). Сверка — по тексту с подстановкой `alt` картинок (эмодзи
+        Telegram Web рисует картинками, и «🗂 Прошедшие» в `innerText`
+        выглядит как «Прошедшие») и со схлопыванием пробелов.
         """
         self.page.wait_for_function(
             """(t) => {
                  const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
-                 const all = document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)');
+                 const all = [...document.querySelectorAll(
+                     '#column-center .bubbles-inner .bubble:not(.is-date)')]
+                     .filter(b => b.querySelector('.reply-markup-button'));
                  if (!all.length) return false;
                  const c = all[all.length - 1].cloneNode(true);
                  c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
@@ -461,10 +480,10 @@ class TelegramDialog:
             self.page.wait_for_timeout(500)
         if index < 0:
             raise AssertionError(
-                f"нет кнопки {label!r} в последнем сообщении; "
+                f"нет кнопки {label!r} в экране бота; "
                 f"хвост: {self.page.evaluate(_DUMP_LAST)}"
             )
-        self.last().locator(".reply-markup-button").nth(index).click()
+        self._markup_bubble().locator(".reply-markup-button").nth(index).click()
 
     def tap_contains(self, label: str) -> None:
         """Нажать inline-кнопку последнего сообщения, содержащую `label`.
@@ -485,7 +504,7 @@ class TelegramDialog:
                 f"нет кнопки с текстом {label!r} в последнем сообщении; "
                 f"хвост: {self.page.evaluate(_DUMP_LAST)}"
             )
-        self.last().locator(".reply-markup-button").nth(index).click()
+        self._markup_bubble().locator(".reply-markup-button").nth(index).click()
 
     def bottom(self) -> None:
         """К низу чата перед поиском кнопок.
@@ -643,6 +662,7 @@ def shoot_bot(
             """
             dialog.send("/start")
             dialog.wait_text(texts.BTN_MEASURE)
+            dialog.tap(texts.BTN_MENU_VIEWS)  # 0.7.0: визиты — в подменю (MU1)
             dialog.tap(texts.BTN_APPOINTMENTS)
             dialog.wait_text(texts.AP_SOON)
             dialog.bottom()
@@ -673,6 +693,7 @@ def shoot_bot(
 
             dialog.send("/start")
             dialog.wait_text(texts.BTN_MEASURE)  # главное меню
+            dialog.tap(texts.BTN_MENU_VIEWS)  # 0.7.0: визиты — в подменю (MU1)
             dialog.tap(texts.BTN_APPOINTMENTS)
             dialog.wait_text(texts.AP_SOON)  # эмодзи заголовка в Telegram Web — картинка
             dialog.shot("bot-visits", keep=1)
@@ -703,7 +724,7 @@ def shoot_bot(
             dialog.tap_contains("Пульс")  # фокус → пульс (m:field:pulse)
             for digit in "72":
                 dialog.tap(digit)
-            dialog.tap(texts.BTN_DONE)
+            dialog.tap(texts.BTN_DONE_KEYPAD)  # 0.7.0: широкая «Готово ✅» (MU8)
             dialog.wait_text("135/85, пульс 72")  # сводка одной строкой (§6.3, R9)
             dialog.shot("bot-saved", keep=1)
 
@@ -713,15 +734,19 @@ def shoot_bot(
             dialog.tap(texts.BTN_CANCEL)  # без отметок: журнал не трогаем
             dialog.page.wait_for_timeout(1000)
 
-            # «Дневник за сегодня» со строкой лекарств (§6.4, 0.5.5).
+            # «Дневник за сегодня» со строкой лекарств (§6.4; 0.7.0 — из подменю).
             dialog.send("/start")
+            dialog.wait_text(texts.BTN_MENU_VIEWS)
+            dialog.tap(texts.BTN_MENU_VIEWS)
             dialog.wait_text(texts.BTN_DIARY)
             dialog.tap(texts.BTN_DIARY)
             dialog.wait_text("Лекарства:")  # эмодзи 💊 в Telegram Web — картинка
             dialog.shot("bot-diary", keep=1)
 
-            # «Настройки» → «Напоминания»: пауза, режим слота, повтор (§6.6, 0.5.6).
+            # «Настройки» → «Напоминания»: пауза, режим слота, повтор (§6.6; 0.7.0 — из подменю).
             dialog.send("/start")
+            dialog.wait_text(texts.BTN_MENU_CONFIG)
+            dialog.tap(texts.BTN_MENU_CONFIG)
             dialog.wait_text(texts.BTN_SETTINGS)
             dialog.tap(texts.BTN_SETTINGS)
             dialog.wait_text(texts.BTN_REMINDERS)
@@ -730,6 +755,8 @@ def shoot_bot(
             dialog.shot("bot-reminder-settings", keep=1)
 
         dialog.send("/start")
+        dialog.wait_text(texts.BTN_MENU_VIEWS)  # 0.7.0: статистика — в подменю (MU1)
+        dialog.tap(texts.BTN_MENU_VIEWS)
         dialog.wait_text(texts.BTN_STATS)
         dialog.tap(texts.BTN_STATS)
         dialog.wait_text(texts.BTN_7_DAYS)

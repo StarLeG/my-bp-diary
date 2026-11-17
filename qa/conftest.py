@@ -389,6 +389,24 @@ class QaDb:
         self._conn.executemany("DELETE FROM medications WHERE id = ?", [(i,) for i in ids])
         self._conn.commit()
 
+    def delete_all_medications(self, telegram_id: int) -> None:
+        """Удалить все лекарства пользователя (чистый прогон «➕ Добавить запись»)."""
+        user = self.user(telegram_id)
+        if user is None:
+            return
+        self._conn.execute("DELETE FROM medications WHERE user_id = ?", (user["id"],))
+        self._conn.commit()
+
+    def menu_message_id(self, telegram_id: int):
+        """Id канонического сообщения меню (`users.last_menu_message_id`, §6.2).
+
+        Робот ждёт именно это сообщение: `/start` отправляет меню новым
+        сообщением и удаляет прежнее (MU6 уточнён 2026-11-17), id в БД —
+        источник истины о каноническом меню.
+        """
+        user = self.user(telegram_id)
+        return None if user is None else user["last_menu_message_id"]
+
     def intake_logs(self, medication_ids: list[int]) -> set[tuple[int, str, str]]:
         """(id лекарства, слот, статус) журнала приёмов по лекарствам сценария."""
         marks = ",".join("?" * len(medication_ids))
@@ -477,14 +495,19 @@ class BotDialog:
             timeout=timeout,
         )
 
-    def send_input(self, text: str) -> None:
-        """Отправить текст без ожидания нового сообщения.
+    def send_input(self, text: str):
+        """Отправить текст без ожидания нового сообщения; вернуть отправленное.
 
         Бот мог ответить **правкой** экрана (заключения, §6.13: «одно
         редактируемое сообщение») — тогда нового сообщения не будет и `send`
         упал бы по таймауту. Дожидаться экрана — отдельным `wait_screen`.
         """
-        self._loop.run(self._client.send_message(self._chat, text))
+        return self._loop.run(self._client.send_message(self._chat, text))
+
+    #: Глубина опроса истории: экраны бота редактируются на месте (§6.2) и в
+    #: чате уходят вниз под накопившимися командами — 5 сообщений не хватало
+    #: (найдено роботом-приёмкой `test_menu_acceptance_e2e.py`).
+    SCREEN_SCAN_LIMIT = 25
 
     def press(self, data: str, *, contains=None, timeout: float = 25.0, message=None):
         """Нажать inline-кнопку с callback_data `data` в последнем сообщении.
@@ -508,7 +531,9 @@ class BotDialog:
         else:
             message = self.last()
             if self._find_button(message, data) is None:
-                for candidate in self._loop.run(self._client.get_messages(self._chat, limit=5)):
+                for candidate in self._loop.run(
+                    self._client.get_messages(self._chat, limit=self.SCREEN_SCAN_LIMIT)
+                ):
                     if not candidate.out and self._find_button(candidate, data) is not None:
                         message = candidate
                         break
@@ -521,15 +546,21 @@ class BotDialog:
         for _attempt in range(3):
             self._pace()
             self._loop.run(message.click(data=data))
-            if contains:
-                markers = self._markers(contains)
-                if target is not None:
-                    predicate = (
-                        lambda candidate: candidate.id == message.id
-                        and self._shows(candidate, *markers)
-                    )
+            if target is not None:
+                # Скоуп на конкретное сообщение: ждём смены его экрана по id —
+                # вне окна истории (см. `_wait_message`).
+                if contains:
+                    markers = self._markers(contains)
+                    predicate = lambda fresh: self._shows(fresh, *markers)
                 else:
-                    predicate = lambda candidate: not candidate.out and self._shows(candidate, *markers)
+                    predicate = lambda fresh: self._signature(fresh) != old_signature
+                try:
+                    return self._wait_message(message, predicate, timeout=timeout)
+                except AssertionError as error:
+                    last_error = error
+            elif contains:
+                markers = self._markers(contains)
+                predicate = lambda candidate: not candidate.out and self._shows(candidate, *markers)
                 try:
                     return self._poll(predicate, timeout=timeout)
                 except AssertionError as error:
@@ -538,7 +569,8 @@ class BotDialog:
                 try:
                     return self._poll(
                         lambda candidate: (candidate.id not in known and not candidate.out)
-                        or (candidate.id == message.id and self._signature(candidate) != old_signature),
+                        or (candidate.id == message.id
+                            and self._signature(candidate) != old_signature),
                         timeout=timeout,
                     )
                 except AssertionError as error:
@@ -546,6 +578,25 @@ class BotDialog:
             if self._signature(self.refresh(message)) != old_signature:
                 break
         raise last_error  # type: ignore[misc]
+
+    def _wait_message(self, message, predicate: Callable, *, timeout: float):
+        """Опрос **конкретного** сообщения (по id) — вне окна истории.
+
+        Экраны редактируются на месте (MU6) и уходят вниз под командами:
+        поиск по «последним сообщениям» их не видит (найдено роботом-приёмкой).
+        """
+        deadline = time.monotonic() + timeout
+        attempts = 0
+        while time.monotonic() < deadline:
+            attempts += 1
+            fresh = self.refresh(message)
+            if predicate(fresh):
+                return fresh
+            time.sleep(0.5)
+        raise AssertionError(
+            f"сообщение #{message.id} не дало ожидаемого экрана за {timeout} с"
+            f" (опросов: {attempts}; текст: {(self.refresh(message).text or '')[:80]!r})"
+        )
 
     # ── ожидание ──
 
@@ -642,7 +693,9 @@ class BotDialog:
         attempts = 0
         seen: list[str] = []
         while time.monotonic() < deadline:
-            messages = self._loop.run(self._client.get_messages(self._chat, limit=5))
+            messages = self._loop.run(
+                self._client.get_messages(self._chat, limit=self.SCREEN_SCAN_LIMIT)
+            )
             attempts += 1
             seen = [f"#{m.id}{'*' if m.out else ''} {(m.text or '')[:40]!r}" for m in messages]
             for message in messages:
@@ -678,22 +731,33 @@ def _send_telegram(token: str, chat_id: int, text: str) -> None:
 
 #: Файлы E2E-набора QA Bot (§22): отчёт админу — только после их запуска,
 #: чтобы нагрузочный прогон (test_load_burst.py) не слал отчёт QA-стенда.
-_E2E_TEST_FILES = {"test_telegram_e2e.py", "test_web_e2e.py"}
+_E2E_TEST_FILES = {
+    "test_telegram_e2e.py",
+    "test_web_e2e.py",
+    "test_menu_acceptance_e2e.py",
+    "test_menu_devices_e2e.py",
+}
 _e2e_started = False
+#: TestBotAlive провалился — бот недоступен (0.7.0, ST3-А): отчёт админу
+#: формулируется явно «❌ Бот недоступен (не отвечает) — проверьте сервер».
+_bot_unavailable = False
 
 
 def pytest_runtest_logreport(report: pytest.TestReport) -> None:
-    """Запомнить, что E2E-тесты реально запускались (хотя бы один).
+    """Запомнить запуск E2E и вердикт «бот недоступен» (TestBotAlive).
 
     Считается только выполненное тело теста (`when == "call"`): пропуск из-за
     ненастроенного стенда (SKIP на этапе setup) — не запуск, иначе дымовой
     `pytest qa/` слал бы админу отчёт QA-стенда.
     """
-    global _e2e_started
-    if _e2e_started or report.when != "call" or report.skipped:
-        return
-    if report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1] in _E2E_TEST_FILES:
-        _e2e_started = True
+    global _e2e_started, _bot_unavailable
+    if report.when == "call" and not report.skipped:
+        if report.nodeid.endswith("::TestBotAlive::test_00_bot_alive") and report.failed:
+            _bot_unavailable = True
+        if not _e2e_started and (
+            report.nodeid.split("::", 1)[0].rsplit("/", 1)[-1] in _E2E_TEST_FILES
+        ):
+            _e2e_started = True
 
 
 def _notify_admin(session: pytest.Session) -> None:
@@ -709,6 +773,12 @@ def _notify_admin(session: pytest.Session) -> None:
     screenshots = "qa/reports/screenshots/"
     if session.exitstatus == 0:
         text = f"✅ Все тесты пройдены. Скриншоты: {screenshots}"
+    elif _bot_unavailable:
+        # ST3-А (0.7.0): вердикт наблюдателя — бот не отвечает (завис сервер?).
+        text = (
+            "❌ Бот недоступен (не отвечает) — проверьте сервер. "
+            f"Скриншоты: {screenshots}"
+        )
     else:
         failed = getattr(session, "testsfailed", 0) or 0
         collected = getattr(session, "testscollected", 0) or 0
@@ -758,7 +828,18 @@ def tg_client(tg_loop: TgLoop) -> Iterator[TelegramClient]:
     session = StringSession(saved_session) if saved_session else os.path.join(
         REPORTS_DIR, "telethon"
     )
-    client = TelegramClient(session, api_id, api_hash, loop=tg_loop.loop)
+    client = TelegramClient(
+        session,
+        api_id,
+        api_hash,
+        loop=tg_loop.loop,
+        # Авто-sleep Telethon на flood wait: 60 с по умолчанию, дальше — исключение.
+        # QA-прогон складывается из десятков нажатий, чистки истории и серии
+        # прогонов подряд — аккаунт регулярно ловит лимит на 10–40 минут
+        # (найдено роботом-приёмкой): переживаем ожидание сном до 20 минут,
+        # более длинные всё равно видимы ошибкой.
+        flood_sleep_threshold=1200,
+    )
     tg_loop.run(_login(client, phone))  # первый запуск — интерактивный код
     try:
         yield client
