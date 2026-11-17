@@ -5,9 +5,12 @@ catch-all (свободный ввод вне FSM → «Выберите пун�
 """
 from __future__ import annotations
 
+import logging
+
 from aiogram import Router
 from aiogram.fsm.context import FSMContext
-from aiogram.types import CallbackQuery, Message
+from aiogram.types import CallbackQuery, ErrorEvent, Message
+from sqlalchemy.exc import SQLAlchemyError
 
 from bot import keyboards, texts
 from bot.config import admin_ids_from_env
@@ -72,6 +75,37 @@ async def stale_callback(callback: CallbackQuery) -> None:
     Только уведомление — без нового сообщения; «часики» на кнопке не висят.
     """
     await callback.answer(texts.STALE_MESSAGE)
+
+
+logger = logging.getLogger(__name__)
+
+
+async def on_error(event: ErrorEvent) -> bool:
+    """Информация для пользователя при сбое (§12; 0.7.0, ST1-А).
+
+    Системные сбои (БД/инфраструктура: `SQLAlchemyError` — включая «database is
+    locked» после ретраев) → «⚙️ Бот временно недоступен…»; прочие ошибки —
+    «Что-то пошло не так…». Пользователю — только текст без деталей, полная
+    ошибка уходит в лог. Ответ: сообщением («В меню») или, от callback'а, —
+    предупреждением (`show_alert`), без нового сообщения (§6.2). Регистрируется
+    в `bot/main.py` (`dp.errors.register`).
+    """
+    logger.error("Ошибка обработки апдейта: %r", event.exception, exc_info=event.exception)
+    text = (
+        texts.ERROR_SYSTEMIC
+        if isinstance(event.exception, SQLAlchemyError)
+        else texts.ERROR_GENERIC
+    )
+    try:
+        if event.update.message is not None:
+            await event.update.message.answer(
+                text, reply_markup=keyboards.back_to_menu()
+            )
+        elif event.update.callback_query is not None:
+            await event.update.callback_query.answer(text, show_alert=True)
+    except Exception:  # noqa: BLE001 — ответ об ошибке не должен ронять диспетчер
+        logger.warning("Не удалось ответить пользователю об ошибке", exc_info=True)
+    return True  # ошибка обработана
 
 
 router.include_router(fallback_router)

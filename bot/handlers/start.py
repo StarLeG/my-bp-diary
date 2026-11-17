@@ -14,11 +14,13 @@
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramAPIError
 from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
@@ -33,6 +35,8 @@ from bot.services import measurements as measurements_service
 from bot.services.reminders import DEFAULT_SLOT_TIMES, RemindersService
 
 router = Router(name="start")
+
+logger = logging.getLogger(__name__)
 
 #: Дефолт целевых значений при «Пропустить» (§6.1, §4.1).
 DEFAULT_TARGET = (130, 80)
@@ -89,6 +93,58 @@ def _time_screen(slot: str) -> tuple[str, InlineKeyboardMarkup]:
     return texts.ONB_TIMES_ASK.format(slot=label), keyboards.onboarding_time_kb(slot)
 
 
+# ─────────────────────────── Главное меню без дублей (0.7.0, MU6) ───────────────────────────
+
+
+async def _register_menu_message(message: Message, user: User, message_id: int) -> None:
+    """Запомнить, закрепить каноническое меню и удалить прежнее (§6.2, 0.7.0, MU6).
+
+    Прежнее каноническое сообщение меню **удаляется** (а не правится тихо):
+    `/start` обязан показывать меню — тихая правка выглядела как «бот не
+    отвечает» (баг-репорт 2026-11-17). Удаление и pin — best effort: старое
+    сообщение может быть уже удалено / вне лимита — ошибки гасятся. Вызывающий
+    код делает `session.commit()` (колонка `users.last_menu_message_id`).
+    """
+    bot = message.bot
+    chat_id = message.chat.id
+    old_id = user.last_menu_message_id
+    logger.info(
+        "Меню: регистрируем сообщение %s (прежнее %s, chat %s)",
+        message_id,
+        old_id,
+        chat_id,
+    )
+    user.last_menu_message_id = message_id
+    if old_id and old_id != message_id:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=old_id)
+        except TelegramAPIError:
+            pass  # уже удалено / старше лимита удаления / 429 (RetryAfter)
+    try:
+        await bot.pin_chat_message(
+            chat_id=chat_id, message_id=message_id, disable_notification=True
+        )
+    except TelegramAPIError as error:  # noqa: PERF203 — диагностика закрепа (MU6)
+        logger.warning("Меню: закреп %s не удался: %s", message_id, error)
+
+
+async def _send_menu(message: Message, user: User, *, is_doctor: bool) -> None:
+    """Главное меню без дублей (§6.2, 0.7.0, MU6; текст — «Главное меню», MU10).
+
+    `/start` всегда отправляет **новое** сообщение меню — пользователь видит
+    реакцию (тихая правка старого выглядела как «бот не отвечает», баг-репорт
+    2026-11-17), — а прежнее каноническое сообщение удаляется
+    (`_register_menu_message`): дублей в чате не остаётся.
+    """
+    sent = await message.answer(
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(
+            is_doctor=is_doctor, telegram_id=user.telegram_id
+        ),
+    )
+    await _register_menu_message(message, user, sent.message_id)
+
+
 # ─────────────────────────── /start ───────────────────────────
 
 
@@ -132,9 +188,8 @@ async def cmd_start(
         if screen is not None:  # связь с врачом без согласия на него (Д4)
             await message.answer(screen[0], reply_markup=screen[1])
             return
-        await message.answer(
-            texts.MAIN_MENU, reply_markup=keyboards.main_menu(is_doctor=doctor is not None)
-        )
+        await _send_menu(message, user, is_doctor=doctor is not None)
+        await session.commit()  # users.last_menu_message_id (MU6)
         return
     if current is not None and current.startswith(f"{Onboarding.__name__}:"):
         text, markup = f"{texts.ONB_RESTARTED}\n\n{texts.WELCOME}", keyboards.onboarding_start_kb()
@@ -153,8 +208,35 @@ async def cb_menu_back(
     """
     await state.clear()
     is_doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id) is not None
-    text, markup = texts.MAIN_MENU, keyboards.main_menu(is_doctor=is_doctor)
+    text, markup = texts.MAIN_MENU, keyboards.main_menu(
+        is_doctor=is_doctor, telegram_id=callback.from_user.id
+    )
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]
+    await callback.answer()
+
+
+# ─────────────────── Подменю главного меню (0.7.0, §6.2, MU2) ───────────────────
+
+
+@router.callback_query(F.data == "menu:views")
+async def cb_menu_views(callback: CallbackQuery) -> None:
+    """«📊 Дневник и статистика» — подменю; «Назад» → главное меню (§6.2)."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.VIEWS_MENU,
+        reply_markup=keyboards.views_menu_kb(),
+        parse_mode="HTML",  # шапка <b> (§11)
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data == "menu:config")
+async def cb_menu_config(callback: CallbackQuery) -> None:
+    """«⚙️ Настройки и профиль» — подменю; «Назад» → главное меню (§6.2)."""
+    await callback.message.edit_text(  # type: ignore[union-attr]
+        texts.CONFIG_MENU,
+        reply_markup=keyboards.config_menu_kb(),
+        parse_mode="HTML",  # шапка <b> (§11)
+    )
     await callback.answer()
 
 
@@ -233,7 +315,7 @@ async def cb_onb_tz(
     await callback.answer()
 
 
-@router.message(Onboarding.tz_input)
+@router.message(Onboarding.tz_input, ~F.text.startswith("/"))
 async def msg_onb_tz(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -271,7 +353,7 @@ async def cb_onb_target(
     await callback.answer()
 
 
-@router.message(Onboarding.target_sys)
+@router.message(Onboarding.target_sys, ~F.text.startswith("/"))
 async def msg_onb_target_sys(message: Message, state: FSMContext) -> None:
     try:
         sys_v = schemas.validate_int(message.text or "", 70, 260, "систолическое")
@@ -286,7 +368,7 @@ async def msg_onb_target_sys(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(Onboarding.target_dia)
+@router.message(Onboarding.target_dia, ~F.text.startswith("/"))
 async def msg_onb_target_dia(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -386,7 +468,7 @@ async def cb_onb_time(
     await callback.answer()
 
 
-@router.message(Onboarding.time_input)
+@router.message(Onboarding.time_input, ~F.text.startswith("/"))
 async def msg_onb_time(
     message: Message,
     state: FSMContext,
@@ -515,6 +597,15 @@ async def _finish(
         )
     await state.clear()
     if via_message:
-        await message.answer(texts.ONB_DONE, reply_markup=keyboards.main_menu())
+        sent = await message.answer(
+            texts.ONB_DONE, reply_markup=keyboards.main_menu(telegram_id=telegram_id)
+        )
+        menu_id = sent.message_id
     else:
-        await message.edit_text(texts.ONB_DONE, reply_markup=keyboards.main_menu())  # type: ignore[union-attr]
+        await message.edit_text(  # type: ignore[union-attr]
+            texts.ONB_DONE, reply_markup=keyboards.main_menu(telegram_id=telegram_id)
+        )
+        menu_id = message.message_id
+    # Каноническое сообщение меню — закрепить и запомнить (§6.2, 0.7.0, MU6).
+    await _register_menu_message(message, user, menu_id)
+    await session.commit()

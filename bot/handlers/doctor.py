@@ -282,7 +282,7 @@ async def cb_doctor_find(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(DoctorAccess.username)
+@router.message(DoctorAccess.username, ~F.text.startswith("/"))
 async def msg_doctor_username(
     message: Message, state: FSMContext, session: AsyncSession, bot: Bot
 ) -> None:
@@ -327,7 +327,7 @@ async def msg_doctor_username(
     )
 
 
-@router.message(DoctorAccess.email)
+@router.message(DoctorAccess.email, ~F.text.startswith("/"))
 async def msg_doctor_email(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -375,7 +375,8 @@ async def cb_doctor_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     """«Отмена» при вводе e-mail врача: сброс FSM, возврат в главное меню (§21)."""
     await state.clear()
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
     )
     await callback.answer(texts.DOCTOR_ADD_CANCELLED)
 

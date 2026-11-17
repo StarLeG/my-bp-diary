@@ -6,6 +6,10 @@
 # Данные
 data/
 
+# Хартбит статус-строки лендинга (0.7.0, ST2-А) — генерируется ботом
+web/landing/status.json
+web/landing/status.json.tmp
+
 # Python
 __pycache__/
 *.py[cod]

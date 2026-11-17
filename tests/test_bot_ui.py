@@ -27,6 +27,74 @@ def row_data(markup: InlineKeyboardMarkup) -> list[list[str]]:
     return [[button.callback_data or "" for button in row] for row in markup.inline_keyboard]
 
 
+def by_data(markup: InlineKeyboardMarkup) -> dict[str, InlineKeyboardButton]:
+    """Кнопки по callback_data."""
+    return {
+        button.callback_data: button for row in markup.inline_keyboard for button in row
+    }
+
+
+# ─────────────────── Смысловой канон цветов (§11, 0.7.0, MU3/MU7) ───────────────────
+
+
+class TestButtonStyles:
+    """`style` кнопок по канону §11; не зависит от `ui_large` (нюанс 5 ревью)."""
+
+    DAY = date(2026, 11, 10)
+
+    def test_main_menu_hero_success(self) -> None:
+        buttons = by_data(keyboards.main_menu())
+        assert buttons["menu:measure"].style == keyboards.STYLE_SUCCESS
+        for data in ("add:menu", "menu:views", "menu:config", "menu:report", "menu:about"):
+            assert buttons[data].style is None, data
+
+    @pytest.mark.parametrize("large", [False, True])
+    def test_slot_message_styles(self, large: bool) -> None:
+        buttons = by_data(keyboards.slot_message_kb("morning", self.DAY, True, "both", large=large))
+        assert buttons["rem:all:morning:20261110"].style == keyboards.STYLE_SUCCESS
+        assert buttons["rem:write:morning:20261110"].style == keyboards.STYLE_PRIMARY
+        assert buttons["rem:snooze:morning:20261110"].style == keyboards.STYLE_PRIMARY
+        assert buttons["rem:skip:morning:20261110"].style == keyboards.STYLE_DANGER
+        assert buttons["rem:partial:morning:20261110"].style is None
+
+    @pytest.mark.parametrize("large", [False, True])
+    def test_remeasure_styles(self, large: bool) -> None:
+        buttons = by_data(keyboards.remeasure_kb(5, large=large))
+        assert buttons["rem:now"].style == keyboards.STYLE_PRIMARY
+        assert buttons["rem:snooze:5"].style == keyboards.STYLE_PRIMARY
+        assert buttons["rem:off:5"].style is None
+
+    @pytest.mark.parametrize("large", [False, True])
+    def test_visit_done_success(self, large: bool) -> None:
+        buttons = by_data(keyboards.ap_after_kb(1, "doctor", large=large))
+        assert buttons["ap:after:1:done"].style == keyboards.STYLE_SUCCESS
+        assert buttons["ap:after:1:moved"].style is None
+        assert buttons["ap:after:1:missed"].style is None
+
+    def test_confirm_delete_danger(self) -> None:
+        buttons = by_data(keyboards.delete_account_kb())
+        assert buttons["set:delete:ok"].style == keyboards.STYLE_DANGER
+        assert buttons["set:back"].style == keyboards.STYLE_DANGER  # «Отмена»
+        confirm = by_data(
+            keyboards.ap_confirm_kb(
+                "Да, удалить", "ap:del:5:ok", "ap:open:5", yes_style=keyboards.STYLE_DANGER
+            )
+        )
+        assert confirm["ap:del:5:ok"].style == keyboards.STYLE_DANGER
+        assert confirm["ap:open:5"].style is None  # «Нет» — без стиля
+
+    def test_destructive_menu_buttons_danger(self) -> None:
+        settings = by_data(keyboards.settings_kb())
+        assert settings["set:delete"].style == keyboards.STYLE_DANGER  # «Удалить аккаунт»
+        consent = by_data(keyboards.consent_settings_kb())
+        assert consent["set:consent:withdraw"].style == keyboards.STYLE_DANGER
+
+    def test_invite_accept_success(self) -> None:
+        buttons = by_data(keyboards.doctor_invite_kb("code"))
+        assert buttons["doc:accept:code"].style == keyboards.STYLE_SUCCESS
+        assert buttons["doc:decline:code"].style is None
+
+
 # ─────────────────── HTML-шапки (§11, UI5) ───────────────────
 
 
@@ -161,11 +229,12 @@ class TestButtonsBothModes:
         assert left is not right and len(left) == len(right) == 1  # разъехались
 
     def test_done_reset_pair_on_keypad(self) -> None:
+        """Пара калькулятора — «Изменить»/«Отмена» (0.7.0, MU8); в крупном разъезжаются."""
         regular = keyboards.keypad_kb("sys", (None, None, None))
-        left, right = self._pair_rows(regular, texts.BTN_DONE, texts.BTN_RESET)
+        left, right = self._pair_rows(regular, texts.BTN_RESET, texts.BTN_CANCEL)
         assert left is right and len(left) == 2
         large = keyboards.keypad_kb("sys", (None, None, None), large=True)
-        left, right = self._pair_rows(large, texts.BTN_DONE, texts.BTN_RESET)
+        left, right = self._pair_rows(large, texts.BTN_RESET, texts.BTN_CANCEL)
         assert left is not right
 
     def test_sex_pair(self) -> None:
@@ -251,12 +320,13 @@ class TestButtonsBothModes:
 
 class TestKeypadColumns:
     def test_regular_calculator_columns(self) -> None:
+        """Обычный калькулятор (0.7.0, MU8): цифры 1–9 как на калькуляторе."""
         markup = keyboards.keypad_kb("sys", (None, None, None))
         assert row_data(markup)[:5] == [
             ["m:field:sys", "m:field:dia", "m:field:pulse"],
-            ["m:key:7", "m:key:8", "m:key:9"],
-            ["m:key:4", "m:key:5", "m:key:6"],
             ["m:key:1", "m:key:2", "m:key:3"],
+            ["m:key:4", "m:key:5", "m:key:6"],
+            ["m:key:7", "m:key:8", "m:key:9"],
             ["m:key:clear", "m:key:0", "m:key:bksp"],
         ]
 

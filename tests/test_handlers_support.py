@@ -117,6 +117,20 @@ class TestSupportCommand:
         )
 
 
+class TestHelpCommand:
+    """/help — экран «О боте / Поддержать» (§6.8, §6.9, 0.7.0, MU13)."""
+
+    async def test_help_shows_about_and_resets_fsm(self, answer, state, with_settings) -> None:
+        with_settings(support_url=DONATE_URL)
+        await state.set_state("Draft:input")
+        await call(support.cmd_help, message=make_message(), state=state)
+        assert answer.call_args.args[0] == texts.ABOUT_TEXT
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.about_kb(
+            support_visible=True, author_visible=False, group_url=""
+        )
+        assert await state.get_state() is None
+
+
 class TestAboutScreen:
     async def test_menu_about(self, edit, cb_answer, with_settings) -> None:
         with_settings()
@@ -249,7 +263,9 @@ class TestCabinetCommand:
             "secret", salt=support.CABINET_SALT
         ).loads(token, max_age=support.CABINET_TOKEN_MAX_AGE)
         assert payload["uid"] == TG_ID
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        # URL-кнопка, а не только текст: текст-ссылка в отредактированном
+        # сообщении не кликабельна (0.7.0, баг-репорт 2026-11-17).
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.cabinet_link_kb(url)
 
     async def test_resets_fsm(self, answer, state, with_settings, session) -> None:
         with_settings()
@@ -282,7 +298,7 @@ class TestCabinetButton:
             "secret", salt=support.CABINET_SALT
         ).loads(token, max_age=support.CABINET_TOKEN_MAX_AGE)
         assert payload["uid"] == TG_ID
-        assert edit.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.cabinet_link_kb(url)
         cb_answer.assert_awaited()
 
     async def test_no_account_prompts_email(
@@ -367,7 +383,7 @@ class TestCabinetRegistration:
         assert text.startswith("Аккаунт создан. Ваша ссылка для входа:")
         url = text.rsplit("\n", 1)[1]
         assert url.startswith("https://cabinet.example.org/login?token=")
-        assert answer.call_args.kwargs["reply_markup"] == keyboards.back_to_menu()
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.cabinet_link_kb(url)
         assert await state.get_state() is None
         from sqlalchemy import select
 

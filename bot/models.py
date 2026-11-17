@@ -111,6 +111,9 @@ class User(Base):
     """«Крупный режим» бота (§6.6, §11, 0.5.10): только рендер, не влияет на данные."""
     reminders_paused_until: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     """Пауза напоминаний: последний день паузы включительно, локальная дата (§6.7, 0.5.6)."""
+    last_menu_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    """Id канонического сообщения главного меню (§6.2, 0.7.0, MU6): `/start`
+    отправляет меню новым сообщением и удаляет прежнее по этому id."""
 
     __table_args__ = (
         CheckConstraint(

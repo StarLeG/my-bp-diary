@@ -89,3 +89,36 @@ class TestAuditPlaces:
     async def test_archive_date(self, session, user, cb_answer, edit) -> None:
         await measure.cb_archive_date(make_callback("set:archive:date:zzz"), make_state(), session)
         cb_answer.assert_awaited_once_with(texts.STALE_MESSAGE)
+
+
+class TestCommandsNotEatenByFsm:
+    """Команды проходят мимо FSM-хендлеров свободного ввода (§6.9, 0.7.0).
+
+    Хендлер `@router.message(<Состояние>)` обязан нести фильтр
+    `~F.text.startswith("/")` — иначе команда из более позднего роутера
+    «съедается» вводом (например `/stats` в экране калькулятора — найдено
+    роботом-приёмкой `qa/test_menu_acceptance_e2e.py`).
+    """
+
+    def test_all_fsm_input_handlers_skip_commands(self) -> None:
+        """Аудит: ни один `@router.message(<Состояние>)` без «не команда»."""
+        import re
+        from pathlib import Path
+
+        bare = re.compile(r"@router\.message\([A-Z][\w.]+\)")
+        missing: list[str] = []
+        for file in sorted(Path("bot/handlers").glob("*.py")):
+            for match in bare.finditer(file.read_text(encoding="utf-8")):
+                missing.append(f"{file.name}: {match.group(0)}")
+        assert missing == [], f"FSM-хендлеры без фильтра «не команда»: {missing}"
+
+    def test_filter_semantics(self) -> None:
+        """`~F.text.startswith("/")`: команда — мимо, обычный текст и фото — дальше."""
+        from types import SimpleNamespace
+
+        from aiogram import F
+
+        not_command = ~F.text.startswith("/")
+        assert not_command.resolve(SimpleNamespace(text="/stats")) is False
+        assert not_command.resolve(SimpleNamespace(text="120/80 72")) is True
+        assert not_command.resolve(SimpleNamespace(text=None)) is True  # фото без подписи

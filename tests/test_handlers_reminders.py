@@ -837,7 +837,7 @@ class TestAfterIntakeU1:
         assert edit.call_args.args[0].splitlines()[0] == header
         buttons = [b for row in edit.call_args.kwargs["reply_markup"].inline_keyboard for b in row]
         assert [(b.text, b.callback_data) for b in buttons] == [
-            ("Записать давление", "rem:write"), ("В меню", "menu:back"),
+            (texts.BTN_MEASURE, "rem:write"), ("В меню", "menu:back"),
         ]
 
     async def test_skip_keeps_old_finish(self, session, user, edit, cb_answer, reminders_svc) -> None:
@@ -1063,7 +1063,7 @@ class TestLargeButtonsOnePerRow:
 
 
 class TestKeypadLayout:
-    """Калькулятор — исключение §11: 3 колонки обычный / 2 крупный (§6.3, 0.6.0)."""
+    """Калькулятор — исключение §11: 3 колонки обычный / 2 крупный (§6.3; 0.7.0, MU8)."""
 
     def test_normal_three_columns(self) -> None:
         assert buttons_of(keyboards.keypad_kb("sys", (None, None, None))) == [
@@ -1072,16 +1072,16 @@ class TestKeypadLayout:
                 ("ДАД —", "m:field:dia"),
                 ("Пульс —", "m:field:pulse"),
             ],
-            [("7", "m:key:7"), ("8", "m:key:8"), ("9", "m:key:9")],
-            [("4", "m:key:4"), ("5", "m:key:5"), ("6", "m:key:6")],
             [("1", "m:key:1"), ("2", "m:key:2"), ("3", "m:key:3")],
+            [("4", "m:key:4"), ("5", "m:key:5"), ("6", "m:key:6")],
+            [("7", "m:key:7"), ("8", "m:key:8"), ("9", "m:key:9")],
             [
                 (texts.BTN_KEYPAD_CLEAR, "m:key:clear"),
                 ("0", "m:key:0"),
                 (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
             ],
-            [(texts.BTN_DONE, "m:key:ok"), (texts.BTN_RESET, "m:reset")],
-            [(texts.BTN_CANCEL, "m:cancel")],
+            [(texts.BTN_DONE_KEYPAD, "m:key:ok")],  # широкая «Готово ✅» (MU8)
+            [(texts.BTN_RESET, "m:reset"), (texts.BTN_CANCEL, "m:cancel")],
         ]
 
     def test_large_two_columns(self) -> None:
@@ -1099,7 +1099,7 @@ class TestKeypadLayout:
                 (texts.BTN_KEYPAD_CLEAR, "m:key:clear"),
                 (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
             ],
-            [(texts.BTN_DONE, "m:key:ok")],
+            [(texts.BTN_DONE_KEYPAD, "m:key:ok")],
             [(texts.BTN_RESET, "m:reset")],
             [(texts.BTN_CANCEL, "m:cancel")],
         ]
@@ -1112,15 +1112,15 @@ class TestKeypadLayout:
             (texts.BTN_KEYPAD_CLEAR, "m:key:clear"),
             (texts.BTN_KEYPAD_BACKSPACE, "m:key:bksp"),
         ]
-        assert rows[9] == [(texts.BTN_DONE, "m:key:ok")]
+        assert rows[9] == [(texts.BTN_DONE_KEYPAD, "m:key:ok")]
         assert rows[10] == [(texts.BTN_RESET, "m:reset")]
         assert rows[11] == [(texts.BTN_CANCEL, "m:cancel")]
 
     def test_no_skip_button(self) -> None:
         """«Пропустить» убрана (R7 = А): пустой пульс — `pulse = NULL`."""
         assert buttons_of(keyboards.keypad_kb("pulse", (None, None, None)))[-2:] == [
-            [(texts.BTN_DONE, "m:key:ok"), (texts.BTN_RESET, "m:reset")],
-            [(texts.BTN_CANCEL, "m:cancel")],
+            [(texts.BTN_DONE_KEYPAD, "m:key:ok")],
+            [(texts.BTN_RESET, "m:reset"), (texts.BTN_CANCEL, "m:cancel")],
         ]
 
 

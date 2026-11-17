@@ -773,3 +773,20 @@ class TestBroadcastProgress:
         await on_progress(10, 30)  # 101.5 − 100.0 = 1.5 с ≥ 1 с — перерисовка
         assert edit.call_count == edits_after_start + 1
         assert edit.call_args.args[0] == self._expected(10, 30)
+
+
+class TestAdminMenuQuickEntry:
+    """«🛡 Админка» из главного меню — быстрый вход (0.7.0, §18.1)."""
+
+    async def test_adm_menu_opens_panel(self, monkeypatch, mocker) -> None:
+        from bot.handlers import admin as admin_handlers
+
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "42")
+        callback = mocker.Mock()
+        callback.from_user.id = 42
+        callback.message.edit_text = mocker.AsyncMock()
+        callback.answer = mocker.AsyncMock()
+        state = mocker.Mock(clear=mocker.AsyncMock())
+        await admin_handlers.cb_admin_menu(callback, state)
+        assert callback.message.edit_text.call_args.args[0] == texts.ADMIN_MENU
+        callback.answer.assert_awaited_once()

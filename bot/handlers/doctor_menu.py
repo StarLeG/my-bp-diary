@@ -95,7 +95,8 @@ async def _require_doctor(
     doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id)
     if doctor is None:
         await callback.message.edit_text(  # type: ignore[union-attr]
-            texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+            texts.MAIN_MENU,
+            reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
         )
         await callback.answer()
         return None
@@ -275,7 +276,8 @@ async def cb_self_consent_no(callback: CallbackQuery, session: AsyncSession) -> 
         )
     else:
         await callback.message.edit_text(  # type: ignore[union-attr]
-            texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+            texts.MAIN_MENU,
+            reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
         )
     await callback.answer()
 
@@ -313,7 +315,7 @@ async def cb_change_name(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(DoctorRegistration.name)
+@router.message(DoctorRegistration.name, ~F.text.startswith("/"))
 async def msg_doctor_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """ФИО врача: 2–100 символов → врач зарегистрирован / ФИО обновлено (§21)."""
     name = " ".join((message.text or "").split())
@@ -460,7 +462,9 @@ async def cb_diary(callback: CallbackQuery, state: FSMContext, session: AsyncSes
     if not await consent_service.has_processing(session, user.id):
         text, markup = consent_screen(existing=user.onboarded)  # Б1 (§6.11)
     elif user.onboarded:
-        text, markup = texts.MAIN_MENU, keyboards.main_menu(is_doctor=True)
+        text, markup = texts.MAIN_MENU, keyboards.main_menu(
+            is_doctor=True, telegram_id=user.telegram_id
+        )
     else:
         text, markup = _welcome_screen()
     await callback.message.edit_text(text, reply_markup=markup)  # type: ignore[union-attr]

@@ -83,7 +83,7 @@ async def take_prompt(
 async def _menu_screen(session: AsyncSession, telegram_id: int) -> tuple[str, InlineKeyboardMarkup]:
     """Главное меню пациента (врачу — с кнопкой «🩺 Кабинет врача»)."""
     is_doctor = await doctor_service.doctor_by_telegram(session, telegram_id) is not None
-    return texts.MAIN_MENU, keyboards.main_menu(is_doctor=is_doctor)
+    return texts.MAIN_MENU, keyboards.main_menu(is_doctor=is_doctor, telegram_id=telegram_id)
 
 
 async def _edit(callback: CallbackQuery, text: str, markup: Optional[InlineKeyboardMarkup]) -> None:

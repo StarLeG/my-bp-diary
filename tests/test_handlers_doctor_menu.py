@@ -44,6 +44,7 @@ def tg_user(user_id: int = DOC_TG, username: str | None = "Ivanova_Doc") -> User
 
 
 def make_message(text: str | None = None, user: User | None = None) -> Message:
+    """Сообщение с привязанным мок-ботом (`.bot` — AsyncMock: pin/edit меню, 0.7.0)."""
     user = user or tg_user()
     return Message(
         message_id=1,
@@ -51,7 +52,7 @@ def make_message(text: str | None = None, user: User | None = None) -> Message:
         chat=Chat(id=user.id, type="private"),
         from_user=user,
         text=text,
-    )
+    ).as_(AsyncMock())
 
 
 def make_callback(data: str, user: User | None = None) -> CallbackQuery:
@@ -90,7 +91,10 @@ def datas(markup) -> list[str]:
 
 @pytest.fixture
 def answer(mocker):
-    return mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
+    """Возврат `answer` — сообщение с числовым `message_id` (§6.2, 0.7.0, MU6)."""
+    mock = mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
+    mock.return_value = mocker.Mock(message_id=321)
+    return mock
 
 
 @pytest.fixture

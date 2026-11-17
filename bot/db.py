@@ -50,9 +50,11 @@ RETRY_BASE_DELAY = 0.05
 #:     `users.meds_ask_shown_at` (§4.1, K2).
 #: 12 — признак создателя приёма: `medication_logs.source` (`bot` / `cabinet`,
 #:     §4.5, 0.6.2; правило правки standalone-строк в ЛК, M3 = В).
-SCHEMA_VERSION = 12
+#: 13 — закреплённое сообщение главного меню: `users.last_menu_message_id`
+#:     (§4.1, §6.2, 0.7.0, MU6: `/start` редактирует его вместо дублей).
+SCHEMA_VERSION = 13
 
-#: Колонки поколений 4–12 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3, §4.5).
+#: Колонки поколений 4–13 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3, §4.5).
 _ADDED_COLUMNS = (
     ("users", "deletion_requested_at", "DATETIME"),
     ("doctors", "consent_version", "VARCHAR(32)"),
@@ -92,6 +94,7 @@ _ADDED_COLUMNS = (
         "VARCHAR(16) NOT NULL DEFAULT 'bot' CONSTRAINT ck_medication_logs_source "
         "CHECK (source IN ('bot', 'cabinet'))",
     ),
+    ("users", "last_menu_message_id", "INTEGER"),
 )
 
 T = TypeVar("T")

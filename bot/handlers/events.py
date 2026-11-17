@@ -698,7 +698,7 @@ async def cb_add_text_skip(
     await callback.answer()
 
 
-@router.message(EventInput.text)
+@router.message(EventInput.text, ~F.text.startswith("/"))
 async def msg_event_text(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Текст события: у `note` обязателен (§9), у `stress` — по варианту (§6.14)."""
     user = await measurements_service.get_or_create_user(
@@ -906,7 +906,7 @@ async def cb_add_back(
     await callback.answer()
 
 
-@router.message(EventInput.time)
+@router.message(EventInput.time, ~F.text.startswith("/"))
 async def msg_event_time(
     message: Message,
     state: FSMContext,

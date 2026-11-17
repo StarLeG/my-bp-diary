@@ -16,6 +16,7 @@ from pathlib import Path
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.session.aiohttp import AiohttpSession
+from aiogram.types import BotCommand
 from aiogram.utils.token import TokenValidationError
 from apscheduler.jobstores.sqlalchemy import SQLAlchemyJobStore
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
@@ -24,7 +25,7 @@ from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 from bot.config import Settings, get_settings
 from bot.db import create_engine, create_session_factory, init_db
-from bot.handlers import router
+from bot.handlers import on_error, router
 from bot.middlewares import (
     ConsentMiddleware,
     DbSessionMiddleware,
@@ -42,6 +43,19 @@ logger = logging.getLogger(__name__)
 
 #: Формат логов; секреты в коде и логах отсутствуют по построению.
 LOG_FORMAT = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+
+#: Меню команд (§6.9, 0.7.0, MU13): `setMyCommands` при старте, общий список.
+#: Описания — канон §11 (коротко, с маленькой буквы, без точки).
+BOT_COMMANDS: tuple[BotCommand, ...] = (
+    BotCommand(command="start", description="Главное меню"),
+    BotCommand(command="record", description="Записать давление"),
+    BotCommand(command="stats", description="Статистика"),
+    BotCommand(command="help", description="Помощь"),
+    BotCommand(command="visits", description="Визиты и анализы"),
+    BotCommand(command="support", description="О боте и поддержка"),
+    BotCommand(command="cabinet", description="Личный кабинет"),
+    BotCommand(command="iamdoctor", description="Я врач"),
+)
 
 
 @dataclass
@@ -160,7 +174,13 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
             chat_id=telegram_id, message_id=message_id, reply_markup=None
         )
 
-    reminders = RemindersService(session_factory, send, scheduler, clear_markup=clear_markup)
+    reminders = RemindersService(
+        session_factory,
+        send,
+        scheduler,
+        clear_markup=clear_markup,
+        status_path=settings.status_path,
+    )
     # Job'ы сериализуются в SQLAlchemyJobStore: точка входа — module-level
     # `fire_reminder`, экземпляр сервиса привязывается явно.
     bind_service(reminders)
@@ -197,9 +217,17 @@ def build_app(settings: Settings, scheduler: AsyncIOScheduler | None = None) -> 
 
     dp = Dispatcher()
     dp.include_router(router)
+    # Информация для пользователя при сбое (§12, 0.7.0, ST1-А): системные сбои
+    # (БД) — «⚙️ Бот временно недоступен…», прочие — «Что-то пошло не так…».
+    dp.errors.register(on_error)
     dp.update.outer_middleware.register(DbSessionMiddleware(session_factory))
-    dp.callback_query.outer_middleware.register(DebounceMiddleware())
-    dp.callback_query.outer_middleware.register(ThrottleMiddleware())
+    # Анти-спам (§7.2): `0` в настройках — выключить (тестовый стенд).
+    dp.callback_query.outer_middleware.register(
+        DebounceMiddleware(seconds=settings.debounce_seconds)
+    )
+    dp.callback_query.outer_middleware.register(
+        ThrottleMiddleware(seconds=settings.throttle_seconds)
+    )
     dp.message.outer_middleware.register(DoctorUsernameMiddleware())
     # Имя из Telegram — врачу, пока данные пациента не заполнены (§6.12).
     dp.message.outer_middleware.register(TelegramNameMiddleware())
@@ -233,6 +261,8 @@ async def run(app: App) -> None:
     бота и engine закрываются всегда.
     """
     await init_db(app.engine)
+    # Меню команд слева от поля ввода (§6.9, 0.7.0, MU13).
+    await app.bot.set_my_commands(list(BOT_COMMANDS))
     app.scheduler.start()
     try:
         sent = await app.reminders.startup()

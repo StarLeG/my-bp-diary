@@ -333,7 +333,7 @@ class TestMigrateDoctors:
                 }
                 assert "ix_doctors_telegram_username" in indexes
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 12
+                assert version == SCHEMA_VERSION == 13
                 tables = {
                     r[0] for r in (await conn.exec_driver_sql(
                         "SELECT name FROM sqlite_master WHERE type='table'"
@@ -385,7 +385,7 @@ class TestMigrateConsents:
                 tables = {r[0] for r in (await conn.exec_driver_sql(
                     "SELECT name FROM sqlite_master WHERE type='table'")).all()}
                 assert "consents" in tables
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 12
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 13
         finally:
             await engine.dispose()
 
@@ -431,7 +431,7 @@ class TestMigrateReminders:
                 assert tuple(urow) == (1, None)
                 with pytest.raises(Exception):
                     await conn.exec_driver_sql("UPDATE reminders SET mode = 'zzz'")
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 12
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 13
         finally:
             await engine.dispose()
 
@@ -457,7 +457,7 @@ class TestMigrateAppointments:
                 assert "appointments" in tables
                 indexes = {r[1] for r in (await conn.exec_driver_sql("PRAGMA index_list(appointments)")).all()}
                 assert {"ix_appointments_user_day", "ix_appointments_status_day"} <= indexes
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 12
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 13
                 await conn.exec_driver_sql(
                     "INSERT INTO users (id, telegram_id, timezone, target_systolic, target_diastolic, onboarded, created_at)"
                     " VALUES (1, 111, 'Europe/Minsk', 130, 80, 1, '2026-01-01 00:00:00')"
@@ -504,7 +504,7 @@ class TestMigrateUILarge:
                 assert "ui_large" in columns
                 row = (await conn.exec_driver_sql("SELECT ui_large FROM users")).one()
                 assert tuple(row) == (0,)  # DEFAULT 0 — обычный режим
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 12
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 13
         finally:
             await engine.dispose()
 
@@ -539,7 +539,7 @@ class TestMigrateConclusions:
                     for r in (await conn.exec_driver_sql("PRAGMA index_list(appointment_conclusions)")).all()
                 }
                 assert "ix_appointment_conclusions_appointment" in indexes
-                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 12
+                assert (await conn.exec_driver_sql("PRAGMA user_version")).scalar() == SCHEMA_VERSION == 13
                 await conn.exec_driver_sql(
                     "INSERT INTO users (id, telegram_id, timezone, target_systolic, target_diastolic, onboarded, created_at)"
                     " VALUES (1, 111, 'Europe/Minsk', 130, 80, 1, '2026-01-01 00:00:00')"
@@ -614,7 +614,7 @@ class TestMigrateDiaryEvents:
                 ).one()
                 assert tuple(row) == (None,)  # у существующих строк — NULL
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 12
+                assert version == SCHEMA_VERSION == 13
                 # CHECK типа события (§4.18)
                 with pytest.raises(Exception):
                     await conn.exec_driver_sql(
@@ -690,6 +690,42 @@ class TestMigrateMedicationLogSource:
                         "UPDATE medication_logs SET source = 'other'"
                     )
                 version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
-                assert version == SCHEMA_VERSION == 12
+                assert version == SCHEMA_VERSION == 13
+        finally:
+            await engine.dispose()
+
+
+class TestMigrateLastMenuMessageId:
+    """Поколение 13 (0.7.0): `users.last_menu_message_id` — закреплённое меню (§4.1, §6.2, MU6)."""
+
+    async def test_column_added_to_old_db(self, tmp_path) -> None:
+        engine = create_engine(str(tmp_path / "gen12.sqlite3"))
+        try:
+            async with engine.begin() as conn:
+                await conn.exec_driver_sql(
+                    "CREATE TABLE users (id INTEGER PRIMARY KEY, telegram_id INTEGER NOT NULL UNIQUE,"
+                    " timezone VARCHAR(64) NOT NULL, target_systolic INTEGER NOT NULL,"
+                    " target_diastolic INTEGER NOT NULL, med_remeasure_delay INTEGER,"
+                    " onboarded BOOLEAN NOT NULL, last_support_shown_at DATETIME,"
+                    " created_at DATETIME NOT NULL)"
+                )
+                await conn.exec_driver_sql(
+                    "INSERT INTO users VALUES (1, 111, 'Europe/Minsk', 130, 80, 60, 1, NULL,"
+                    " '2026-01-01 00:00:00')"
+                )
+                await conn.exec_driver_sql("PRAGMA user_version = 12")
+            await init_db(engine)
+            await init_db(engine)  # повторно — без изменений
+            async with engine.connect() as conn:
+                columns = {
+                    r[1] for r in (await conn.exec_driver_sql("PRAGMA table_info(users)")).all()
+                }
+                assert "last_menu_message_id" in columns
+                row = (
+                    await conn.exec_driver_sql("SELECT last_menu_message_id FROM users")
+                ).one()
+                assert tuple(row) == (None,)  # меню ещё не отправлялось
+                version = (await conn.exec_driver_sql("PRAGMA user_version")).scalar()
+                assert version == SCHEMA_VERSION == 13
         finally:
             await engine.dispose()

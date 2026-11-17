@@ -1468,6 +1468,25 @@ def job_time(scheduler, reminder_id: int):
     return None if job is None else job["trigger"].run_date
 
 
+class TestTickHeartbeat:
+    """Хартбит живости из тика (0.7.0, ST2-А; §6.7)."""
+
+    async def test_tick_writes_status_file(self, session_factory, tick_scheduler, tmp_path) -> None:
+        import json
+
+        async def sender(*args, **kwargs) -> None:
+            return None
+
+        path = tmp_path / "landing" / "status.json"
+        svc = rem.RemindersService(
+            session_factory, sender, tick_scheduler, status_path=str(path)
+        )
+        await svc.tick()
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        assert payload["ok"] is True
+        assert payload["at"]
+
+
 class TestTick:
     async def test_later_time_from_cabinet(self, session, user, tick_svc, tick_scheduler) -> None:
         reminder = await make_slot(session, user, next_time=now_utc() + timedelta(hours=1))

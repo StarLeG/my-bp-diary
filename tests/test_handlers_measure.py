@@ -162,6 +162,33 @@ def reminders(mocker):
 # ─────────────────────────── Начало и отмена ───────────────────────────
 
 
+class TestCmdRecord:
+    """/record — сразу калькулятор (§6.9, 0.7.0, MU13): обёртка над §6.3."""
+
+    async def test_record_opens_calculator(self, session, user, answer) -> None:
+        user.ui_large = True
+        await session.commit()
+        state = make_state()
+        await measure.cmd_record(make_message("/record"), state, session)
+        assert answer.call_args.args[0] == texts.fmt_keypad_prompt(
+            None, None, None, large=True
+        )
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.keypad_kb(
+            "sys", (None, None, None), large=True
+        )
+        assert await state.get_state() == measure.MeasureInput.active.state
+
+    async def test_record_resets_previous_draft(self, session, user, answer) -> None:
+        state = make_state()
+        await state.set_state(measure.MeasureInput.active)
+        await state.update_data(**{measure.M_BUF: "12", measure.M_FIELD: "dia", measure.M_ID: 5})
+        await measure.cmd_record(make_message("/record"), state, session)
+        data = await state.get_data()
+        assert data.get(measure.M_BUF) == ""
+        assert data.get(measure.M_FIELD) == "sys"
+        assert data.get(measure.M_ID) is None
+
+
 class TestBeginCancel:
     async def test_begin_shows_calculator(self, edit, cb_answer) -> None:
         state = make_state()

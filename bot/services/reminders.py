@@ -54,6 +54,7 @@ from sqlalchemy.orm.attributes import set_committed_value
 
 from bot import keyboards, texts
 from bot.models import Reminder, User
+from bot.services import heartbeat
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 
@@ -242,11 +243,14 @@ class RemindersService:
         sender: Sender,
         scheduler=None,
         clear_markup: Optional[MarkupClearer] = None,
+        status_path: str = "",
     ) -> None:
         self._session_factory = session_factory
         self._sender = sender
         self._scheduler = scheduler
         self._clear_markup = clear_markup
+        #: Файл-хартбит для статус-строки лендинга (0.7.0, ST2-А); "" — выключен.
+        self._status_path = status_path
 
     # ─────────────────────────── Вспомогательное ───────────────────────────
 
@@ -1026,6 +1030,8 @@ class RemindersService:
                 else:
                     await self._deliver(reminder_id, MODE_CATCHUP)
         await self._appointments_tick()
+        # Живость бота для статус-строки лендинга (0.7.0, ST2-А): тик — пульс.
+        heartbeat.write_status(self._status_path)
         return fixed
 
     async def _appointments_tick(self) -> int:

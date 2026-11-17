@@ -70,6 +70,17 @@ async def cmd_support(message: Message, state: FSMContext) -> None:
     await message.answer(text, reply_markup=markup, parse_mode="HTML")  # шапка <b> (§11)
 
 
+@router.message(Command("help"))
+async def cmd_help(message: Message, state: FSMContext) -> None:
+    """/help — экран «О боте / Поддержать» (§6.8, §6.9, 0.7.0, MU13).
+
+    Обёртка над `menu:about`; команда обрабатывается всегда и сбрасывает FSM.
+    """
+    await state.clear()
+    text, markup = _about_screen(get_settings())
+    await message.answer(text, reply_markup=markup, parse_mode="HTML")
+
+
 @router.callback_query(F.data == "menu:about")
 async def cb_about(callback: CallbackQuery) -> None:
     """«О боте / Поддержать» из главного меню (сообщение редактируется, §6.8)."""
@@ -194,9 +205,10 @@ async def _cabinet_entry(
     if await _find_web_user(session, telegram_id) is None:
         await state.set_state(CabinetRegistration.email)
         return texts.CABINET_EMAIL_PROMPT, keyboards.input_cancel_kb("cabinet:cancel")
+    link = make_cabinet_link(settings, telegram_id)
     return (
-        texts.CABINET_LINK_SENT.format(url=make_cabinet_link(settings, telegram_id)),
-        keyboards.back_to_menu(),
+        texts.CABINET_LINK_SENT.format(url=link),
+        keyboards.cabinet_link_kb(link),  # URL-кнопка: текст-ссылка не кликабельна (0.7.0)
     )
 
 
@@ -228,7 +240,7 @@ async def cb_cabinet(callback: CallbackQuery, state: FSMContext, session: AsyncS
     await callback.answer()
 
 
-@router.message(CabinetRegistration.email)
+@router.message(CabinetRegistration.email, ~F.text.startswith("/"))
 async def msg_cabinet_email(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -251,7 +263,7 @@ async def msg_cabinet_email(
     link = make_cabinet_link(get_settings(), message.from_user.id)  # type: ignore[union-attr]
     await message.answer(
         texts.CABINET_ACCOUNT_CREATED.format(url=link),
-        reply_markup=keyboards.back_to_menu(),
+        reply_markup=keyboards.cabinet_link_kb(link),
         link_preview_options=keyboards.NO_LINK_PREVIEW,
     )
 
@@ -261,6 +273,7 @@ async def cb_cabinet_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     """«Отмена» при вводе e-mail: сброс FSM, возврат в главное меню (§6.2)."""
     await state.clear()
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
     )
     await callback.answer(texts.CABINET_REG_CANCELLED)

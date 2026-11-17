@@ -792,7 +792,7 @@ class TestEdges:
         assert labels(keyboards.ap_notice_kb(2, "doctor", "soon")) == [
             texts.BTN_AP_SEEN, texts.BTN_AP_MOVE, "Отменить визит", texts.BTN_AP_REPORT,
         ]
-        assert labels(keyboards.main_menu())[3] == texts.BTN_APPOINTMENTS
+        assert texts.BTN_APPOINTMENTS in labels(keyboards.views_menu_kb())
 
 
 # ─────────── Календарь ap:cal:m:/w: и пагинация списков (0.5.10) ───────────

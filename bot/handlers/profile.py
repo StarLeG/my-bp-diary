@@ -106,7 +106,10 @@ async def cb_later(callback: CallbackQuery, session: AsyncSession) -> None:
 
     is_doctor = await doctor_service.doctor_by_telegram(session, callback.from_user.id) is not None
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MAIN_MENU, reply_markup=keyboards.main_menu(is_doctor=is_doctor)
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(
+            is_doctor=is_doctor, telegram_id=callback.from_user.id
+        ),
     )
     await callback.answer()
 
@@ -134,7 +137,7 @@ async def _name_step(
     await message.answer(_with_current(next_prompt, current), reply_markup=next_markup)
 
 
-@router.message(PatientProfile.last_name)
+@router.message(PatientProfile.last_name, ~F.text.startswith("/"))
 async def msg_last_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
     user = await measurements_service.get_or_create_user(session, message.from_user.id)  # type: ignore[union-attr]
     await _name_step(
@@ -143,7 +146,7 @@ async def msg_last_name(message: Message, state: FSMContext, session: AsyncSessi
     )
 
 
-@router.message(PatientProfile.first_name)
+@router.message(PatientProfile.first_name, ~F.text.startswith("/"))
 async def msg_first_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
     user = await measurements_service.get_or_create_user(session, message.from_user.id)  # type: ignore[union-attr]
     await _name_step(
@@ -158,7 +161,7 @@ async def _ask_birth(state: FSMContext, user: User) -> tuple[str, InlineKeyboard
     return _with_current(texts.PROFILE_ASK_BIRTH, current), keyboards.input_cancel_kb("prof:show")
 
 
-@router.message(PatientProfile.middle_name)
+@router.message(PatientProfile.middle_name, ~F.text.startswith("/"))
 async def msg_middle_name(message: Message, state: FSMContext, session: AsyncSession) -> None:
     try:
         value = schemas.validate_person_name(message.text or "")
@@ -181,7 +184,7 @@ async def cb_no_middle(callback: CallbackQuery, state: FSMContext, session: Asyn
     await callback.answer()
 
 
-@router.message(PatientProfile.birth_date)
+@router.message(PatientProfile.birth_date, ~F.text.startswith("/"))
 async def msg_birth(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Дата рождения: формат и диапазон (П4), младше 16 — П5, данные не сохраняются."""
     user = await measurements_service.get_or_create_user(session, message.from_user.id)  # type: ignore[union-attr]
@@ -202,12 +205,12 @@ async def msg_birth(message: Message, state: FSMContext, session: AsyncSession) 
 
 
 def _back_kb() -> InlineKeyboardMarkup:
-    """Только «Назад» — в настройки."""
+    """Только «Назад» — в подменю «Настройки и профиль» (0.7.0, MU2; канон UI1)."""
     from aiogram.types import InlineKeyboardButton
     from aiogram.utils.keyboard import InlineKeyboardBuilder
 
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:config"))
     return builder.as_markup()
 
 

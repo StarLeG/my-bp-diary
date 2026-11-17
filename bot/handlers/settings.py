@@ -258,7 +258,7 @@ async def cb_target_preset(
     await callback.answer()
 
 
-@router.message(SettingsInput.target_sys)
+@router.message(SettingsInput.target_sys, ~F.text.startswith("/"))
 async def msg_target_sys(message: Message, state: FSMContext) -> None:
     try:
         sys_v = schemas.validate_int(message.text or "", 70, 260, "систолическое")
@@ -272,7 +272,7 @@ async def msg_target_sys(message: Message, state: FSMContext) -> None:
     )
 
 
-@router.message(SettingsInput.target_dia)
+@router.message(SettingsInput.target_dia, ~F.text.startswith("/"))
 async def msg_target_dia(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -471,7 +471,7 @@ async def cb_slot_time(
     await callback.answer()
 
 
-@router.message(SettingsInput.slot_time)
+@router.message(SettingsInput.slot_time, ~F.text.startswith("/"))
 async def msg_slot_time(
     message: Message,
     state: FSMContext,
@@ -578,7 +578,7 @@ async def cb_tz_set(
     await callback.answer()
 
 
-@router.message(SettingsInput.tz_input)
+@router.message(SettingsInput.tz_input, ~F.text.startswith("/"))
 async def msg_tz(message: Message, state: FSMContext, session: AsyncSession) -> None:
     try:
         tz_name = schemas.validate_timezone(message.text or "")
@@ -706,7 +706,7 @@ async def cb_med_cancel(callback: CallbackQuery, state: FSMContext, session: Asy
     await callback.answer()
 
 
-@router.message(SettingsInput.med_name)
+@router.message(SettingsInput.med_name, ~F.text.startswith("/"))
 async def msg_med_name(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -804,7 +804,7 @@ async def cb_med_dose_keep(
     await callback.answer()
 
 
-@router.message(SettingsInput.med_dosage)
+@router.message(SettingsInput.med_dosage, ~F.text.startswith("/"))
 async def msg_med_dosage(message: Message, state: FSMContext) -> None:
     try:
         dosage = schemas.validate_dosage(message.text or "")

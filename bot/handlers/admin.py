@@ -273,6 +273,16 @@ async def cb_admin_back(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data == "adm:menu", admin_only)
+async def cb_admin_menu(callback: CallbackQuery, state: FSMContext) -> None:
+    """«🛡 Админка» из главного меню — быстрый вход (§18.1, 0.7.0)."""
+    await state.clear()
+    logger.info("Админка: %s открыл меню кнопкой", callback.from_user.id)
+    text, markup = _menu_screen()
+    await _show(callback.message, text, markup)  # type: ignore[arg-type]
+    await callback.answer()
+
+
 # ─────────────────────────── Статистика БД (§18.2) ───────────────────────────
 
 
@@ -394,7 +404,7 @@ async def cb_admin_bcast(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(AdminStates.broadcast)
+@router.message(AdminStates.broadcast, ~F.text.startswith("/"))
 async def msg_admin_bcast(message: Message, state: FSMContext) -> None:
     """Текст рассылки → превью с «Подтвердить отправку» (§18.5)."""
     text = (message.text or "").strip()
@@ -488,7 +498,7 @@ async def cb_admin_search(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(AdminStates.search)
+@router.message(AdminStates.search, ~F.text.startswith("/"))
 async def msg_admin_search(
     message: Message, state: FSMContext, admin: AdminService
 ) -> None:

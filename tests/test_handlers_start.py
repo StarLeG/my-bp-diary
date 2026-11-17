@@ -27,13 +27,16 @@ TG_ID = 111_111
 
 
 def make_message(text: str | None = None, user_id: int = TG_ID) -> Message:
+    """Сообщение с привязанным мок-ботом (`.bot` — AsyncMock: pin/edit меню, 0.7.0)."""
+    from unittest.mock import AsyncMock
+
     return Message(
         message_id=1,
         date=datetime.now(timezone.utc),
         chat=Chat(id=user_id, type="private"),
         from_user=User(id=user_id, is_bot=False, first_name="Тест"),
         text=text,
-    )
+    ).as_(AsyncMock())
 
 
 def make_callback(data: str, message: Message, user_id: int = TG_ID) -> CallbackQuery:
@@ -64,7 +67,11 @@ async def reload_user(session: AsyncSession) -> UserModel:
 
 @pytest.fixture
 def answer(mocker):
-    return mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
+    """`Message.answer` — AsyncMock; возврат — сообщение с числовым `message_id`
+    (id пишется в `users.last_menu_message_id`, §6.2, 0.7.0)."""
+    mock = mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
+    mock.return_value = mocker.Mock(message_id=321)
+    return mock
 
 
 @pytest.fixture
@@ -137,6 +144,96 @@ class TestCbMenuBack:
         assert edit.call_args.kwargs["reply_markup"] == keyboards.main_menu()
         cb_answer.assert_awaited_once()
         assert await state.get_state() is None
+
+
+class TestMenuNoDoubles:
+    """Главное меню без дублей (§6.2, 0.7.0, MU6): закреп + редактирование."""
+
+    async def test_start_sends_new_message_every_time(self, session, user, answer) -> None:
+        """`/start` всегда шлёт новое меню — пользователь видит реакцию (MU6
+        уточнён 2026-11-17: тихая правка выглядела как «бот не отвечает»)."""
+        user.onboarded = True
+        user.last_menu_message_id = 55
+        await session.commit()
+        msg = make_message("/start")
+        await start.cmd_start(msg, make_state(), session)
+        answer.assert_awaited_once()
+        assert answer.call_args.args[0] == texts.MAIN_MENU
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.main_menu()
+        msg.bot.edit_message_text.assert_not_awaited()
+
+    async def test_start_deletes_previous_menu(self, session, user, answer) -> None:
+        """Прежнее каноническое меню удаляется — дублей не остаётся (MU6)."""
+        user.onboarded = True
+        user.last_menu_message_id = 55
+        await session.commit()
+        msg = make_message("/start")
+        await start.cmd_start(msg, make_state(), session)
+        msg.bot.delete_message.assert_awaited_once_with(chat_id=TG_ID, message_id=55)
+        msg.bot.pin_chat_message.assert_awaited_once()
+        assert msg.bot.pin_chat_message.await_args.kwargs["message_id"] == 321
+        assert (await reload_user(session)).last_menu_message_id == 321
+
+    async def test_start_sends_new_and_pins_when_first(self, session, user, answer) -> None:
+        user.onboarded = True
+        await session.commit()
+        msg = make_message("/start")
+        await start.cmd_start(msg, make_state(), session)
+        answer.assert_awaited_once()
+        assert answer.call_args.args[0] == texts.MAIN_MENU
+        msg.bot.pin_chat_message.assert_awaited_once()
+        assert msg.bot.pin_chat_message.await_args.kwargs["message_id"] == 321
+        assert msg.bot.pin_chat_message.await_args.kwargs["disable_notification"] is True
+        assert (await reload_user(session)).last_menu_message_id == 321
+
+    async def test_delete_failure_does_not_block_menu(self, session, user, answer, mocker) -> None:
+        """Старое сообщение уже удалено / вне лимита: ошибка гасится,
+        новое меню отправлено и закреплено (нюанс 1 ревью)."""
+        from aiogram.exceptions import TelegramBadRequest
+        from aiogram.methods import DeleteMessage
+
+        user.onboarded = True
+        user.last_menu_message_id = 77
+        await session.commit()
+        msg = make_message("/start")
+        msg.bot.delete_message = mocker.AsyncMock(
+            side_effect=TelegramBadRequest(
+                method=DeleteMessage(chat_id=TG_ID, message_id=77),
+                message="message to delete not found",
+            )
+        )
+        await start.cmd_start(msg, make_state(), session)
+        answer.assert_awaited_once()
+        msg.bot.pin_chat_message.assert_awaited_once()
+        assert (await reload_user(session)).last_menu_message_id == 321
+
+    async def test_finish_registers_menu_message(self, session, user, edit, reminders) -> None:
+        """Финал онбординга — то же каноническое сообщение меню (закреп + id)."""
+        user = await reload_user(session)
+        msg = make_message()
+        await start._finish(msg, make_state(), session, reminders, TG_ID)
+        edit.assert_awaited_once()
+        assert edit.call_args.args[0] == texts.ONB_DONE
+        msg.bot.pin_chat_message.assert_awaited_once()
+        assert (await reload_user(session)).last_menu_message_id == msg.message_id == 1
+
+
+class TestSubmenus:
+    """Подменю главного меню (§6.2, 0.7.0, MU2)."""
+
+    async def test_views_submenu(self, edit, cb_answer) -> None:
+        await start.cb_menu_views(make_callback("menu:views", make_message()))
+        assert edit.call_args.args[0] == texts.VIEWS_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.views_menu_kb()
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"  # шапка <b> (§11)
+        cb_answer.assert_awaited_once()
+
+    async def test_config_submenu(self, edit, cb_answer) -> None:
+        await start.cb_menu_config(make_callback("menu:config", make_message()))
+        assert edit.call_args.args[0] == texts.CONFIG_MENU
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.config_menu_kb()
+        assert edit.call_args.kwargs["parse_mode"] == "HTML"
+        cb_answer.assert_awaited_once()
 
 
 # ─────────────────────────── Шаги онбординга ───────────────────────────

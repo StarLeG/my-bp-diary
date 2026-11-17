@@ -42,6 +42,27 @@ def html() -> str:
     return LANDING.read_text(encoding="utf-8")
 
 
+class TestBotStatusLine:
+    """Статус-строка бота в шапке (0.7.0, ST2-А; SPEC.md, §16.1).
+
+    JS читает `status.json` (хартбит §6.7): «🟢 Бот работает» при свежем файле
+    (≤ 3 минут), «🔴 Бот не отвечает с HH:MM» — при устаревшем или недоступном.
+    """
+
+    def test_status_element_in_header(self, html: str) -> None:
+        assert 'id="bot-status"' in html
+
+    def test_status_script_reads_heartbeat(self, html: str) -> None:
+        assert "status.json" in html
+        assert "Бот работает" in html
+        assert "Бот не отвечает" in html
+
+    def test_status_stale_threshold_matches_heartbeat(self, html: str) -> None:
+        from bot.services.heartbeat import STALE_AFTER_SECONDS
+
+        assert str(STALE_AFTER_SECONDS) in html  # тот же порог, что у хартбита
+
+
 class TestCabinetLogin:
     """Ссылка «Войти в личный кабинет» на /login веб-кабинета (SPEC.md, §16.1)."""
 
@@ -140,6 +161,10 @@ class TestManualSync:
             "📝 Заключение врача",  # BTN_AP_CONC_BUTTON[doctor] (0.5.11, В27)
             "Как отметить, что визит состоялся?",  # FAQ (0.5.11, В38)
             "Можно ли сохранить заключение врача?",  # FAQ (0.5.11, В38)
+            "⚙️ Настройки и профиль",  # BTN_MENU_CONFIG (0.7.0, MU1)
+            "📊 Дневник и статистика",  # BTN_MENU_VIEWS (0.7.0, MU1)
+            "Готово ✅",  # BTN_DONE_KEYPAD (0.7.0, MU8)
+            "«📈 Открыть личный кабинет»",  # BTN_OPEN_CABINET (0.7.0)
         ],
     )
     def test_marker_present(self, html: str, marker: str) -> None:
@@ -152,6 +177,8 @@ class TestManualSync:
             "Напишите автору",  # удаление аккаунта — самоудаление в боте
             "хранятся на сервере проекта",  # сервер в Германии, Telegram (§16.1, Т6)
             "Частично…",  # кнопка переименована в 0.5.5 («Отметить принятые»)
+            "из восьми кнопок",  # меню перегруппировано в 0.7.0 (MU1)
+            "«Отправить отчет»",  # кнопка теперь «📄 Отчет» (0.7.0, MU4)
         ],
     )
     def test_stale_phrase_absent(self, html: str, stale: str) -> None:

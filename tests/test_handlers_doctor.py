@@ -32,13 +32,16 @@ CABINET_URL = "https://cabinet.example.org"
 
 
 def make_message(text: str | None = None, user_id: int = TG_ID) -> Message:
+    """Сообщение с привязанным мок-ботом (`.bot` — AsyncMock: pin/edit меню, 0.7.0)."""
+    from unittest.mock import AsyncMock
+
     return Message(
         message_id=1,
         date=datetime.now(timezone.utc),
         chat=Chat(id=user_id, type="private"),
         from_user=User(id=user_id, is_bot=False, first_name="Тест"),
         text=text,
-    )
+    ).as_(AsyncMock())
 
 
 def make_callback(data: str, message: Message | None = None, user_id: int = TG_ID) -> CallbackQuery:

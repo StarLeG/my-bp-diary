@@ -27,7 +27,9 @@ from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup
+from aiogram.filters import Command
+from aiogram.fsm.context import FSMContext
+from aiogram.types import BufferedInputFile, CallbackQuery, InlineKeyboardMarkup, Message
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -153,6 +155,19 @@ async def _support_footer(session: AsyncSession, user: User) -> Optional[str]:
 
 
 # ─────────────────────────── Статистика ───────────────────────────
+
+
+@router.message(Command("stats"))
+async def cmd_stats(message: Message, state: FSMContext, session: AsyncSession) -> None:
+    """/stats — экран выбора периода (§6.5, §6.9, 0.7.0, MU13).
+
+    Обёртка над экраном «Статистика»: FSM сбрасывается (канон §6.9), экран —
+    новым сообщением.
+    """
+    await state.clear()
+    user = await measurements_service.get_or_create_user(session, message.from_user.id)
+    text, markup = _periods_screen(user.ui_large)
+    await message.answer(text, reply_markup=markup)  # type: ignore[arg-type]
 
 
 @router.callback_query(F.data.in_({"menu:stats", "stats:periods"}))

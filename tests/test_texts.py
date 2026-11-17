@@ -34,7 +34,7 @@ class TestFormatting:
         assert texts.fmt_updated(135, 85, 72) == "✅ Обновлено: 135/85, пульс 72"
 
     def test_fmt_keypad_prompt(self) -> None:
-        """Экран калькулятора: шапка, поля, итог (§6.3, мокап V3)."""
+        """Экран калькулятора: шапка, поля, итог, подсказка (§6.3; 0.7.0, MU9)."""
         assert texts.fmt_keypad_prompt(135, 85, 72) == (
             "<b>🩺 Давление и пульс</b>\n"
             "\n"
@@ -43,7 +43,7 @@ class TestFormatting:
             "Пульс: 72\n"
             "\n"
             "Введено: 135/85 · пульс 72\n"
-            "Можно также написать: 120/80 72"
+            "Например: 130/85 70. Оставьте пульс пустым, если не мерили"
         )
 
     def test_fmt_keypad_prompt_empty_fields(self) -> None:
@@ -55,7 +55,7 @@ class TestFormatting:
             "Пульс: —\n"
             "\n"
             "Введено: —/— · пульс —\n"
-            "Можно также написать: 120/80 72"
+            "Например: 130/85 70. Оставьте пульс пустым, если не мерили"
         )
 
     def test_fmt_intake_item(self) -> None:
@@ -417,6 +417,8 @@ class TestScreenHeaders:
 
     #: Канонические шапки дословно из doc/SPEC.md §11 («Словарь шапок»).
     CANON = [
+        "📊 Дневник и статистика",
+        "⚙️ Настройки и профиль",
         "📊 Статистика",
         "⚙️ Настройки",
         "☀️ Напоминания",
@@ -441,11 +443,12 @@ class TestScreenHeaders:
     ]
 
     def test_dictionary_matches_canon(self) -> None:
-        """Словарь — ровно канон §11: 20 шапок, те же тексты в том же порядке."""
+        """Словарь — ровно канон §11: 23 шапки, те же тексты в том же порядке."""
         assert list(texts.SCREEN_HEADERS.values()) == self.CANON
 
     def test_keys_are_canonical(self) -> None:
         assert list(texts.SCREEN_HEADERS) == [
+            "views", "config",
             "stats", "settings", "reminders", "diary", "appointments", "profile",
             "stats_days", "stats_custom", "report", "meds", "archive", "about",
             "support", "doctor_patients", "doctor_panel", "admin_stats",

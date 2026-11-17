@@ -35,6 +35,7 @@ from typing import Any, Optional
 from zoneinfo import ZoneInfo
 
 from aiogram import F, Router
+from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, Message
@@ -301,7 +302,8 @@ async def _hub(
 async def _to_menu(callback: CallbackQuery) -> None:
     """Устаревшие кнопки без черновика — в главное меню (сообщение редактируется)."""
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
     )
     await callback.answer()
 
@@ -337,6 +339,22 @@ async def _archive_guard(
 
 
 # ─────────────────────────── Начало и отмена ───────────────────────────
+
+
+@router.message(Command("record"))
+async def cmd_record(
+    message: Message, state: FSMContext, session: AsyncSession
+) -> None:
+    """/record — сразу калькулятор (§6.9, 0.7.0, MU13).
+
+    Обёртка над экраном «Записать давление» (§6.3): прошлый черновик
+    сбрасывается, FSM очищается (канон §6.9), экран — новым сообщением.
+    """
+    user = await measurements_service.get_or_create_user(session, message.from_user.id)
+    await state.clear()
+    await state.set_state(MeasureInput.active)
+    await state.update_data(**{M_BUF: "", M_FIELD: "sys"})
+    await _show_calc(message, state, via_message=True, large=user.ui_large)
 
 
 @router.callback_query(
@@ -378,7 +396,8 @@ async def cb_measure_cancel(callback: CallbackQuery, state: FSMContext) -> None:
     """«Отмена» — сброс черновика и FSM, возврат в главное меню (правка не сохраняется)."""
     await state.clear()
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
     )
     await callback.answer()
 
@@ -508,7 +527,7 @@ async def cb_reset(
     await callback.answer()
 
 
-@router.message(MeasureInput.active)
+@router.message(MeasureInput.active, ~F.text.startswith("/"))
 async def msg_value(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Быстрая строка или одиночное число (§6.3; B5, C7, C12, C17).
 
@@ -573,7 +592,10 @@ async def _save(
     data = await state.get_data()
     if data.get(M_SYS) is None or data.get(M_DIA) is None:
         await _send(  # устаревшие кнопки без черновика — в главное меню
-            message, texts.MAIN_MENU, keyboards.main_menu(), via_message=via_message
+            message,
+            texts.MAIN_MENU,
+            keyboards.main_menu(telegram_id=message.from_user.id),  # type: ignore[union-attr]
+            via_message=via_message,
         )
         return
     sys_v, dia_v, pulse = data[M_SYS], data[M_DIA], data.get(M_PULSE)
@@ -629,7 +651,7 @@ async def cb_note(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(MeasureInput.note_input)
+@router.message(MeasureInput.note_input, ~F.text.startswith("/"))
 async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -> None:
     try:
         note = schemas.validate_note(message.text or "")
@@ -1101,7 +1123,7 @@ async def cb_feeling_other(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(MeasureInput.feeling_other)
+@router.message(MeasureInput.feeling_other, ~F.text.startswith("/"))
 async def msg_feeling_other(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -1198,7 +1220,7 @@ async def cb_archive_date(
     await callback.answer()
 
 
-@router.message(ArchiveInput.date)
+@router.message(ArchiveInput.date, ~F.text.startswith("/"))
 async def msg_archive_date(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -1245,7 +1267,10 @@ async def _archive_set_moment(
     raw_day = data.get(A_DATE)
     if raw_day is None:
         await _send(
-            message, texts.MAIN_MENU, keyboards.main_menu(), via_message=via_message
+            message,
+            texts.MAIN_MENU,
+            keyboards.main_menu(telegram_id=message.from_user.id),  # type: ignore[union-attr]
+            via_message=via_message,
         )
         return None
     user = await measurements_service.get_or_create_user(session, telegram_id)
@@ -1303,7 +1328,7 @@ async def cb_archive_time(
     await callback.answer()
 
 
-@router.message(ArchiveInput.time)
+@router.message(ArchiveInput.time, ~F.text.startswith("/"))
 async def msg_archive_time(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -1336,7 +1361,7 @@ async def cb_archive_quick(callback: CallbackQuery, state: FSMContext) -> None:
     await callback.answer()
 
 
-@router.message(ArchiveInput.quick)
+@router.message(ArchiveInput.quick, ~F.text.startswith("/"))
 async def msg_archive_quick(
     message: Message, state: FSMContext, session: AsyncSession
 ) -> None:
@@ -1500,6 +1525,7 @@ async def cb_arch_menu(callback: CallbackQuery, state: FSMContext) -> None:
     """«В меню» архива — сброс черновика и FSM, главное меню (§6.10)."""
     await state.clear()
     await callback.message.edit_text(  # type: ignore[union-attr]
-        texts.MAIN_MENU, reply_markup=keyboards.main_menu()
+        texts.MAIN_MENU,
+        reply_markup=keyboards.main_menu(telegram_id=callback.from_user.id),
     )
     await callback.answer()

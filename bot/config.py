@@ -62,6 +62,28 @@ def parse_admin_ids(raw: str) -> tuple[int, ...]:
     return tuple(result)
 
 
+def _env_float(name: str, default: float) -> float:
+    """Конечное число из окружения; пустое/битое/`nan`/`inf` — по умолчанию.
+
+    `float("nan")` и `float("inf")` не бросают ValueError, а ломают сравнения
+    анти-спама (§7.2) — отсекаются `math.isfinite` (ревью 2026-11-17).
+    """
+    import math
+
+    raw = os.getenv(name, "").strip()
+    if not raw:
+        return default
+    try:
+        value = float(raw)
+    except ValueError:
+        logger.warning("%s: %r — не число, беру %s", name, raw, default)
+        return default
+    if not math.isfinite(value):
+        logger.warning("%s: %r — не конечное число, беру %s", name, raw, default)
+        return default
+    return value
+
+
 def admin_ids_from_env() -> tuple[int, ...]:
     """ID администраторов прямо из окружения, без полной валидации `Settings`.
 
@@ -71,6 +93,15 @@ def admin_ids_from_env() -> tuple[int, ...]:
     `ADMIN_TELEGRAM_IDS`).
     """
     return parse_admin_ids(os.getenv("ADMIN_TELEGRAM_IDS", ""))
+
+
+def is_admin_id(telegram_id: int) -> bool:
+    """Пользователь — администратор (`ADMIN_TELEGRAM_IDS`, §18).
+
+    Быстрый вход «🛡 Админка» в главном меню (§18.1, 0.7.0) и проверки в
+    клавиатурах: без `BOT_TOKEN` тоже работает (импорт-безопасно).
+    """
+    return telegram_id in admin_ids_from_env()
 
 
 class Settings(BaseModel):
@@ -101,6 +132,13 @@ class Settings(BaseModel):
 
     db_path: str = "data/bot.sqlite3"
     """Путь к файлу SQLite."""
+    #: Файл-хартбит для статус-строки лендинга (0.7.0, ST2-А): в статической
+    #: директории лендинга, чтобы nginx отдавал его без маршрутизации.
+    status_path: str = "web/landing/status.json"
+    #: Анти-спам (§7.2): окно debounce двойных тапов и throttle callback'ов,
+    #: секунды. `0` — выключить (тестовый стенд: свободные нажатия).
+    debounce_seconds: float = 1.5
+    throttle_seconds: float = 1.0
 
     default_timezone: str = DEFAULT_TIMEZONE
     """Часовой пояс (IANA), если пользователь пропустил выбор."""
@@ -320,6 +358,9 @@ def get_settings() -> Settings:
         author_contact=os.getenv("AUTHOR_CONTACT", ""),
         group_url=os.getenv("GROUP_URL", ""),
         db_path=os.getenv("DB_PATH", "data/bot.sqlite3"),
+        status_path=os.getenv("STATUS_PATH", "web/landing/status.json"),
+        debounce_seconds=_env_float("DEBOUNCE_SECONDS", 1.5),
+        throttle_seconds=_env_float("THROTTLE_SECONDS", 1.0),
         default_timezone=os.getenv("DEFAULT_TIMEZONE", DEFAULT_TIMEZONE),
         log_level=os.getenv("LOG_LEVEL", "INFO"),
         web_secret_key=os.getenv("WEB_SECRET_KEY", ""),

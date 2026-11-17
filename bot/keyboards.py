@@ -8,6 +8,7 @@
 from __future__ import annotations
 
 import calendar
+import re
 from datetime import MINYEAR, date, timedelta
 from typing import Callable, Collection, Iterable, Mapping, Optional, Sequence
 
@@ -15,10 +16,31 @@ from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, LinkPrevie
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
 from bot import texts
+from bot.config import is_admin_id
 from bot.models import Medication
 
 #: Максимальная длина callback_data в байтах (ограничение Telegram).
 CALLBACK_DATA_LIMIT = 64
+
+# ─────────────────── Смысловой канон цветов (§11, 0.7.0, MU3/MU7) ───────────────────
+# `InlineKeyboardButton.style`: success (зелёный) — подтверждение/сохранение,
+# primary (синий) — перейти/отложить, danger (красный) — пропуск/разрушение.
+# Применяется независимо от `ui_large` (крупный режим — только раскладка).
+STYLE_SUCCESS = "success"
+STYLE_PRIMARY = "primary"
+STYLE_DANGER = "danger"
+
+
+def styled(text: str, data: str, style: Optional[str] = None) -> InlineKeyboardButton:
+    """Callback-кнопка с цветом канона §11 (без стиля — обычный вид)."""
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
+
+
+def cancel_btn(data: str) -> InlineKeyboardButton:
+    """«Отмена» — danger (§11, канон цветов: «красный = опасность/отмена»)."""
+    return InlineKeyboardButton(
+        text=texts.BTN_CANCEL, callback_data=data, style=STYLE_DANGER
+    )
 
 # ─────────────────────────── Области callback_data ───────────────────────────
 # menu:  главное меню
@@ -115,26 +137,71 @@ def _layout_rows(
 # ─────────────────────────── Главное меню ───────────────────────────
 
 
-def main_menu(is_doctor: bool = False) -> InlineKeyboardMarkup:
-    """Главное меню (SPEC.md, раздел 6.2; «Отправить отчет» — §21).
+def main_menu(
+    is_doctor: bool = False, telegram_id: Optional[int] = None
+) -> InlineKeyboardMarkup:
+    """Главное меню (SPEC.md, §6.2; 0.7.0, MU1–MU5): 5 рядов вместо девяти кнопок.
 
-    `is_doctor` — пользователь ещё и врач: внизу кнопка «🩺 Кабинет врача»
-    (меню врача, §21, N5).
+    «✍️ Записать давление» — акцент `style: success` (MU3), «📄 Отчет» / «ℹ️ О боте» —
+    пара коротких подписей (MU5). Подменю: `menu:views` («📊 Дневник и статистика»),
+    `menu:config` («⚙️ Настройки и профиль»). `is_doctor` — пользователь ещё и врач:
+    кнопка «🩺 Кабинет врача» (меню врача, §21, N5). `telegram_id` — для быстрого
+    входа «🛡 Админка» (только админам из `ADMIN_TELEGRAM_IDS`, §18.1, 0.7.0).
     """
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_MEASURE, callback_data="menu:measure", style=STYLE_SUCCESS
+        )
+    )
     builder.row(
         InlineKeyboardButton(text=texts.BTN_ADD_RECORD, callback_data="add:menu")
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DIARY, callback_data="menu:diary"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_APPOINTMENTS, callback_data="ap:list"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_STATS, callback_data="menu:stats"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_SETTINGS, callback_data="menu:settings"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CABINET, callback_data="menu:cabinet"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_SEND_REPORT, callback_data="menu:report"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_ABOUT, callback_data="menu:about"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_MENU_VIEWS, callback_data="menu:views")
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_MENU_CONFIG, callback_data="menu:config")
+    )
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_SEND_REPORT, callback_data="menu:report"),
+        InlineKeyboardButton(text=texts.BTN_ABOUT, callback_data="menu:about"),
+    )
     if is_doctor:
         builder.row(InlineKeyboardButton(text=texts.BTN_DOCTOR_PANEL, callback_data="doc:menu"))
+    if telegram_id is not None and is_admin_id(telegram_id):
+        builder.row(
+            InlineKeyboardButton(text=texts.BTN_ADMIN_PANEL, callback_data="adm:menu")
+        )
+    return builder.as_markup()
+
+
+def views_menu_kb() -> InlineKeyboardMarkup:
+    """Подменю «📊 Дневник и статистика» (§6.2, 0.7.0, MU2): «Назад» → главное меню."""
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_DIARY, callback_data="menu:diary"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_STATS, callback_data="menu:stats"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_APPOINTMENTS, callback_data="ap:list")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def config_menu_kb() -> InlineKeyboardMarkup:
+    """Подменю «⚙️ Настройки и профиль» (§6.2, 0.7.0, MU2): «Назад» → главное меню.
+
+    «👤 Мои данные» и «💊 Мои лекарства» — прямыми кнопками (без дублей в
+    «Настройках», MU2): экраны те же (`set:profile`, `set:meds`).
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(InlineKeyboardButton(text=texts.BTN_CABINET, callback_data="menu:cabinet"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE, callback_data="set:profile"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_MY_MEDS, callback_data="set:meds"))
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_SETTINGS, callback_data="menu:settings")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
 
 
@@ -158,18 +225,22 @@ def keypad_kb(
     *,
     large: bool = False,
 ) -> InlineKeyboardMarkup:
-    """Клавиатура-калькулятор (SPEC.md, §6.3; 0.6.0, мокап V3).
+    """Клавиатура-калькулятор (SPEC.md, §6.3; 0.7.0, мокап MU8).
 
     Ряд итога — кнопки полей (`m:field:{sys|dia|pulse}`): тап возвращает фокус
     в поле, активное — с «▸ ». Значения — `(систолическое, диастолическое,
-    пульс)`, пустое — «—». Цифры 0–9 пишут в буфер активного поля, «C»
-    (`m:key:clear`) / «⌫» (`m:key:bksp`) действуют на активное поле, «Готово»
-    (`m:key:ok`) — сохранить, «Изменить» (`m:reset`) — сброс полей с фокусом в
-    систолическое, «Отмена» (`m:cancel`) — в меню. Кнопки «Пропустить» нет
-    (R7 = А): пустой пульс — `pulse = NULL`.
+    пульс)`, пустое — «—». Цифры пишут в буфер активного поля, «C»
+    (`m:key:clear`) / «⌫» (`m:key:bksp`) действуют на активное поле, широкая
+    «Готово ✅» (`m:key:ok`, `style: success`) — сохранить, «Изменить»
+    (`m:reset`) — сброс полей с фокусом в систолическое, «Отмена» (`m:cancel`,
+    `style: danger`) — в меню. Кнопки «Пропустить» нет (R7 = А): пустой пульс —
+    `pulse = NULL`.
 
-    Крупный режим (§11): итог — по одной кнопке, цифры парами (1–0 по порядку),
-    «C»/«⌫» рядом, «Готово» / «Изменить» / «Отмена» — каждая отдельной строкой.
+    Обычный режим (MU8): цифры рядами 1-2-3 / 4-5-6 / 7-8-9 (как на калькуляторе),
+    служебный ряд «C» «0» «⌫», «Готово ✅» — вся строка, внизу пара
+    «Изменить» / «Отмена». Крупный режим (§11): итог — по одной кнопке, цифры
+    парами (1–0 по порядку), «C»/«⌫» рядом, «Готово ✅», «Изменить» и «Отмена» —
+    каждая отдельной строкой. Стили не зависят от режима (§11).
     """
     builder = InlineKeyboardBuilder()
 
@@ -187,6 +258,10 @@ def keypad_kb(
         _field_button("dia", values[1]),
         _field_button("pulse", values[2]),
     ]
+    done = InlineKeyboardButton(
+        text=texts.BTN_DONE_KEYPAD, callback_data="m:key:ok", style=STYLE_SUCCESS
+    )
+    reset = InlineKeyboardButton(text=texts.BTN_RESET, callback_data="m:reset")
     if large:
         rows.extend([[button] for button in field_buttons])
         for digits in ((1, 2), (3, 4), (5, 6), (7, 8), (9, 0)):
@@ -206,11 +281,11 @@ def keypad_kb(
                 ),
             ]
         )
-        rows.append([InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok")])
-        rows.append([InlineKeyboardButton(text=texts.BTN_RESET, callback_data="m:reset")])
+        rows.append([done])
+        rows.append([reset])
     else:
         rows.append(field_buttons)
-        for digits in ((7, 8, 9), (4, 5, 6), (1, 2, 3)):
+        for digits in ((1, 2, 3), (4, 5, 6), (7, 8, 9)):
             rows.append(
                 [
                     InlineKeyboardButton(text=str(d), callback_data=f"m:key:{d}")
@@ -228,13 +303,10 @@ def keypad_kb(
                 ),
             ]
         )
-        rows.append(
-            [
-                InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:key:ok"),
-                InlineKeyboardButton(text=texts.BTN_RESET, callback_data="m:reset"),
-            ]
-        )
-    rows.append([InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel")])
+        rows.append([done])
+        rows.append([reset, cancel_btn("m:cancel")])
+    if large:
+        rows.append([cancel_btn("m:cancel")])
     for row in rows:
         builder.row(*row)
     return builder.as_markup()
@@ -263,8 +335,12 @@ def intake_meds_kb(
                 callback_data=f"m:med:pick:{med.id}",
             )
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:med:done"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:med:cancel"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_DONE, callback_data="m:med:done", style=STYLE_SUCCESS
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="m:med:cancel"))
     return builder.as_markup()
 
 
@@ -298,8 +374,12 @@ def factor_kb(checked: set[str], *, large: bool = False) -> InlineKeyboardMarkup
                 text=f"{prefix}{label}", callback_data=f"m:fact:pick:{mark}"
             )
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="m:fact:done"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:fact:cancel"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_DONE, callback_data="m:fact:done", style=STYLE_SUCCESS
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="m:fact:cancel"))
     return builder.as_markup()
 
 
@@ -337,13 +417,9 @@ def event_saved_kb(event_id: int, type_: str) -> InlineKeyboardMarkup:
 def event_del_kb(event_id: int) -> InlineKeyboardMarkup:
     """Подтверждение удаления события (§6.14): «Да, удалить» / «Нет»."""
     builder = InlineKeyboardBuilder()
-    _layout_rows(
-        builder,
-        (
-            (f"Да, удалить", f"ev:del:{event_id}:ok"),
-            (texts.BTN_AP_NO, f"ev:open:{event_id}"),
-        ),
-        large=False,
+    builder.row(
+        styled("Да, удалить", f"ev:del:{event_id}:ok", STYLE_DANGER),
+        styled(texts.BTN_AP_NO, f"ev:open:{event_id}"),
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()
@@ -356,7 +432,7 @@ def walk_kb() -> InlineKeyboardMarkup:
         builder.row(
             InlineKeyboardButton(text=label, callback_data=f"add:walk:{minutes}")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="add:cancel"))
     return builder.as_markup()
 
 
@@ -389,8 +465,10 @@ def food_kb(checked: set[str], time_mode: str = "now") -> InlineKeyboardMarkup:
         InlineKeyboardButton(text=other_text, callback_data="add:food:time:other"),
     )
     builder.row(
-        InlineKeyboardButton(text=texts.BTN_DONE, callback_data="add:food:done"),
-        InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"),
+        InlineKeyboardButton(
+            text=texts.BTN_DONE, callback_data="add:food:done", style=STYLE_SUCCESS
+        ),
+        InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="add:cancel"),
     )
     return builder.as_markup()
 
@@ -402,7 +480,7 @@ def stress_kb() -> InlineKeyboardMarkup:
         builder.row(
             InlineKeyboardButton(text=label, callback_data=f"add:stress:{variant}")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="add:cancel"))
     return builder.as_markup()
 
 
@@ -413,7 +491,7 @@ def sleep_kb() -> InlineKeyboardMarkup:
         builder.row(
             InlineKeyboardButton(text=label, callback_data=f"add:sleep:{rating}")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="add:cancel"))
     return builder.as_markup()
 
 
@@ -428,7 +506,7 @@ def event_time_kb(*, large: bool = False) -> InlineKeyboardMarkup:
         ),
         large=large,
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="add:back"))
     return builder.as_markup()
 
 
@@ -440,7 +518,7 @@ def event_text_kb(*, required: bool = False, large: bool = False) -> InlineKeybo
         builder.row(
             InlineKeyboardButton(text=texts.BTN_SKIP, callback_data="add:text:skip")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="add:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="add:back"))
     return builder.as_markup()
 
 
@@ -485,7 +563,7 @@ def feeling_kb(large: bool = False) -> InlineKeyboardMarkup:
 def note_cancel_kb() -> InlineKeyboardMarkup:
     """Свободный ввод заметки: только «Отмена» (каждое состояние FSM — с ней)."""
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="m:cancel"))
     return builder.as_markup()
 
 
@@ -531,7 +609,7 @@ def med_taken_readonly_kb() -> InlineKeyboardMarkup:
 def input_cancel_kb(callback: str = "m:cancel") -> InlineKeyboardMarkup:
     """Свободный ввод (число, время, таймзона): кнопка «Отмена»."""
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=callback))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data=callback))
     return builder.as_markup()
 
 
@@ -577,7 +655,7 @@ def archive_date_kb(large: bool = False) -> InlineKeyboardMarkup:
         ),
         large=large,
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="m:cancel"))
     return builder.as_markup()
 
 
@@ -595,7 +673,7 @@ def archive_time_kb() -> InlineKeyboardMarkup:
             text=texts.BTN_OTHER, callback_data="set:archive:time:other"
         )
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="m:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="m:cancel"))
     return builder.as_markup()
 
 
@@ -693,7 +771,9 @@ def diary_kb(
     builder.row(*diary_filter_kb(active_filter).inline_keyboard[0])
     if is_empty:
         builder.row(
-            InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="menu:measure")
+            InlineKeyboardButton(
+                text=texts.BTN_MEASURE, callback_data="menu:measure", style=STYLE_PRIMARY
+            )
         )
     builder.row(
         InlineKeyboardButton(text=texts.BTN_ADD_RECORD, callback_data="add:menu")
@@ -706,7 +786,7 @@ def diary_kb(
         builder.row(
             InlineKeyboardButton(text=texts.BTN_MARK_INTAKE, callback_data="d:mt")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:views"))
     return builder.as_markup()
 
 
@@ -722,9 +802,17 @@ def mark_intake_slots_kb(slots: Sequence[str]) -> InlineKeyboardMarkup:
 
 
 def intake_done_kb() -> InlineKeyboardMarkup:
-    """После отметки в напоминании: «Записать давление» / «В меню» (§6.7, 0.5.5, U1)."""
+    """После отметки в напоминании: «Записать давление» / «В меню» (§6.7, 0.5.5, U1).
+
+    «Записать давление» — `style: primary` («перейти», канон §11; успех — только
+    акцент главного меню, MU3/MU7).
+    """
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_MEASURE, callback_data="rem:write"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_MEASURE, callback_data="rem:write", style=STYLE_PRIMARY
+        )
+    )
     builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
     return builder.as_markup()
 
@@ -744,7 +832,7 @@ def stats_period_kb(large: bool = False) -> InlineKeyboardMarkup:
         large=large,
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_CUSTOM_PERIOD, callback_data="stats:cal"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:views"))
     return builder.as_markup()
 
 
@@ -981,9 +1069,7 @@ def settings_kb(ui_large: bool = False) -> InlineKeyboardMarkup:
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_TARGETS, callback_data="set:targets"))
     builder.row(InlineKeyboardButton(text=texts.BTN_REMINDERS, callback_data="set:reminders"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_MY_MEDS, callback_data="set:meds"))
     builder.row(InlineKeyboardButton(text=texts.BTN_MY_DOCTOR, callback_data="set:doctor"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE, callback_data="set:profile"))
     builder.row(InlineKeyboardButton(text=texts.BTN_TIMEZONE, callback_data="set:tz"))
     builder.row(
         InlineKeyboardButton(text=texts.BTN_ARCHIVE, callback_data="set:archive")
@@ -993,8 +1079,8 @@ def settings_kb(ui_large: bool = False) -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text=texts.BTN_CONSENT_SETTINGS, callback_data="set:consent")
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete", style=STYLE_DANGER))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:config"))
     return builder.as_markup()
 
 
@@ -1037,16 +1123,18 @@ def doctor_tg_invite_kb() -> InlineKeyboardMarkup:
 
 
 def doctor_invite_kb(code: str, large: bool = False) -> InlineKeyboardMarkup:
-    """Приглашение у врача: «✅ Принять» / «Отклонить» (§21, п.5; пара §11)."""
+    """Приглашение у врача: «✅ Принять» / «Отклонить» (§21, п.5; пара §11).
+
+    «Принять» — `style: success` (канон §11, MU7).
+    """
     builder = InlineKeyboardBuilder()
-    _layout_rows(
-        builder,
-        (
-            (texts.BTN_ACCEPT, f"doc:accept:{code}"),
-            (texts.BTN_DECLINE, f"doc:decline:{code}"),
-        ),
-        large=large,
-    )
+    accept = styled(texts.BTN_ACCEPT, f"doc:accept:{code}", STYLE_SUCCESS)
+    decline = styled(texts.BTN_DECLINE, f"doc:decline:{code}")
+    if large:
+        builder.row(accept)
+        builder.row(decline)
+    else:
+        builder.row(accept, decline)
     return builder.as_markup()
 
 
@@ -1120,10 +1208,12 @@ def delete_account_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=texts.BTN_CONFIRM_DELETE_ACCOUNT, callback_data="set:delete:ok"
+            text=texts.BTN_CONFIRM_DELETE_ACCOUNT,
+            callback_data="set:delete:ok",
+            style=STYLE_DANGER,
         )
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="set:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="set:back"))
     return builder.as_markup()
 
 
@@ -1289,7 +1379,7 @@ def medications_list_kb(
     if has_medications:
         builder.row(InlineKeyboardButton(text=texts.BTN_EDIT, callback_data="med:edit"))
         builder.row(InlineKeyboardButton(text=texts.BTN_DELETE, callback_data="med:del"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:config"))
     return builder.as_markup()
 
 
@@ -1319,7 +1409,7 @@ def med_name_input_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text=texts.BTN_KEEP_AS_IS, callback_data="med:name:same")
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="med:cancel"))
     return builder.as_markup()
 
 
@@ -1358,7 +1448,7 @@ def dosage_kb(*, keep: bool = False, large: bool = False) -> InlineKeyboardMarku
                 text=texts.BTN_KEEP_AS_IS, callback_data="med:dose:same"
             )
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="med:cancel"))
     return builder.as_markup()
 
 
@@ -1378,8 +1468,12 @@ def slots_multiselect_kb(
                 text=f"{mark}{texts.SLOT_LABELS[slot]}", callback_data=f"{toggle_prefix}:{slot}"
             )
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data=done_callback))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="med:cancel"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_DONE, callback_data=done_callback, style=STYLE_SUCCESS
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="med:cancel"))
     return builder.as_markup()
 
 
@@ -1419,11 +1513,12 @@ def slot_message_kb(
     if mode == "meds" and not has_medications:
         mode = "both"
     key = f"{slot}:{reminder_day_key(day)}"
-    measure = (texts.BTN_MEASURE, f"rem:write:{key}")
-    take_all = (texts.BTN_TAKE_ALL, f"rem:all:{key}")
-    partial = (texts.BTN_PARTIAL, f"rem:partial:{key}")
-    snooze = (texts.BTN_SNOOZE_30, f"rem:snooze:{key}")
-    skip = (texts.BTN_SKIP_SLOT, f"rem:skip:{key}")
+    # (текст, callback, style) — канон цветов §11 (MU7); стили не зависят от режима.
+    measure = (texts.BTN_MEASURE, f"rem:write:{key}", STYLE_PRIMARY)
+    take_all = (texts.BTN_TAKE_ALL, f"rem:all:{key}", STYLE_SUCCESS)
+    partial = (texts.BTN_PARTIAL, f"rem:partial:{key}", None)
+    snooze = (texts.BTN_SNOOZE_30, f"rem:snooze:{key}", STYLE_PRIMARY)
+    skip = (texts.BTN_SKIP_SLOT, f"rem:skip:{key}", STYLE_DANGER)
     with_meds = has_medications and mode != "pressure"
     if mode == "meds":
         # «Только лекарства»: пара «Принял всё ✓»/«Отметить принятые», остальное по одной.
@@ -1437,12 +1532,10 @@ def slot_message_kb(
     builder = InlineKeyboardBuilder()
     if large:
         for button in (button for row in rows for button in row):
-            builder.row(InlineKeyboardButton(text=button[0], callback_data=button[1]))
+            builder.row(styled(button[0], button[1], button[2]))
     else:
         for row in rows:
-            builder.row(
-                *[InlineKeyboardButton(text=text, callback_data=data) for text, data in row]
-            )
+            builder.row(*[styled(text, data, style) for text, data, style in row])
     return builder.as_markup()
 
 
@@ -1468,8 +1561,12 @@ def partial_meds_kb(
         builder.row(
             InlineKeyboardButton(text=f"{mark}{label}", callback_data=f"{area}:pt:{key}:{med_id}")
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data=f"{area}:pd:{key}"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=f"{area}:pc:{key}"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_DONE, callback_data=f"{area}:pd:{key}", style=STYLE_SUCCESS
+        )
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data=f"{area}:pc:{key}"))
     return builder.as_markup()
 
 
@@ -1494,15 +1591,15 @@ def remeasure_kb(reminder_id: int, large: bool = False) -> InlineKeyboardMarkup:
     напоминать» действуют по строке повтора, поэтому несут её id в callback_data.
     """
     builder = InlineKeyboardBuilder()
-    _layout_rows(
-        builder,
-        (
-            (texts.BTN_REMEASURE_NOW, "rem:now"),
-            (texts.BTN_SNOOZE_30, f"rem:snooze:{reminder_id}"),
-            (texts.BTN_REMEASURE_OFF, f"rem:off:{reminder_id}"),
-        ),
-        large=large,
-    )
+    now = styled(texts.BTN_REMEASURE_NOW, "rem:now", STYLE_PRIMARY)
+    snooze = styled(texts.BTN_SNOOZE_30, f"rem:snooze:{reminder_id}", STYLE_PRIMARY)
+    off = styled(texts.BTN_REMEASURE_OFF, f"rem:off:{reminder_id}")
+    if large:
+        for button in (now, snooze, off):
+            builder.row(button)
+    else:
+        builder.row(now, snooze)
+        builder.row(off)
     return builder.as_markup()
 
 
@@ -1573,7 +1670,11 @@ def onboarding_slots_kb(selected: Iterable[str]) -> InlineKeyboardMarkup:
                 text=f"{mark}{texts.SLOT_LABELS[slot]}", callback_data=f"onb:slot:{slot}"
             )
         )
-    builder.row(InlineKeyboardButton(text=texts.BTN_DONE, callback_data="onb:slots:done"))
+    builder.row(
+        InlineKeyboardButton(
+            text=texts.BTN_DONE, callback_data="onb:slots:done", style=STYLE_SUCCESS
+        )
+    )
     builder.row(
         InlineKeyboardButton(text=texts.BTN_NO_REMINDERS, callback_data="onb:slots:none")
     )
@@ -1632,6 +1733,29 @@ def support_kb(url: str) -> InlineKeyboardMarkup:
     return builder.as_markup()
 
 
+#: URL, которые Telegram принимает в inline URL-кнопках (проверено пробой,
+#: 2026-11-17): `https://`, `http://<IP>`, `http://<имя.с.точками>`. Одночастотные
+#: имена (`cabinet`, `localhost`) сервер отклоняет («Wrong HTTP URL») — для них
+#: сообщение без кнопки-ссылки.
+_URL_BUTTON_OK = re.compile(r"^https://|http://(?:\d{1,3}(?:\.\d{1,3}){3}|[\w-]+(?:\.[\w-]+)+)")
+
+
+def cabinet_link_kb(url: str) -> InlineKeyboardMarkup:
+    """Сообщение со ссылкой на ЛК (0.7.0): URL-кнопка + «В меню».
+
+    Ссылка остаётся и в тексте (для копирования/пересылки), но нажимаемой
+    делает её кнопка: в отредактированном сообщении URL кликабельным не
+    становится (баг-репорт 2026-11-17). Кнопка — только для URL, которые
+    Telegram принимает (`_URL_BUTTON_OK`, проба 2026-11-17): иначе сервер
+    роняет сообщение «Wrong HTTP URL» (найдено роботом-приёмкой).
+    """
+    builder = InlineKeyboardBuilder()
+    if _URL_BUTTON_OK.match(url):
+        builder.row(InlineKeyboardButton(text=texts.BTN_OPEN_CABINET, url=url))
+    builder.row(InlineKeyboardButton(text=texts.BTN_IN_MENU, callback_data="menu:back"))
+    return builder.as_markup()
+
+
 # ─────────────────── Административная панель (SPEC.md, §18) ───────────────────
 
 
@@ -1684,7 +1808,7 @@ def admin_broadcast_preview_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text=texts.BTN_BCAST_CONFIRM, callback_data="adm:bcast:confirm")
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="adm:bcast:cancel"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="adm:bcast:cancel"))
     return builder.as_markup()
 
 
@@ -1714,7 +1838,7 @@ def consent_kb(privacy_url: str, existing: bool) -> InlineKeyboardMarkup:
     )
     if existing:
         builder.row(
-            InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete")
+            InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete", style=STYLE_DANGER)
         )
     return builder.as_markup()
 
@@ -1722,7 +1846,7 @@ def consent_kb(privacy_url: str, existing: bool) -> InlineKeyboardMarkup:
 def consent_declined_kb() -> InlineKeyboardMarkup:
     """Б3 существующему: «Удалить аккаунт» / «Назад к согласию»."""
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_DELETE_ACCOUNT, callback_data="set:delete", style=STYLE_DANGER))
     builder.row(InlineKeyboardButton(text=texts.BTN_CONSENT_BACK, callback_data="cons:back"))
     return builder.as_markup()
 
@@ -1731,7 +1855,11 @@ def consent_settings_kb() -> InlineKeyboardMarkup:
     """Б6: «Отозвать согласие» / «Назад»."""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text=texts.BTN_CONSENT_WITHDRAW, callback_data="set:consent:withdraw")
+        InlineKeyboardButton(
+            text=texts.BTN_CONSENT_WITHDRAW,
+            callback_data="set:consent:withdraw",
+            style=STYLE_DANGER,
+        )
     )
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
     return builder.as_markup()
@@ -1742,10 +1870,12 @@ def consent_withdraw_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.row(
         InlineKeyboardButton(
-            text=texts.BTN_CONSENT_WITHDRAW_OK, callback_data="set:consent:withdraw:ok"
+            text=texts.BTN_CONSENT_WITHDRAW_OK,
+            callback_data="set:consent:withdraw:ok",
+            style=STYLE_DANGER,
         )
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="set:consent"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="set:consent"))
     return builder.as_markup()
 
 
@@ -1765,7 +1895,7 @@ def doctor_self_consent_kb(code: Optional[str] = None) -> InlineKeyboardMarkup:
     no = f"doc:consent:no:{code}" if code else "doc:consent:no"
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_CONSENT_YES, callback_data=yes))
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data=no))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data=no))
     return builder.as_markup()
 
 
@@ -1784,14 +1914,15 @@ def confirm_doctor_kb(doctor_id: int, pending: bool) -> InlineKeyboardMarkup:
 
 
 def profile_kb(filled: bool) -> InlineKeyboardMarkup:
-    """П1 «Заполнить» / П2 «Изменить» + «Удалить данные»; «Назад» — в настройки."""
+    """П1 «Заполнить» / П2 «Изменить» + «Удалить данные»; «Назад» — в подменю
+    «⚙️ Настройки и профиль» (0.7.0, MU2; канон UI1 «Назад» — уровень выше»)."""
     builder = InlineKeyboardBuilder()
     if filled:
         builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_EDIT, callback_data="prof:edit"))
         builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_DELETE, callback_data="prof:del"))
     else:
         builder.row(InlineKeyboardButton(text=texts.BTN_PROFILE_FILL, callback_data="prof:edit"))
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="set:back"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:config"))
     return builder.as_markup()
 
 
@@ -1801,7 +1932,7 @@ def profile_middle_kb() -> InlineKeyboardMarkup:
     builder.row(
         InlineKeyboardButton(text=texts.BTN_PROFILE_NO_MIDDLE, callback_data="prof:nomiddle")
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="prof:show"))
     return builder.as_markup()
 
 
@@ -1813,7 +1944,7 @@ def profile_sex_kb(large: bool = False) -> InlineKeyboardMarkup:
         ((texts.BTN_SEX_MALE, "prof:sex:m"), (texts.BTN_SEX_FEMALE, "prof:sex:f")),
         large=large,
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="prof:show"))
     return builder.as_markup()
 
 
@@ -1821,9 +1952,11 @@ def profile_delete_kb() -> InlineKeyboardMarkup:
     """Подтверждение удаления данных: «Да, удалить» / «Отмена»."""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text=texts.BTN_PROFILE_DELETE_OK, callback_data="prof:del:ok")
+        InlineKeyboardButton(
+            text=texts.BTN_PROFILE_DELETE_OK, callback_data="prof:del:ok", style=STYLE_DANGER
+        )
     )
-    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, callback_data="prof:show"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CANCEL, style=STYLE_DANGER, callback_data="prof:show"))
     return builder.as_markup()
 
 
@@ -1838,8 +1971,8 @@ def profile_prompt_kb() -> InlineKeyboardMarkup:
 # ─────────────────── Визиты и анализы (SPEC.md, §6.13, 0.5.8) ───────────────────
 
 
-def _btn(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data=data)
+def _btn(text: str, data: str, style: Optional[str] = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=data, style=style)
 
 
 def ap_list_kb(
@@ -2022,11 +2155,11 @@ def ap_after_kb(appointment_id: int, kind: str, large: bool = False) -> InlineKe
     done, moved, missed = texts.AP_AFTER_BUTTONS[kind]
     builder = InlineKeyboardBuilder()
     if large:
-        builder.row(_btn(done, f"ap:after:{appointment_id}:done"))
+        builder.row(_btn(done, f"ap:after:{appointment_id}:done", STYLE_SUCCESS))
         builder.row(_btn(moved, f"ap:after:{appointment_id}:moved"))
         builder.row(_btn(missed, f"ap:after:{appointment_id}:missed"))
     else:
-        builder.row(_btn(done, f"ap:after:{appointment_id}:done"))
+        builder.row(_btn(done, f"ap:after:{appointment_id}:done", STYLE_SUCCESS))
         builder.row(
             _btn(moved, f"ap:after:{appointment_id}:moved"),
             _btn(missed, f"ap:after:{appointment_id}:missed"),
@@ -2086,11 +2219,11 @@ def ap_mark_kb(appointment_id: int, kind: str, large: bool = False) -> InlineKey
     done, moved, missed = texts.AP_AFTER_BUTTONS[kind]
     builder = InlineKeyboardBuilder()
     if large:
-        builder.row(_btn(done, f"ap:mark:{appointment_id}:done"))
+        builder.row(_btn(done, f"ap:mark:{appointment_id}:done", STYLE_SUCCESS))
         builder.row(_btn(moved, f"ap:mark:{appointment_id}:moved"))
         builder.row(_btn(missed, f"ap:mark:{appointment_id}:missed"))
     else:
-        builder.row(_btn(done, f"ap:mark:{appointment_id}:done"))
+        builder.row(_btn(done, f"ap:mark:{appointment_id}:done", STYLE_SUCCESS))
         builder.row(
             _btn(moved, f"ap:mark:{appointment_id}:moved"),
             _btn(missed, f"ap:mark:{appointment_id}:missed"),
@@ -2168,7 +2301,7 @@ def ap_conc_kb(
 def ap_conc_cancel_kb(appointment_id: int) -> InlineKeyboardMarkup:
     """Ожидание ввода (FSM текста и фото): «Отмена» — к списку заключений (§8)."""
     builder = InlineKeyboardBuilder()
-    builder.row(_btn(texts.BTN_AP_CONC_CANCEL, f"ap:conc:{appointment_id}"))
+    builder.row(_btn(texts.BTN_AP_CONC_CANCEL, f"ap:conc:{appointment_id}", STYLE_DANGER))
     return builder.as_markup()
 
 
@@ -2176,7 +2309,11 @@ def ap_conc_del_kb(appointment_id: int, conclusion_id: int) -> InlineKeyboardMar
     """Подтверждение удаления заключения: «Да, удалить» / «Нет» (канон бота)."""
     builder = InlineKeyboardBuilder()
     builder.row(
-        _btn(texts.BTN_AP_DELETE_YES, f"ap:conc:{appointment_id}:{conclusion_id}:del:ok")
+        _btn(
+            texts.BTN_AP_DELETE_YES,
+            f"ap:conc:{appointment_id}:{conclusion_id}:del:ok",
+            STYLE_DANGER,
+        )
     )
     builder.row(_btn(texts.BTN_AP_NO, f"ap:conc:{appointment_id}"))
     return builder.as_markup()
@@ -2209,11 +2346,24 @@ def ap_edit_kb(appointment_id: int) -> InlineKeyboardMarkup:
 
 
 def ap_confirm_kb(
-    yes_text: str, yes_data: str, no_data: str, large: bool = False
+    yes_text: str,
+    yes_data: str,
+    no_data: str,
+    large: bool = False,
+    yes_style: Optional[str] = None,
 ) -> InlineKeyboardMarkup:
-    """Подтверждение: «Да, …» / «Нет» (пара §11)."""
+    """Подтверждение: «Да, …» / «Нет» (пара §11).
+
+    `yes_style` — канон цветов §11: удаления — `STYLE_DANGER` («Да, удалить»).
+    """
     builder = InlineKeyboardBuilder()
-    _layout_rows(builder, ((yes_text, yes_data), (texts.BTN_AP_NO, no_data)), large=large)
+    yes = styled(yes_text, yes_data, yes_style)
+    no = styled(texts.BTN_AP_NO, no_data)
+    if large:
+        builder.row(yes)
+        builder.row(no)
+    else:
+        builder.row(yes, no)
     return builder.as_markup()
 
 

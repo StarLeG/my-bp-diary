@@ -63,7 +63,10 @@ def edit(mocker):
 
 @pytest.fixture
 def answer(mocker):
-    return mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
+    """Возврат `answer` — сообщение с числовым `message_id` (§6.2, 0.7.0, MU6)."""
+    mock = mocker.patch.object(Message, "answer", new_callable=mocker.AsyncMock)
+    mock.return_value = mocker.Mock(message_id=321)
+    return mock
 
 
 @pytest.fixture

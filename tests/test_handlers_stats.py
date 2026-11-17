@@ -100,6 +100,24 @@ def today_of(user: UserModel):
     return datetime.now(ZoneInfo(user.timezone)).date()
 
 
+class TestStatsCommand:
+    """/stats — экран выбора периода (§6.5, §6.9, 0.7.0, MU13)."""
+
+    async def test_stats_opens_periods(self, session, user, answer) -> None:
+        from aiogram.fsm.context import FSMContext
+        from aiogram.fsm.storage.base import StorageKey
+        from aiogram.fsm.storage.memory import MemoryStorage
+
+        state = FSMContext(
+            storage=MemoryStorage(), key=StorageKey(bot_id=1, chat_id=TG_ID, user_id=TG_ID)
+        )
+        await state.set_state("Draft:input")
+        await stats.cmd_stats(make_message("/stats"), state, session)
+        assert answer.call_args.args[0] == texts.BTN_STATS
+        assert answer.call_args.kwargs["reply_markup"] == keyboards.stats_period_kb(user.ui_large)
+        assert await state.get_state() is None
+
+
 class TestPeriodsScreen:
     async def test_menu_shows_periods(self, session, edit, cb_answer) -> None:
         await stats.cb_stats_periods(make_callback("menu:stats", make_message()), session)

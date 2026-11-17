@@ -19,6 +19,9 @@ services:
       DB_PATH: /app/data/bot.sqlite3
     volumes:
       - bot-data:/app/data
+      # Хартбит статус-строки лендинга (0.7.0, ST2-А): тик пишет
+      # web/landing/status.json — отдаётся статикой Caddy/nginx лендинга.
+      - ./web/landing:/app/web/landing
     restart: unless-stopped
 
   cabinet:

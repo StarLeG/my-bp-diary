@@ -70,6 +70,8 @@ def make_app(mocker, order: list[str]) -> App:
     app.engine.dispose = mocker.AsyncMock(side_effect=lambda: order.append("engine_dispose"))
     app.bot = mocker.Mock()
     app.bot.session.close = mocker.AsyncMock(side_effect=lambda: order.append("bot_close"))
+    # Меню команд при старте (§6.9, 0.7.0, MU13).
+    app.bot.set_my_commands = mocker.AsyncMock(side_effect=lambda cmds: order.append("set_my_commands"))
     app.scheduler = mocker.Mock(running=True)
     app.scheduler.start = mocker.Mock(side_effect=lambda: order.append("scheduler_start"))
     app.scheduler.shutdown = mocker.Mock(
@@ -318,12 +320,32 @@ class TestRun:
         await run(app)
         assert order == [
             "init_db",
+            "set_my_commands",
             "scheduler_start",
             "startup",
             "polling",
             "scheduler_shutdown",
             "bot_close",
             "engine_dispose",
+        ]
+
+    async def test_set_my_commands_registers_menu(self, mocker) -> None:
+        """`setMyCommands` при старте — состав и описания MU13 (§6.9, 0.7.0)."""
+        order: list[str] = []
+        app = make_app(mocker, order)
+        mocker.patch("bot.main.init_db", new_callable=mocker.AsyncMock)
+        await run(app)
+        app.bot.set_my_commands.assert_awaited_once()
+        commands = app.bot.set_my_commands.await_args.args[0]
+        assert [(c.command, c.description) for c in commands] == [
+            ("start", "Главное меню"),
+            ("record", "Записать давление"),
+            ("stats", "Статистика"),
+            ("help", "Помощь"),
+            ("visits", "Визиты и анализы"),
+            ("support", "О боте и поддержка"),
+            ("cabinet", "Личный кабинет"),
+            ("iamdoctor", "Я врач"),
         ]
 
     async def test_shutdown_after_polling_error(self, mocker) -> None:

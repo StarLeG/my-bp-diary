@@ -242,18 +242,28 @@ class TestCallbackData:
 
 class TestKeypadKeyboard:
     def test_calculator_layout(self) -> None:
-        """Раскладка: ряд итога, 7-8-9 / 4-5-6 / 1-2-3 / «C 0 ⌫», «Готово»/«Изменить» (§6.3)."""
+        """Раскладка MU8 (0.7.0): ряд итога, 1-2-3 / 4-5-6 / 7-8-9 / «C 0 ⌫»,
+        широкая «Готово ✅» строкой, пара «Изменить»/«Отмена» внизу (§6.3)."""
         markup = keyboards.keypad_kb("sys", (None, None, None))
         rows = [[button.callback_data for button in row] for row in markup.inline_keyboard]
         assert rows[0] == ["m:field:sys", "m:field:dia", "m:field:pulse"]
         assert rows[1:5] == [
-            ["m:key:7", "m:key:8", "m:key:9"],
-            ["m:key:4", "m:key:5", "m:key:6"],
             ["m:key:1", "m:key:2", "m:key:3"],
+            ["m:key:4", "m:key:5", "m:key:6"],
+            ["m:key:7", "m:key:8", "m:key:9"],
             ["m:key:clear", "m:key:0", "m:key:bksp"],
         ]
-        assert rows[5] == ["m:key:ok", "m:reset"]
-        assert rows[6] == ["m:cancel"]
+        assert rows[5] == ["m:key:ok"]
+        assert rows[6] == ["m:reset", "m:cancel"]
+
+    def test_keypad_styles(self) -> None:
+        """Стили калькулятора: «Готово ✅» — success, «Отмена» — danger (MU7/MU8)."""
+        markup = keyboards.keypad_kb("sys", (None, None, None))
+        buttons = {b.callback_data: b for b in callback_buttons(markup)}
+        assert buttons["m:key:ok"].text == texts.BTN_DONE_KEYPAD == "Готово ✅"
+        assert buttons["m:key:ok"].style == keyboards.STYLE_SUCCESS
+        assert buttons["m:cancel"].style == keyboards.STYLE_DANGER
+        assert buttons["m:reset"].style is None
 
     def test_no_skip_button(self) -> None:
         """Кнопки «Пропустить» нет (R7 = А): пустой пульс — `pulse = NULL`."""
@@ -467,23 +477,52 @@ class TestSlotMessageKeyboard:
 
 
 class TestMainMenuKeyboards:
+    """Главное меню (§6.2, 0.7.0, MU1–MU5): 5 рядов, подменю, акцент, пара."""
+
     def test_main_menu_items(self) -> None:
         data = {button.callback_data for button in callback_buttons(keyboards.main_menu())}
         assert data == {
             "menu:measure",
             "add:menu",
-            "menu:diary",
-            "ap:list",
-            "menu:stats",
-            "menu:settings",
-            "menu:cabinet",
+            "menu:views",
+            "menu:config",
             "menu:report",
             "menu:about",
         }
 
-    def test_cabinet_button_text(self) -> None:
-        buttons = {button.callback_data: button.text for button in callback_buttons(keyboards.main_menu())}
-        assert buttons["menu:cabinet"] == texts.BTN_CABINET
+    def test_measure_is_accent_success(self) -> None:
+        """«✍️ Записать давление» — вся строка, style: success (MU3)."""
+        buttons = {b.callback_data: b for b in callback_buttons(keyboards.main_menu())}
+        assert buttons["menu:measure"].style == keyboards.STYLE_SUCCESS
+        assert buttons["menu:measure"].text == texts.BTN_MEASURE
+        rows = keyboards.main_menu().inline_keyboard
+        assert [len(row) for row in rows] == [1, 1, 1, 1, 2]
+
+    def test_report_about_pair(self) -> None:
+        """«📄 Отчет» / «ℹ️ О боте» — пара в ряд коротких подписей (MU5)."""
+        rows = keyboards.main_menu().inline_keyboard
+        pair = rows[4]
+        assert [b.callback_data for b in pair] == ["menu:report", "menu:about"]
+        assert [b.text for b in pair] == [texts.BTN_SEND_REPORT, texts.BTN_ABOUT]
+
+    def test_views_submenu(self) -> None:
+        buttons = {b.callback_data: b.text for b in callback_buttons(keyboards.views_menu_kb())}
+        assert buttons == {
+            "menu:diary": texts.BTN_DIARY,
+            "menu:stats": texts.BTN_STATS,
+            "ap:list": texts.BTN_APPOINTMENTS,
+            "menu:back": texts.BTN_BACK,
+        }
+
+    def test_config_submenu(self) -> None:
+        buttons = {b.callback_data: b.text for b in callback_buttons(keyboards.config_menu_kb())}
+        assert buttons == {
+            "menu:cabinet": texts.BTN_CABINET,
+            "set:profile": texts.BTN_PROFILE,
+            "set:meds": texts.BTN_MY_MEDS,
+            "menu:settings": texts.BTN_SETTINGS,
+            "menu:back": texts.BTN_BACK,
+        }
 
 
 class TestPdfKeyboards:
@@ -505,21 +544,20 @@ class TestPdfKeyboards:
 
 class TestSettingsKeyboards:
     def test_settings_menu_items(self) -> None:
+        """Меню «Настройки» (§6.6): без «Моих данных»/«Моих лекарств» (0.7.0, MU2)."""
         data = {button.callback_data for button in callback_buttons(keyboards.settings_kb())}
         assert data == {
             "set:ui:1",
             "set:targets",
             "set:reminders",
-            "set:meds",
             "set:archive",
             "set:doctor",
-            "set:profile",
             "set:tz",
             "set:csv",
             "set:pdf",
             "set:consent",
             "set:delete",
-            "menu:back",
+            "menu:config",  # «Назад» — уровень выше: подменю «Настройки и профиль» (UI1, 0.7.0)
         }
 
     def test_ui_mode_toggle_first_row(self) -> None:
@@ -592,16 +630,16 @@ class TestSettingsKeyboards:
 
 class TestMedicationKeyboards:
     def test_list_actions(self) -> None:
-        """При заполненном списке — три действия и «Назад» (§6.6)."""
+        """При заполненном списке — три действия и «Назад» в подменю (§6.6, 0.7.0)."""
         markup = keyboards.medications_list_kb(True)
         data = {button.callback_data for button in callback_buttons(markup)}
-        assert data == {"med:add", "med:edit", "med:del", "set:back"}
+        assert data == {"med:add", "med:edit", "med:del", "menu:config"}
 
     def test_list_empty_actions(self) -> None:
-        """Пустой список — только «Добавить» и «Назад» (§6.6)."""
+        """Пустой список — только «Добавить» и «Назад» (§6.6, 0.7.0)."""
         markup = keyboards.medications_list_kb(False)
         data = {button.callback_data for button in callback_buttons(markup)}
-        assert data == {"med:add", "set:back"}
+        assert data == {"med:add", "menu:config"}
 
     def test_list_action_button_texts(self) -> None:
         texts_by_data = {
@@ -903,7 +941,7 @@ class TestStatsCustomPeriodKeyboards:
 
     def test_period_has_custom_button(self) -> None:
         data = [b.callback_data for b in callback_buttons(keyboards.stats_period_kb())]
-        assert data == ["stats:7", "stats:30", "stats:cal", "menu:back"]
+        assert data == ["stats:7", "stats:30", "stats:cal", "menu:views"]  # «Назад» — уровень выше (0.7.0)
         texts_ = [b.text for b in buttons(keyboards.stats_period_kb())]
         assert texts.BTN_CUSTOM_PERIOD == "📆 Свой период" in texts_
 
@@ -1003,7 +1041,7 @@ class TestDiaryIntakeKeyboards:
             "add:menu",
             "m:edit",
             "d:mt",
-            "menu:back",
+            "menu:views",  # «Назад» — уровень выше: подменю «Дневник и статистика» (0.7.0)
         ]
         assert "d:mt" not in [b.callback_data for b in callback_buttons(keyboards.diary_kb())]
 
@@ -1090,10 +1128,10 @@ def _pair_case_list() -> list[tuple[str, InlineKeyboardMarkup, InlineKeyboardMar
             (("Да, удалить", texts.BTN_AP_NO),),
         ),
         (
-            "Готово/Изменить (калькулятор)",
+            "Изменить/Отмена (калькулятор)",
             keyboards.keypad_kb("sys", (None, None, None)),
             keyboards.keypad_kb("sys", (None, None, None), large=True),
-            ((texts.BTN_DONE, texts.BTN_RESET),),
+            ((texts.BTN_RESET, texts.BTN_CANCEL),),
         ),
         (
             "Мужской/Женский",
@@ -1339,3 +1377,56 @@ class TestCallbackData0510:
             assert (
                 len(button.callback_data.encode("utf-8")) <= keyboards.CALLBACK_DATA_LIMIT
             ), f"{name}: слишком длинная callback_data {button.callback_data!r}"
+
+
+class TestAdminPanelButton:
+    """«🛡 Админка» в главном меню — только админам (0.7.0, §18.1)."""
+
+    def test_admin_sees_quick_entry(self, monkeypatch) -> None:
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "42")
+        buttons = [b.callback_data for row in keyboards.main_menu(telegram_id=42).inline_keyboard for b in row]
+        assert "adm:menu" in buttons
+
+    def test_regular_user_does_not_see(self, monkeypatch) -> None:
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "42")
+        buttons = [b.callback_data for row in keyboards.main_menu(telegram_id=1).inline_keyboard for b in row]
+        assert "adm:menu" not in buttons
+
+    def test_no_telegram_id_no_button(self, monkeypatch) -> None:
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "42")
+        buttons = [b.callback_data for row in keyboards.main_menu().inline_keyboard for b in row]
+        assert "adm:menu" not in buttons
+
+    def test_admin_row_is_last(self, monkeypatch) -> None:
+        monkeypatch.setenv("ADMIN_TELEGRAM_IDS", "42")
+        rows = keyboards.main_menu(telegram_id=42).inline_keyboard
+        assert rows[-1][0].callback_data == "adm:menu"
+        assert rows[-1][0].text == texts.BTN_ADMIN_PANEL == "🛡 Админка"
+
+
+class TestCabinetLinkKb:
+    """URL-кнопка ЛК — только для https (Telegram отклоняет непубличные URL, 0.7.0)."""
+
+    def test_https_gets_url_button(self) -> None:
+        rows = keyboards.cabinet_link_kb("https://cabinet.example.org/login?token=x").inline_keyboard
+        assert rows[0][0].url == "https://cabinet.example.org/login?token=x"
+        assert rows[0][0].text == texts.BTN_OPEN_CABINET
+        assert rows[-1][0].callback_data == "menu:back"
+
+    def test_http_internal_degrades_to_text_only(self) -> None:
+        """http://cabinet:8000 тестового стенда: без URL-кнопки (иначе Telegram
+        роняет сообщение «Wrong HTTP URL» — найдено роботом-приёмкой)."""
+        rows = keyboards.cabinet_link_kb("http://cabinet:8000/login?token=x").inline_keyboard
+        assert len(rows) == 1
+        assert rows[0][0].callback_data == "menu:back"
+
+    def test_http_ip_gets_url_button(self) -> None:
+        """http://<IP> Telegram принимает в кнопках (проба 2026-11-17)."""
+        rows = keyboards.cabinet_link_kb("http://127.0.0.1:8001/login?token=x").inline_keyboard
+        assert rows[0][0].url == "http://127.0.0.1:8001/login?token=x"
+
+    def test_http_dotted_host_gets_url_button(self) -> None:
+        """http://имя.с.точками — Telegram принимает (проба 2026-11-17):
+        host.docker.internal открывается и с машины, и из QA-контейнера."""
+        rows = keyboards.cabinet_link_kb("http://host.docker.internal:8002/login?token=x").inline_keyboard
+        assert rows[0][0].url == "http://host.docker.internal:8002/login?token=x"

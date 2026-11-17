@@ -33,7 +33,7 @@
   <link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap">
   <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
   <!-- Tailwind собран заранее: tools/landing/build_css.py (SPEC.md, §16.1). -->
-  <link rel="stylesheet" href="css/tailwind.css?v=0.6.3">
+  <link rel="stylesheet" href="css/tailwind.css?v=0.7.0">
   <script type="application/ld+json">
   {
     "@context": "https://schema.org",
@@ -139,12 +139,18 @@
 
   <!-- Шапка -->
   <header class="sticky top-0 z-50 bg-white/80 backdrop-blur border-b border-slate-100">
-    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between">
+    <div class="border-b border-slate-100 bg-slate-50/80">
+      <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 py-1.5 flex items-center justify-center">
+        <span id="bot-status" class="inline-flex items-center gap-1.5 text-sm font-medium text-slate-600 whitespace-nowrap"
+              title="Статус бота"></span>
+      </div>
+    </div>
+    <div class="max-w-6xl mx-auto px-4 sm:px-6 lg:px-8 h-16 flex items-center justify-between gap-4">
       <a href="#" class="flex items-center gap-2.5">
         <span class="w-9 h-9 rounded-xl bg-gradient-to-br from-blue-500 to-blue-700 text-white flex items-center justify-center text-lg shadow-md shadow-blue-600/30">💓</span>
-        <span class="hidden sm:inline lg:hidden xl:inline font-bold text-slate-900">Дневник гипертоника</span>
+        <span class="hidden sm:inline lg:hidden xl:inline font-bold text-slate-900 whitespace-nowrap">Дневник гипертоника</span>
       </a>
-      <nav class="hidden lg:flex items-center gap-5 xl:gap-7 text-sm font-medium text-slate-600">
+      <nav class="hidden lg:flex items-center gap-5 xl:gap-7 text-sm font-medium text-slate-600 whitespace-nowrap">
         <a class="hover:text-blue-700 transition" href="#how">Как работает</a>
         <a class="hover:text-blue-700 transition" href="#screens">Как выглядит</a>
         <a class="hover:text-blue-700 transition" href="#trust">Почему нам доверяют</a>
@@ -153,11 +159,11 @@
         <a class="hover:text-blue-700 transition" href="#support">Поддержать</a>
       </nav>
       <div class="flex items-center gap-2 sm:gap-3">
-        <a class="inline-flex items-center gap-2 border border-blue-200 text-blue-700 bg-white/70 hover:bg-blue-50 text-sm font-semibold px-3 py-2 sm:px-4 sm:py-2.5 rounded-full transition"
+        <a class="inline-flex items-center gap-2 border border-blue-200 text-blue-700 bg-white/70 hover:bg-blue-50 text-sm font-semibold px-3 py-2 sm:px-4 sm:py-2.5 rounded-full transition whitespace-nowrap"
            href="https://cabinet.electroman.by/login">
           Войти
         </a>
-        <a class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-3 py-2 sm:px-4 sm:py-2.5 rounded-full shadow-lg shadow-blue-600/25 transition"
+        <a class="inline-flex items-center gap-2 bg-blue-600 hover:bg-blue-700 text-white text-sm font-semibold px-3 py-2 sm:px-4 sm:py-2.5 rounded-full shadow-lg shadow-blue-600/25 transition whitespace-nowrap"
            href="https://t.me/my_bp_diary_bot?start=landing">
           Открыть в Telegram
         </a>
@@ -541,13 +547,15 @@
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <p>Откройте бота в Telegram и нажмите «Старт». Регистрация не нужна — дальше всё кнопками.</p>
               <p>Сначала бот попросит согласие на обработку данных: давление, пульс и лекарства по закону — данные о здоровье, и без согласия хранить их нельзя. Полный текст — на странице <a class="text-blue-600 hover:underline font-medium" href="privacy.html#consent">«Персональные данные»</a>. Бот — для тех, кому исполнилось 16 лет.</p>
-              <p>При первом запуске бот задаст три коротких вопроса:</p>
+              <p>При первом запуске бот задаст четыре коротких вопроса:</p>
               <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Как смотреть.</b> Обычный или крупный режим — крупные кнопки и жирные значения для тех, кому мелко.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Часовой пояс.</b> По нему считаются «сегодня» и приходят напоминания. Выберите из списка или напишите свой — например, Europe/Minsk.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Цель.</b> Какие значения считать хорошими — по умолчанию 130/80. Это ориентир для дневника, а не медицинская норма: норму определяет врач.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Когда напоминать.</b> Отметьте удобные слоты — утро, обед и вечер — и укажите время для каждого.</span></li>
               </ul>
-              <p>Бот подтвердит: «Готово! Всё настроено» — и откроется главное меню из восьми кнопок: «Записать давление», «➕ Добавить запись», «Дневник за сегодня», «Статистика», «Настройки», «Личный кабинет», «Отправить отчет», «О боте / Поддержать».</p>
+              <p>Бот подтвердит: «Готово! Всё настроено» — и откроется главное меню: <b class="text-slate-800">«✍️ Записать давление»</b>, <b class="text-slate-800">«➕ Добавить запись»</b>, <b class="text-slate-800">«📊 Дневник и статистика»</b>, <b class="text-slate-800">«⚙️ Настройки и профиль»</b> и <b class="text-slate-800">«📄 Отчет»</b> / <b class="text-slate-800">«ℹ️ О боте»</b>. Всё остальное — в двух подменю: «📊 Дневник и статистика» ведёт в «📖 Дневник за сегодня», «📊 Статистика» и «📅 Визиты», а «⚙️ Настройки и профиль» — в «📈 Личный кабинет», «👤 Мои данные», «💊 Мои лекарства» и «⚙️ Настройки».</p>
+              <p>Для быстрого доступа есть команды — они видны в меню команд слева от поля ввода: /record (записать давление), /stats (статистика), /visits (визиты), /cabinet (личный кабинет), /help (помощь).</p>
               <div class="flex gap-3 bg-blue-50 border border-blue-100 rounded-xl p-4">
                 <span class="text-lg leading-none" aria-hidden="true">💡</span>
                 <p class="text-sm text-slate-700">Пропустили вопрос? Не страшно — часовой пояс, цель и время напоминаний меняются в «Настройках» в любой момент.</p>
@@ -570,9 +578,9 @@
                 <li>Нажмите <b class="text-slate-800">«Записать давление»</b> — в меню или в напоминании.</li>
                 <li>На экране — три поля сразу: систолическое (верхнее, от 70 до 260), диастолическое (нижнее, от 40 до 160) и пульс (от 30 до 220). Активное поле помечено «▸»: набирайте цифры кнопками, <b class="text-slate-800">«⌫»</b> сотрёт цифру, <b class="text-slate-800">«C»</b> очистит поле. Тап по числу в строке итога переключает поле.</li>
                 <li>Или напишите всё одной строкой: <b class="text-slate-800">«120/80 72»</b> — бот сам разберёт систолическое, диастолическое и пульс.</li>
-                <li>Пульс можно не вводить — просто оставьте поле пустым. Нажмите <b class="text-slate-800">«Готово»</b> — запись сохранится.</li>
+                <li>Пульс можно не вводить — просто оставьте поле пустым. Нажмите <b class="text-slate-800">«Готово ✅»</b> — запись сохранится.</li>
               </ol>
-              <p>Бот ответит одной строкой: «✅ 135/85, пульс 72». Ошиблись? <b class="text-slate-800">«✏️ Изменить»</b> вернёт к полям с уже введёнными значениями. Исправить последнюю запись можно и позже: «Дневник за сегодня» → <b class="text-slate-800">«✏️ Изменить последнюю»</b>.</p>
+              <p>Бот ответит одной строкой: «✅ 135/85, пульс 72». Ошиблись? <b class="text-slate-800">«✏️ Изменить»</b> вернёт к полям с уже введёнными значениями. Исправить последнюю запись можно и позже: «📊 Дневник и статистика» → <b class="text-slate-800">«📖 Дневник за сегодня»</b> → <b class="text-slate-800">«✏️ Изменить последнюю»</b>.</p>
               <p>После записи — всё по желанию, без навязчивости:</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«➕ Фактор»</b> — отметить соль, кофе, алкоголь, стресс или недосып: врач увидит, что предшествовало скачкам.</span></li>
@@ -631,7 +639,7 @@
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Пропускаю сегодня»</b> — бот ответит «Хорошо, напоминание перенёс на завтра» и сегодня этот слот больше не побеспокоит.</span></li>
               </ul>
               <p>Отдельное напоминание — повторный замер после лекарства. Отметьте приём — в напоминании, кнопкой «💊 Лекарство» после записи давления или записью «Приём лекарства» — и бот напомнит измерить давление ещё раз через 30, 60 или 120 минут (по умолчанию 60). У повтора три кнопки: <b class="text-slate-800">«Записать сейчас»</b>, <b class="text-slate-800">«Через 30 мин»</b> и <b class="text-slate-800">«Больше не напоминать»</b>. Паузу и включение-выключение повтора можно настроить.</p>
-              <p>В «Настройки» → «Напоминания» можно настроить ещё три вещи:</p>
+              <p>В «⚙️ Настройки и профиль» → «⚙️ Настройки» → «Напоминания» можно настроить ещё три вещи:</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">О чём напоминать</b> — для каждого слота: «Давление и лекарства», «Только лекарства» или «Только давление». «Только лекарства» доступно, когда в слоте есть лекарства.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Повторять, если не ответил»</b> — если вы не нажали ни одной кнопки, не отметили лекарства и не записали давление, через 60 минут бот один раз тихо, без звука, напомнит ещё раз.</span></li>
@@ -651,7 +659,7 @@
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
-              <p>В главном меню — <b class="text-slate-800">«📅 Визиты и анализы»</b> (или команда /visits). Здесь записывают предстоящий визит к врачу, анализы или обследование — например, ЭКГ, УЗИ или СМАД.</p>
+              <p>Раздел «Визиты и анализы» открывается из «📊 Дневник и статистика» → <b class="text-slate-800">«📅 Визиты»</b> (или командой /visits). Здесь записывают предстоящий визит к врачу, анализы или обследование — например, ЭКГ, УЗИ или СМАД.</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«➕ Добавить»</b> — выберите, что это, к какому врачу или какие анализы (или напишите своё), день в календаре и время. Если точного времени нет — «Без времени». Заметка — по желанию: адрес, кабинет, «натощак».</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Бот напомнит накануне в 20:00 и за 2 часа до начала; если время не указано — утром в день события в 07:00. В напоминании — <b class="text-slate-800">«✓ Помню»</b>, <b class="text-slate-800">«Перенести»</b> и <b class="text-slate-800">«Отменить»</b>.</span></li>
@@ -672,7 +680,7 @@
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
-              <p>После приёма откройте событие в разделе <b class="text-slate-800">«📅 Визиты и анализы»</b> — там же, где отмечают, что визит состоялся (<b class="text-slate-800">«✓ Был(а)»</b>, для анализов — <b class="text-slate-800">«✓ Сдал(а)»</b>). Кнопка <b class="text-slate-800">«📝 Заключение врача»</b> есть у визита, <b class="text-slate-800">«📝 Результаты анализов»</b> — у анализов, <b class="text-slate-800">«📝 Протокол обследования»</b> — у обследования.</p>
+              <p>После приёма откройте событие в разделе «Визиты и анализы» («📊 Дневник и статистика» → «📅 Визиты») — там же, где отмечают, что визит состоялся (<b class="text-slate-800">«✓ Был(а)»</b>, для анализов — <b class="text-slate-800">«✓ Сдал(а)»</b>). Кнопка <b class="text-slate-800">«📝 Заключение врача»</b> есть у визита, <b class="text-slate-800">«📝 Результаты анализов»</b> — у анализов, <b class="text-slate-800">«📝 Протокол обследования»</b> — у обследования.</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Напишите текст заключения одним сообщением — до 4000 символов. Текст вводите сами: фото бот не распознаёт.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>К заключению можно прикрепить фото оригинала — оно хранится в Telegram и доступно только вам.</span></li>
@@ -692,7 +700,7 @@
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
-              <p>Раздел <b class="text-slate-800">«Настройки» → «Мои лекарства»</b>. Добавление — три коротких шага:</p>
+              <p>Раздел <b class="text-slate-800">«💊 Мои лекарства»</b> — в «⚙️ Настройки и профиль». Добавление — три коротких шага:</p>
               <ol class="space-y-2 list-decimal pl-5">
                 <li><b class="text-slate-800">Название.</b> Просто напишите его сообщением — например, «Лозартан» или «Амлодипин».</li>
                 <li><b class="text-slate-800">Дозировка.</b> Готовые кнопки 5/10/20/50/100 мг, <b class="text-slate-800">«Без дозировки»</b> — если она не нужна, — или <b class="text-slate-800">«Другое»</b>: число и единица (мг/мл/таб), например «25 мг».</li>
@@ -719,8 +727,8 @@
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <ul class="space-y-2">
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Дневник за сегодня»</b> — весь день лентой: измерения, приёмы лекарств и события по времени, с фильтрами «Давление», «Лекарства», «Факторы» и «Другое». Тап по событию откроет его — можно поправить или удалить. Внизу — какие лекарства уже приняты: «💊 Лекарства: утро ✓ · вечер — ещё не отмечено»; кнопка «💊 Отметить приём» отметит забытый приём.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Статистика»</b> — за 7 дней, 30 дней или свой период («📆 Свой период»: до 31 дня, первый и последний день выбираются в календаре): гистограмма по дням (верхнее давление — вверх, нижнее — вниз, пульс — на средней линии, цвет — зона давления) и под ней сводка: среднее давление, минимум и максимум, количество измерений, тренд (если измерений меньше четырёх — «мало данных для тренда»), сравнение с целью и приём лекарств.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«📖 Дневник за сегодня»</b> («📊 Дневник и статистика» → «📖 Дневник за сегодня») — весь день лентой: измерения, приёмы лекарств и события по времени, с фильтрами «Давление», «Лекарства», «Факторы» и «Другое». Тап по событию откроет его — можно поправить или удалить. Внизу — какие лекарства уже приняты: «💊 Лекарства: утро ✓ · вечер — ещё не отмечено»; кнопка «💊 Отметить приём» отметит забытый приём.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«📊 Статистика»</b> («📊 Дневник и статистика» → «📊 Статистика») — за 7 дней, 30 дней или свой период («📆 Свой период»: до 31 дня, первый и последний день выбираются в календаре): гистограмма по дням (верхнее давление — вверх, нижнее — вниз, пульс — на средней линии, цвет — зона давления) и под ней сводка: среднее давление, минимум и максимум, количество измерений, тренд (если измерений меньше четырёх — «мало данных для тренда»), сравнение с целью и приём лекарств.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«📅 По дням»</b> — кнопка под статистикой: среднее давление и пульс за каждый день с цветной отметкой зоны и итог «Среднее за день» — среднее из дневных средних, где каждый день весит одинаково, сколько бы раз вы ни мерили.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> — файл за 7 дней, 30 дней или всё время (не больше 5000 записей: если их больше, бот предложит выбрать 7 или 30 дней). Открывается в Excel: можно показать врачу, распечатать или приложить к письму. Отдельным файлом выгружаются и приёмы лекарств.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт PDF»</b> — отчёт за 7 дней, 30 дней или всё время: сводка и таблица записей с цветом зон — удобно распечатать для врача.</span></li>
@@ -740,7 +748,7 @@
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
               <p>Личный кабинет — те же данные с большого экрана: удобно смотреть историю и графики.</p>
               <ul class="space-y-2">
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Вход:</b> «Личный кабинет» в меню бота или команда /cabinet. В первый раз бот попросит e-mail и создаст аккаунт.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Вход:</b> «⚙️ Настройки и профиль» → <b class="text-slate-800">«📈 Личный кабинет»</b> или команда /cabinet. В первый раз бот попросит e-mail и создаст аккаунт; в сообщении со ссылкой будет кнопка <b class="text-slate-800">«📈 Открыть личный кабинет»</b>.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Ссылка для входа</b> приходит в чат и действует 15 минут. Она одноразовая и только ваша — не пересылайте её.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">Можно войти и по e-mail с паролем.</b> Забыли пароль? Запросите новую ссылку через бота — а пароль смените в настройках профиля.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>В <b class="text-slate-800">«Личной карточке»</b> — «Мои данные» (ФИО, дата рождения и пол для врача) и согласие на обработку данных: там же его можно отозвать.</span></li>
@@ -769,11 +777,11 @@
               <p>Когда врач просит дневник — не нужно ничего собирать вручную.</p>
               <ul class="space-y-2">
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Перед приглашением врача бот попросит согласие на то, чтобы врач видел ваши записи, и ваши ФИО, дату рождения и пол — по ним врач узнает вас в своём кабинете. Эти данные видит только приглашённый врач.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Нажмите <b class="text-slate-800">«Отправить отчет»</b> в меню бота. Бот соберёт ссылку на ваши данные — перешлите её доктору.</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Нажмите <b class="text-slate-800">«📄 Отчет»</b> в главном меню. Бот соберёт ссылку на ваши данные — перешлите её доктору.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач увидит график, историю измерений, статистику и средние по дням — <b class="text-slate-800">только для чтения</b>. Изменить ваши записи он не может.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач может выгрузить данные в CSV или PDF — например, чтобы приложить к медкарте.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Врач может оставить комментарий или рекомендацию — вы увидите её в личном кабинете.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Доступ даётся только с вашего согласия и действует, пока вы сами его не отозвали. Отозвать — в «Настройках» → «Мой врач» → «Отозвать доступ».</span></li>
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span>Доступ даётся только с вашего согласия и действует, пока вы сами его не отозвали. Отозвать — в «⚙️ Настройки и профиль» → «⚙️ Настройки» → «Мой врач» → «Отозвать доступ».</span></li>
               </ul>
               <p>Там же можно пригласить врача через Telegram — он подтвердит доступ в боте и будет получать ваши отчёты прямо в чат.</p>
               <p>Врача можно пригласить и по e-mail — бот отправит ему письмо со ссылкой на ваш дневник.</p>
@@ -810,19 +818,19 @@
               <span class="flex-shrink-0 w-7 h-7 rounded-full bg-blue-50 text-blue-600 flex items-center justify-center transition group-open:rotate-180" aria-hidden="true">⌄</span>
             </summary>
             <div class="px-6 pb-6 space-y-3 text-slate-600 leading-relaxed">
-              <p>В «Настройках» — всё, что можно подстроить под себя (пункты идут именно в таком порядке):</p>
+              <p>«Настройки» открываются так: «⚙️ Настройки и профиль» → «⚙️ Настройки». Здесь всё, что можно подстроить под себя (пункты идут именно в таком порядке):</p>
               <ul class="space-y-2">
+                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«👁 Крупный режим»</b> — крупные кнопки, жирные значения и покрупнее графики; переключается в любой момент.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Целевые значения»</b> — ваш ориентир для дневника.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Напоминания»</b> — слоты и время, включение каждого слота и «Повтор после лекарства» (выкл, 30, 60 или 120 минут).</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мои лекарства»</b> — список, дозировки и слоты приёма.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Мой врач»</b> — пригласить врача, отозвать доступ.</span></li>
-                <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«👤 Мои данные»</b> — ФИО, дата рождения и пол для врача.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Часовой пояс»</b> — если переехали или ошиблись при настройке.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Архивные записи»</b> — перенести прошлые измерения, например из блокнота.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Экспорт CSV»</b> и <b class="text-slate-800">«Экспорт PDF»</b> — выгрузка записей.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Согласие на обработку данных»</b> — дата согласия и отзыв.</span></li>
                 <li class="flex gap-2.5"><span class="text-blue-600 font-bold mt-0.5" aria-hidden="true">•</span><span><b class="text-slate-800">«Удалить аккаунт»</b> — со всеми данными, с подтверждением.</span></li>
               </ul>
+              <p>«💊 Мои лекарства» и «👤 Мои данные» — рядом, в том же подменю «⚙️ Настройки и профиль» (не в «Настройках»): быстрый доступ без лишних переходов.</p>
               <p>Бот бесплатный, без рекламы и платных подписок. Если он помогает — можно <a class="text-blue-600 hover:underline font-medium" href="#support">поддержать проект</a>. Это не обязательно: все функции доступны без этого.</p>
               <p>Что-то не работает или есть идея? Свяжитесь с автором — контакты в разделе «Поддержать» и внизу страницы.</p>
             </div>
@@ -975,6 +983,37 @@
     </div>
   </footer>
 
-  <script src="script.js?v=0.6.3"></script>
+  <script src="script.js?v=0.7.0"></script>
+  <script>
+    // Статус бота (0.7.0, ST2-А): хартбит status.json пишет бот раз в минуту
+    // (§6.7); старше 3 минут — бот не отвечает. Время — локальное (часы
+    // браузера). Проверка каждую минуту — статус живой, а не снимок при загрузке.
+    (function () {
+      var el = document.getElementById('bot-status');
+      if (!el) return;
+      function render(ok, at) {
+        if (ok) {
+          el.textContent = '🟢 Бот работает';
+          el.style.color = '#15803d';
+        } else {
+          var when = at ? new Date(at).toLocaleTimeString('ru-RU', {hour: '2-digit', minute: '2-digit'}) : '';
+          el.textContent = '🔴 Бот не отвечает' + (when ? ' с ' + when : '');
+          el.style.color = '#b91c1c';
+        }
+      }
+      async function check() {
+        try {
+          var response = await fetch('status.json', {cache: 'no-store'});
+          var data = await response.json();
+          var age = (Date.now() - new Date(data.at).getTime()) / 1000;
+          render(age >= 0 && age <= 180, data.at);
+        } catch (e) {
+          render(false, null);
+        }
+      }
+      check();
+      setInterval(check, 60000);
+    })();
+  </script>
 </body>
 </html>

@@ -422,7 +422,7 @@ async def cb_title(callback: CallbackQuery, state: FSMContext, session: AsyncSes
     await callback.answer()
 
 
-@router.message(AppointmentInput.title)
+@router.message(AppointmentInput.title, ~F.text.startswith("/"))
 async def msg_title(message: Message, state: FSMContext, session: AsyncSession) -> None:
     title = ap.valid_title(message.text or "")
     if title is None:
@@ -564,7 +564,7 @@ async def cb_time(callback: CallbackQuery, state: FSMContext, session: AsyncSess
     await callback.answer(problem)
 
 
-@router.message(AppointmentInput.time)
+@router.message(AppointmentInput.time, ~F.text.startswith("/"))
 async def msg_time(message: Message, state: FSMContext, session: AsyncSession) -> None:
     hhmm = ap.parse_hhmm(message.text or "")
     if hhmm is None:
@@ -616,7 +616,7 @@ async def cb_note_skip(callback: CallbackQuery, state: FSMContext, session: Asyn
     await callback.answer(problem)
 
 
-@router.message(AppointmentInput.note)
+@router.message(AppointmentInput.note, ~F.text.startswith("/"))
 async def msg_note(message: Message, state: FSMContext, session: AsyncSession) -> None:
     note = ap.valid_note(message.text or "")
     if note is None:
@@ -745,6 +745,7 @@ async def cb_delete(callback: CallbackQuery, state: FSMContext, session: AsyncSe
                 f"ap:del:{appt.id}:ok",
                 f"ap:open:{appt.id}",
                 large=user.ui_large,
+                yes_style=keyboards.STYLE_DANGER,
             ),
         )
     await callback.answer()
@@ -1159,7 +1160,7 @@ async def cb_conc(callback: CallbackQuery, state: FSMContext, session: AsyncSess
     await _stale(callback)
 
 
-@router.message(AppointmentConclusion.text)
+@router.message(AppointmentConclusion.text, ~F.text.startswith("/"))
 async def msg_conc_text(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Текст заключения: добавление или правка (В29-А; пустое — после `trim()`)."""
     draft = await _conc_draft(state)
@@ -1201,7 +1202,7 @@ async def msg_conc_text(message: Message, state: FSMContext, session: AsyncSessi
     await _show_at(message, draft[K_CONC_MSG], text, markup)
 
 
-@router.message(AppointmentConclusion.photo)
+@router.message(AppointmentConclusion.photo, ~F.text.startswith("/"))
 async def msg_conc_photo(message: Message, state: FSMContext, session: AsyncSession) -> None:
     """Фото заключения: только `message.photo`; приём и замена затирают прежний `file_id`."""
     draft = await _conc_draft(state)

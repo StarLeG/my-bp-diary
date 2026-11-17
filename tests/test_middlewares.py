@@ -302,3 +302,36 @@ class TestThrottleMiddleware:
         clock.advance(CLEANUP_INTERVAL + THROTTLE_SECONDS)
         await middleware(handler, make_callback("menu:stats", user_id=3), {})
         assert list(middleware._last_seen) == [3]
+
+
+class TestAntiSpamDisabled:
+    """Анти-спам выключается нулём окна (0.7.0, §7.2; тестовый стенд)."""
+
+    async def test_debounce_zero_passes_double_tap(self) -> None:
+        from bot.middlewares import DebounceMiddleware
+
+        calls = []
+
+        async def handler(event, data):
+            calls.append(event)
+            return "ok"
+
+        middleware = DebounceMiddleware(seconds=0.0, clock=lambda: 1000.0)
+        event = make_callback("m:key:1")
+        assert await middleware(handler, event, {}) == "ok"
+        assert await middleware(handler, event, {}) == "ok"
+        assert len(calls) == 2
+
+    async def test_throttle_zero_passes_burst(self) -> None:
+        from bot.middlewares import ThrottleMiddleware
+
+        calls = []
+
+        async def handler(event, data):
+            calls.append(event)
+            return "ok"
+
+        middleware = ThrottleMiddleware(seconds=0.0, clock=lambda: 1000.0)
+        for _ in range(3):
+            assert await middleware(handler, make_callback("menu:back"), {}) == "ok"
+        assert len(calls) == 3
