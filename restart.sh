@@ -16,5 +16,9 @@ if [ ! -f .env ]; then
     exit 1
 fi
 
+# Хартбит статус-строки лендинга (ST2-А): тик пишет web/landing/status.json
+# из контейнера под appuser (uid 1000), а каталог принадлежит пользователю хоста.
+chmod a+w web/landing
+
 docker compose up -d --build --force-recreate
 echo "Перезапущено. Состояние: docker compose ps"

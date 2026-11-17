@@ -38,8 +38,15 @@ if ! grep -Eq '^WEB_SECRET_KEY=.+' .env; then
     exit 1
 fi
 
+# Хартбит статус-строки лендинга (ST2-А): тик пишет web/landing/status.json
+# из контейнера под appuser (uid 1000), а каталог принадлежит пользователю хоста.
+ensure_landing_writable() {
+    chmod a+w web/landing
+}
+
 case "${1:-up}" in
     up)
+        ensure_landing_writable
         docker compose up -d --build
         ;;
     https)
@@ -47,6 +54,7 @@ case "${1:-up}" in
             echo "ОШИБКА: для HTTPS в .env нужен CABINET_URL (например https://cabinet.example.org)." >&2
             exit 1
         fi
+        ensure_landing_writable
         docker compose --profile https up -d --build
         ;;
     logs)
