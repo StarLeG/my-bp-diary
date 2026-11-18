@@ -695,5 +695,23 @@ class TestFallback:
         await unknown_text(make_message("просто текст"), state)
         answer.assert_not_called()
 
+    async def test_service_message_is_ignored(self, answer) -> None:
+        """Служебное сообщение (закреп меню, §6.2) — не свободный ввод: молчим.
+
+        Находка 2026-11-18: закреп канонического меню после `/start` порождал
+        постороннее «Выберите пункт меню».
+        """
+        from unittest.mock import AsyncMock
+
+        service = Message(
+            message_id=2,
+            date=datetime.now(timezone.utc),
+            chat=Chat(id=TG_ID, type="private"),
+            from_user=User(id=TG_ID, is_bot=False, first_name="Тест"),
+            pinned_message=make_message(texts.MAIN_MENU),
+        ).as_(AsyncMock())
+        await unknown_text(service, make_state())
+        answer.assert_not_called()
+
     def test_fallback_router_exists(self) -> None:
         assert fallback_router.name == "fallback"

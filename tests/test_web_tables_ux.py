@@ -377,9 +377,9 @@ class TestMedications:
         assert "<button" not in table
         assert "Сохранить" not in table
         assert ">Удалить<" not in table
-        assert f'href="/?edit_med={med_id}#medications" title="Изменить">✏️</a>' in table
-        assert f'href="/?confirm_delete_med={med_id}#medications" title="Удалить">🗑</a>' in table
-        assert 'class="btn-del"' in table
+        assert f'href="/?edit_med={med_id}#medications" title="Изменить" aria-label="Изменить">✏️</a>' in table
+        assert f'href="/?confirm_delete_med={med_id}#medications" title="Удалить" aria-label="Удалить">🗑</a>' in table
+        assert 'class="btn-del icon-btn"' in table
 
     def test_edit_form_by_edit_med(self, app_client, settings) -> None:  # noqa: F811
         """`?edit_med={id}` — форма «Изменить лекарство», предзаполненная (не `?edit={id}`)."""
@@ -542,3 +542,162 @@ class TestDoctorHistory:
         # колонки таблицы дня сохранены
         assert 'data-label="Лекарство"' in page
         assert 'data-label="Заметка"' in page
+
+
+# ──────── Единая колонка «Действия» в ленте (0.7.2, R6-А, R7-А, F8) ────────
+
+
+def _insert_event(
+    settings, user_id: int, local: datetime, type_: str = "note", note: str = "", payload: str = ""
+) -> int:
+    con = sqlite3.connect(settings.db_path)
+    cur = con.execute(
+        "INSERT INTO diary_events (user_id, type, moment, payload, note, created_at)"
+        " VALUES (?, ?, ?, ?, ?, '2026-01-01 00:00:00')",
+        (
+            user_id,
+            type_,
+            local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            payload or None,
+            note or None,
+        ),
+    )
+    con.commit()
+    new_id = cur.lastrowid
+    con.close()
+    return new_id
+
+
+def _insert_log(
+    settings,
+    user_id: int,
+    med_id: int,
+    local: datetime,
+    *,
+    status: str = "taken",
+    source: str = "cabinet",
+) -> int:
+    con = sqlite3.connect(settings.db_path)
+    cur = con.execute(
+        "INSERT INTO medication_logs (user_id, medication_id, timestamp, status, slot, source)"
+        " VALUES (?, ?, ?, ?, 'morning', ?)",
+        (
+            user_id,
+            med_id,
+            local.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"),
+            status,
+            source,
+        ),
+    )
+    con.commit()
+    new_id = cur.lastrowid
+    con.close()
+    return new_id
+
+
+class TestFeedActionsColumn:
+    """R6-А: все типы строк ленты — кнопки в колонке «Действия» (как у измерений)."""
+
+    def test_all_row_types_have_actions_cell(self, app_client, settings) -> None:  # noqa: F811
+        client, user_id = app_client
+        _register(client)
+        med_id = _insert_med(settings, user_id)
+        _insert_measurement(settings, user_id, TODAY, 128, 82, hour=8)
+        _insert_event(settings, user_id, datetime(TODAY.year, TODAY.month, TODAY.day, 9, 0, tzinfo=TZ), note="прогулка")
+        _insert_log(settings, user_id, med_id, datetime(TODAY.year, TODAY.month, TODAY.day, 10, 0, tzinfo=TZ))
+        page = client.get("/").text
+        # каждая строка ленты заканчивается ячейкой колонки «Действия»
+        rows = page.split('<tr class="feed-row')
+        assert len(rows) >= 3  # событие и приём (+ возможные измерения в отдельном виде)
+        for chunk in rows[1:]:
+            assert 'data-label="Действия"' in chunk.split("</tr>")[0]
+
+    def test_event_and_intake_buttons_match_measurement_style(self, app_client, settings) -> None:  # noqa: F811
+        """R7-А: иконки «✏️»/«🗑» одного размера (32×32) с title и aria-label у всех типов."""
+        client, user_id = app_client
+        _register(client)
+        med_id = _insert_med(settings, user_id)
+        _insert_measurement(settings, user_id, TODAY, 128, 82, hour=8)
+        ev_id = _insert_event(settings, user_id, datetime(TODAY.year, TODAY.month, TODAY.day, 9, 0, tzinfo=TZ), note="текст")
+        log_id = _insert_log(settings, user_id, med_id, datetime(TODAY.year, TODAY.month, TODAY.day, 10, 0, tzinfo=TZ))
+        page = client.get("/").text
+        for href in (f"/?edit_ev={ev_id}#history", f"/?edit_int={log_id}#history"):
+            anchor = page.index(href)
+            chunk = page[max(0, anchor - 200) : anchor + 200]
+            assert "icon-btn" in chunk
+            assert 'title="Изменить"' in chunk and 'aria-label="Изменить"' in chunk
+        for href in (f"/?confirm_delete_ev={ev_id}#history", f"/?confirm_delete_int={log_id}#history"):
+            anchor = page.index(href)
+            chunk = page[max(0, anchor - 200) : anchor + 200]
+            assert "icon-btn" in chunk
+            assert 'title="Удалить"' in chunk and 'aria-label="Удалить"' in chunk
+        # у измерений — те же классы
+        assert page.count("icon-btn") >= 4
+
+    def test_icon_button_size_32(self, app_client) -> None:  # noqa: F811
+        """R7-А: обе иконки 32×32 — правило в CSS (один размер у всех типов строк)."""
+        css = STYLE_CSS.read_text(encoding="utf-8")
+        block = css[css.index(".icon-btn") : css.index("}", css.index(".icon-btn"))]
+        assert "width: 32px" in block and "height: 32px" in block
+
+    def test_non_editable_intake_has_empty_actions_cell(self, app_client, settings) -> None:  # noqa: F811
+        """R6-А: у строки без кнопок (is_journal_log / source='bot') — пустая ячейка.
+
+        Строка остаётся выровненной; журнал записи правится только через
+        измерение (§4.11), строка бота — только просмотр (M3 = В).
+        """
+        client, user_id = app_client
+        _register(client)
+        med_id = _insert_med(settings, user_id)
+        _insert_log(
+            settings, user_id, med_id,
+            datetime(TODAY.year, TODAY.month, TODAY.day, 10, 0, tzinfo=TZ),
+            source="bot",
+        )
+        page = client.get("/").text
+        assert "Приём лекарств" in page
+        chunk = page.split('<tr class="feed-row')[1].split("</tr>")[0]
+        assert 'data-label="Действия"' in chunk  # пустая ячейка колонки есть
+        assert "?edit_int=" not in chunk and "?confirm_delete_int=" not in chunk  # кнопок нет
+
+    def test_journal_intake_not_duplicated_in_feed(self, app_client, settings) -> None:  # noqa: F811
+        """§4.11: журнал записи (пара medication_id + timestamp) в ленте отдельно не рендерится."""
+        client, user_id = app_client
+        _register(client)
+        med_id = _insert_med(settings, user_id)
+        # один и тот же момент: 10:00 UTC (хелперы вставки согласованы)
+        mid = _insert_measurement(settings, user_id, TODAY, 128, 82, hour=10)
+        _sql(
+            settings,
+            "INSERT INTO measurement_medications (measurement_id, medication_id) VALUES (?, ?)",
+            (mid, med_id),
+        )
+        _insert_log(settings, user_id, med_id, datetime(TODAY.year, TODAY.month, TODAY.day, 10, 0, tzinfo=timezone.utc))
+        page = client.get("/").text
+        # журнал виден в колонке «Лекарство» измерения, отдельной строки нет
+        assert "Принято: Лозартан 50 мг" in page
+        assert "Приём лекарств" not in page
+
+    def test_feed_text_spans_to_note_column(self, app_client, settings) -> None:  # noqa: F811
+        """R6-А: текст события/приёма — colspan до колонки «Заметка» (7 колонок)."""
+        client, user_id = app_client
+        _register(client)
+        _insert_event(settings, user_id, datetime(TODAY.year, TODAY.month, TODAY.day, 9, 0, tzinfo=TZ), note="текст")
+        page = client.get("/").text
+        chunk = page.split('<tr class="feed-row')[1].split("</tr>")[0]
+        assert 'class="feed-line" colspan="7"' in chunk
+
+
+# ─────────────────────────── Статика и кеш ───────────────────────────
+
+
+class TestStaticCaching:
+    """M3 (аудит UI 2026-11-18): статика не должна «залипать» в кеше после деплоя."""
+
+    def test_static_served_with_no_cache(self, app_client) -> None:  # noqa: F811
+        """`/static/*` — с `Cache-Control: no-cache`: браузер сверяет ETag/Last-Modified."""
+        client, _ = app_client
+        for path in ("/static/style.css", "/static/bp-charts.js"):
+            response = client.get(path)
+            assert response.status_code == 200
+            assert response.headers["Cache-Control"] == "no-cache"

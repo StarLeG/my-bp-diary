@@ -233,6 +233,12 @@ fieldset.checks {
   border: 1px solid #bfe6cf;
 }
 
+.alert-info {
+  background: #eef4fb;
+  color: var(--color-primary-dark);
+  border: 1px solid #cfe0f2;
+}
+
 .muted {
   color: var(--color-muted);
 }
@@ -278,6 +284,22 @@ td.note {
 
 td.actions {
   white-space: nowrap;
+}
+
+/* Иконки действий строк истории и ленты — одного размера у всех типов строк
+   (0.7.2, R7-А, §16.2 «Единый UI-канон кнопок»): «✏️» — `btn-ghost`,
+   «🗑» — красная без заливки, обе 32×32, с `title` и `aria-label`. */
+.icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  font-size: 15px;
+  line-height: 1;
+  text-decoration: none;
+  box-sizing: border-box;
 }
 
 /* Подсветка строк «Истории записей» по худшей из зон САД/ДАД (§16.2): заливка
@@ -981,7 +1003,9 @@ details.history-day[open] > summary .history-day-title::before {
   white-space: nowrap;
 }
 
-/* Строки событий и standalone-приёмов в таблице дня (§16.2, M1). */
+/* Строки событий и standalone-приёмов в таблице дня (§16.2, M1):
+   текст — `colspan` до колонки «Заметка», кнопки — своей ячейкой
+   в колонке «Действия» (0.7.2, R6-А: единообразие с измерениями). */
 tr.feed-row td.feed-line {
   border-bottom: 1px solid var(--color-border);
 }
@@ -999,11 +1023,6 @@ tr.feed-row td.feed-line {
 .feed-link:hover,
 .feed-link:focus {
   text-decoration: underline;
-}
-
-td.feed-line .actions {
-  margin-left: 12px;
-  white-space: nowrap;
 }
 
 /* Строка лекарства в форме «💊 Отметить приём»: название + статус. */
@@ -1157,4 +1176,18 @@ td.feed-line .actions {
   .stacked-table td.feed-line::before {
     content: none;
   }
+}
+
+/* Иконочные кнопки действий — 32×32 при любом режиме: padding обычных кнопок
+   (`.btn`, `.btn-del`, `.ui-large`) не должен раскрывать иконку (R7-А). */
+.btn.icon-btn,
+.btn-del.icon-btn,
+.ui-large .btn.icon-btn,
+.ui-large .btn-del.icon-btn {
+  width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
 }

@@ -284,7 +284,7 @@ class TestTailwindBuild:
         assert not missing, f"пересоберите tools/landing/build_css.py: {missing[:20]}"
 
     def test_custom_rule_kept(self) -> None:
-        assert "scroll-padding-top:5.5rem" in self.CSS.read_text(encoding="utf-8")
+        assert "scroll-padding-top:7rem" in self.CSS.read_text(encoding="utf-8")
 
     def test_size_budget(self) -> None:
         assert self.CSS.stat().st_size < 60_000

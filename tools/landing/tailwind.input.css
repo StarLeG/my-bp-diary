@@ -5,5 +5,5 @@
 
 /* Не прячем якоря под sticky-шапкой при прокрутке. */
 html {
-  scroll-padding-top: 5.5rem;
+  scroll-padding-top: 7rem;
 }

@@ -62,8 +62,13 @@ async def unknown_text(message: Message, state: FSMContext) -> None:
 
     В активном FSM-состоянии сообщение обрабатывает хендлер соответствующего
     модуля; сюда попадают только необработанные события — им молчим.
+    Служебные сообщения (закреп канонического меню, §6.2) — не свободный ввод:
+    им молчим тоже (находка 2026-11-18: каждый `/start` порождал постороннее
+    «Выберите пункт меню»).
     """
     if await state.get_state() is not None:
+        return
+    if not message.text:
         return
     await message.answer(texts.MENU_HINT, reply_markup=keyboards.back_to_menu())
 

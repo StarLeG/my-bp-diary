@@ -623,6 +623,19 @@ def _safe_doctor_next(url: str) -> str:
 ROBOTS_TXT = "User-agent: *\nDisallow: /\n"
 
 
+class _StaticNoCache(StaticFiles):
+    """Статика кабинета с обязательной перепроверкой кеша (SPEC.md, §16.3).
+
+    `Cache-Control: no-cache` заставляет браузер при каждом запросе сверять
+    ETag/Last-Modified: после деплоя старый CSS/JS не «залипает» в кеше.
+    """
+
+    def file_response(self, *args, **kwargs):  # noqa: ANN002, ANN003 — сигнатура Starlette
+        response = super().file_response(*args, **kwargs)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+
 def create_app(
     settings: Optional[Settings] = None,
     session_factory: Optional[async_sessionmaker[AsyncSession]] = None,
@@ -682,7 +695,7 @@ def create_app(
     app.state.limiter = limiter
     app.state.doctor_magic = doctor_magic
     app.state.doctor_sessions = doctor_sessions
-    app.mount("/static", StaticFiles(directory=str(_BASE_DIR / "static")), name="static")
+    app.mount("/static", _StaticNoCache(directory=str(_BASE_DIR / "static")), name="static")
 
     # ───────────────────── Зависимости ─────────────────────
 

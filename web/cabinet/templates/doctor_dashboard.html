@@ -127,7 +127,7 @@
       {% if error == "too_many" %}
         <p class="alert alert-error">Слишком много записей, выберите период поменьше.</p>
       {% elif error == "empty" %}
-        <p class="alert alert-error">За этот период записей нет.</p>
+        <p class="alert alert-info">За этот период записей нет.</p>
       {% elif error == "note" %}
         <p class="alert alert-error">Заметка не сохранена: нужен текст до 1000 символов.</p>
       {% elif saved == "note" %}
@@ -167,6 +167,12 @@
             <div><dt>Записей</dt><dd>{{ summary.count }}</dd></div>
             <div><dt>Систолическое</dt><dd>{{ summary.sys_avg }} ({{ summary.sys_min }}–{{ summary.sys_max }})</dd></div>
             <div><dt>Диастолическое</dt><dd>{{ summary.dia_avg }} ({{ summary.dia_min }}–{{ summary.dia_max }})</dd></div>
+            {% if summary.max_entry %}
+              <div><dt>Максимальное</dt><dd>{{ summary.max_entry.text(user.timezone) }}</dd></div>
+            {% endif %}
+            {% if summary.min_entry %}
+              <div><dt>Минимальное</dt><dd>{{ summary.min_entry.text(user.timezone) }}</dd></div>
+            {% endif %}
             {% if summary.pulse_avg is not none %}
               <div><dt>Пульс (средний)</dt><dd>{{ summary.pulse_avg }}</dd></div>
             {% endif %}
