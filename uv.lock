@@ -1906,7 +1906,7 @@ wheels = [
 
 [[package]]
 name = "my-bp-diary"
-version = "0.6.4"
+version = "0.7.2"
 source = { editable = "." }
 dependencies = [
     { name = "aiogram" },
