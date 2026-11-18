@@ -539,7 +539,8 @@ class TestUserFindings:
     `test_f9_pdf_has_diary_events_section`; F10 закреп меню без посторонней
     подсказки (находка 2026-11-18) → `test_f10_menu_pin_has_no_stray_hint`;
     F11 дубль ключа в compose-файле (находка 2026-11-18) →
-    `test_f11_compose_yaml_has_no_duplicate_keys`.
+    `test_f11_compose_yaml_has_no_duplicate_keys`; F17 время лекарства не
+    двигает напоминание (R8 = А, 2026-11-18) → `test_f17_med_time_...`.
     """
 
     def test_f1_cabinet_link_has_clickable_button(self, menu, dialog) -> None:
@@ -846,6 +847,40 @@ class TestUserFindings:
         assert files, f"compose-файлы не найдены под {root}"
         for path in files:
             load_yaml_strict(path)  # YAMLError с файлом и строкой на дубле
+
+    def test_f17_med_time_does_not_move_slot_or_text(self) -> None:
+        """F17 (R8 = А, 2026-11-18): время лекарства — пользовательская метка.
+
+        Отличное от времени слота время (`medications.time`) не двигает
+        срабатывание слота (оно — по времени слота из «Напоминаний», §6.7)
+        и не попадает в текст слот-сообщения.
+        """
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        from bot import texts
+        from bot.models import Medication
+        from bot.services.reminders import next_slot_occurrence
+
+        med = Medication(
+            id=1,
+            user_id=1,
+            name="Лозартан",
+            dosage="50 мг",
+            slot="evening",
+            time="21:00",  # ≠ время слота 20:00
+        )
+        # Перечень слот-сообщения строится из имени и дозировки (§6.7).
+        line = texts.fmt_med_item(med.name, med.dosage)
+        message = texts.fmt_slot_message("evening", [line])
+        assert "Лозартан 50 мг" in message
+        assert med.time not in message, "время лекарства попало в текст слот-сообщения"
+        # Срабатывание слота — по его времени (20:00), не по времени лекарства.
+        moment = next_slot_occurrence(
+            "20:00", "Europe/Minsk", datetime(2026, 11, 18, 12, 0, tzinfo=timezone.utc)
+        )
+        local = moment.astimezone(ZoneInfo("Europe/Minsk"))
+        assert local.strftime("%H:%M") == "20:00"
 
 
 # ─────────────────────── «📄 Отчет», «ℹ️ О боте», команды ───────────────────────
