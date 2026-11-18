@@ -178,9 +178,12 @@ def shoot_cabinet(url: str, db: Path, secret: str) -> None:
         save(page.locator("#summary").screenshot(), "cabinet-charts")
 
         page.goto(f"{url}/?days=7#history")
-        rows = page.locator("#history tbody tr")
+        # Строки истории сгруппированы по дням (0.5.9): `nth-child` по группе
+        # не находит 10-ю строку — берём видимые строки списком (2026-11-18).
+        rows = page.locator("#history tbody tr:visible")
         last = min(rows.count(), 10)
-        save(page.screenshot(full_page=True, clip=_clip(page, "#history h2", f"#history tbody tr:nth-child({last})")),
+        assert last, "в истории нет видимых строк"
+        save(page.screenshot(full_page=True, clip=_clip(page, "#history h2", f"#history tbody tr:visible >> nth={last - 1}")),
              "cabinet-history")
 
         page.goto(f"{url}/?add=1#history")
@@ -204,7 +207,10 @@ def shoot_cabinet(url: str, db: Path, secret: str) -> None:
         phone.add_cookies(cookies)
         mobile = phone.new_page()
         mobile.goto(f"{url}/?days=7#history")
-        save(mobile.screenshot(full_page=True, clip=_clip(mobile, "#history h2", "#history tbody tr:nth-child(3)")),
+        rows = mobile.locator("#history tbody tr:visible")
+        last = min(rows.count(), 3)
+        assert last, "в истории нет видимых строк"
+        save(mobile.screenshot(full_page=True, clip=_clip(mobile, "#history h2", f"#history tbody tr:visible >> nth={last - 1}")),
              "cabinet-history-mobile", width=780)
 
         print("Кабинет врача:")
