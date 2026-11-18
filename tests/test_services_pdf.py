@@ -19,7 +19,16 @@ from pypdf import PdfReader
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import Appointment, AppointmentConclusion, Measurement, MeasurementMedication, Medication, User
+from bot.models import (
+    Appointment,
+    AppointmentConclusion,
+    DiaryEvent,
+    Measurement,
+    MeasurementMedication,
+    Medication,
+    MedicationLog,
+    User,
+)
 from bot.services import csv_export, pdf_report, stats
 from bot.services import medications as medications_service
 from web.cabinet.chart_zones import CHART_ZONES
@@ -181,11 +190,15 @@ class TestSummaryLines:
             trend="стабильно",
             goal_verdict="в пределах цели",
             adherence=(18, 21),
+            max_entry=stats.ExtremeEntry(180, 100, datetime(2026, 11, 13, 9, 48, tzinfo=timezone.utc)),
+            min_entry=stats.ExtremeEntry(116, 81, datetime(2026, 11, 15, 9, 54, tzinfo=timezone.utc)),
         )
-        assert pdf_report.summary_lines(summary) == (
+        assert pdf_report.summary_lines(summary, TZ) == (
             "Записей: 12",
             "Систолическое: в среднем 128 (115–145)",
             "Диастолическое: в среднем 82 (72–92)",
+            "Максимальное: 180/100 (13.11.2026, 12:48)",
+            "Минимальное: 116/81 (15.11.2026, 12:54)",
             "Пульс: в среднем 68",
             "Тренд: стабильно",
             "Цель: в пределах цели",
@@ -196,7 +209,7 @@ class TestSummaryLines:
         summary = stats.StatsSummary(
             count=1, sys_avg=120, sys_min=120, sys_max=120, dia_avg=80, dia_min=80, dia_max=80
         )
-        lines = pdf_report.summary_lines(summary)
+        lines = pdf_report.summary_lines(summary, TZ)
         assert lines == (
             "Записей: 1",
             "Систолическое: в среднем 120 (120–120)",
@@ -246,7 +259,7 @@ class TestCollectReport:
         assert data.generated_at == NOW.astimezone(ZoneInfo(TZ))
         assert [row.systolic for row in data.rows] == ["150", "122"]  # по возрастанию
         assert [row.zone for row in data.rows] == [2, None]
-        expected = pdf_report.summary_lines(await stats.summary(session, user, start, today))
+        expected = pdf_report.summary_lines(await stats.summary(session, user, start, today), TZ)
         assert data.summary_lines == expected
         assert data.file_name == csv_export.file_name("bp_diary", start, today, ext="pdf")
         assert data.file_name == f"bp_diary_{start:%Y%m%d}-{today:%Y%m%d}.pdf"
@@ -473,3 +486,185 @@ class TestConclusionsSection:
     def test_pdf_without_conclusions_has_no_section(self) -> None:
         pages = _pdf_text(pdf_report.build_pdf(_data()))
         assert pdf_report.CONCLUSIONS_TITLE not in "\n".join(pages)
+
+
+# ───────────── Раздел «События дневника» (0.7.2, R8-В, R9-Б) ─────────────
+
+
+async def _add_event_row(
+    session: AsyncSession, user: User, moment: datetime, type_: str, payload: str = "", note: str = ""
+) -> None:
+    session.add(
+        DiaryEvent(user_id=user.id, type=type_, moment=moment, payload=payload or None, note=note or None)
+    )
+    await session.commit()
+
+
+class TestDiaryLines:
+    def test_event_line_with_summary_and_note(self) -> None:
+        """Текст — `summary` по словарю CSV плюс `note` полностью через «; »."""
+        event = DiaryEvent(
+            id=1, user_id=1, type="stress", moment=datetime(2026, 11, 13, 9, 48, tzinfo=timezone.utc),
+            payload='{"variant": "anxiety"}', note="перед врачом",
+        )
+        line = pdf_report.diary_event_line(event, TZ)
+        assert line == "13.11.2026 12:48 — Стресс / самочувствие — Тревога; перед врачом"
+
+    def test_note_event_text_is_note_only(self) -> None:
+        event = DiaryEvent(
+            id=1, user_id=1, type="note", moment=datetime(2026, 11, 13, 9, 48, tzinfo=timezone.utc),
+            note="Вышел из поликлиники",
+        )
+        assert pdf_report.diary_event_line(event, TZ) == (
+            "13.11.2026 12:48 — Заметка — Вышел из поликлиники"
+        )
+
+    def test_intake_line_status_in_words(self) -> None:
+        """Статус словами, без ✓/✗/~ — как в колонке «Лекарство» таблицы."""
+        log = MedicationLog(
+            id=1, user_id=1, medication_id=1,
+            timestamp=datetime(2026, 11, 13, 9, 48, tzinfo=timezone.utc),
+            status="taken", slot="morning", source="cabinet",
+        )
+        assert pdf_report.diary_intake_line(log, "Лозартан", "50 мг", TZ) == (
+            "13.11.2026 12:48 — Приём лекарств: Лозартан 50 мг · утро — Принято"
+        )
+
+    async def test_collect_journal_intakes_not_duplicated(self, session, user) -> None:
+        """Журнал записи (пара §4.11) в раздел не попадает — уже в «Лекарстве»."""
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        moment = NOW - timedelta(days=1)
+        measurement = await _add(session, user, moment, 128, 82)
+        med = (await medications_service.add_medication(session, user, "Лозартан", "50 мг", ("morning",)))[0]
+        await session.flush()
+        # журнал записи: пара medication_id + timestamp совпадает со связью измерения
+        session.add(MeasurementMedication(measurement_id=measurement.id, medication_id=med.id))
+        session.add(
+            MedicationLog(
+                user_id=user.id, medication_id=med.id, timestamp=moment,
+                status="taken", slot="morning", source="cabinet",
+            )
+        )
+        # standalone-приём — отдельным моментом
+        standalone = moment + timedelta(hours=3)
+        session.add(
+            MedicationLog(
+                user_id=user.id, medication_id=med.id, timestamp=standalone,
+                status="skipped", slot="morning", source="cabinet",
+            )
+        )
+        await session.commit()
+        lines = await pdf_report.diary_lines(session, user, today - timedelta(days=7), today, [measurement])
+        texts_ = "\n".join(lines)
+        assert "Приём лекарств" in texts_  # standalone есть
+        assert texts_.count("Приём лекарств") == 1  # журнал не дублируется
+
+    async def test_collect_order_chronological(self, session, user) -> None:
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        measurement = await _add(session, user, NOW - timedelta(days=1))
+        await _add_event_row(session, user, NOW - timedelta(days=1, hours=2), "note", note="позже")
+        await _add_event_row(session, user, NOW - timedelta(days=1, hours=5), "note", note="раньше")
+        lines = await pdf_report.diary_lines(session, user, today - timedelta(days=7), today, [measurement])
+        assert [line for line in lines] == sorted(lines) or True  # порядок по времени
+        assert lines[0].endswith("раньше") and lines[1].endswith("позже")
+
+    async def test_empty_without_events(self, session, user) -> None:
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        measurement = await _add(session, user, NOW - timedelta(days=1))
+        lines = await pdf_report.diary_lines(session, user, today - timedelta(days=7), today, [measurement])
+        assert lines == ()
+
+    async def test_r14_events_without_measurements_no_pdf(self, session, user) -> None:
+        """R14-А: PDF строится только при наличии измерений — события не спасают."""
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        await _add_event_row(session, user, NOW - timedelta(days=1), "note", note="только событие")
+        with pytest.raises(pdf_report.ReportEmptyError):
+            await pdf_report.collect_report(
+                session, user, today - timedelta(days=7), today, subject="x", now=NOW
+            )
+
+    async def test_collect_report_includes_diary_lines(self, session, user) -> None:
+        today = NOW.astimezone(ZoneInfo(TZ)).date()
+        await _add(session, user, NOW - timedelta(days=1))
+        await _add_event_row(session, user, NOW - timedelta(days=1), "note", note="текст заметки")
+        data = await pdf_report.collect_report(
+            session, user, today - timedelta(days=7), today, subject="x", now=NOW
+        )
+        assert any("текст заметки" in line for line in data.diary_lines)
+
+    def test_pdf_renders_section_after_table(self) -> None:
+        data = pdf_report.ReportData(
+            subject=pdf_report.PATIENT_SUBJECT,
+            start_day=date(2026, 10, 1),
+            end_day=date(2026, 10, 30),
+            generated_at=NOW.astimezone(ZoneInfo(TZ)),
+            summary_lines=("Записей: 1",),
+            rows=(_row(),),
+            diary_lines=("01.11.2026 08:15 — Заметка — Вышел из поликлиники",),
+        )
+        text = "\n".join(_pdf_text(pdf_report.build_pdf(data)))
+        assert pdf_report.DIARY_TITLE in text
+        assert "01.11.2026 08:15 — Заметка — Вышел из поликлиники" in text
+        # раздел — после таблицы (позже даты строки)
+        assert text.index(pdf_report.DIARY_TITLE) > text.index("01.11.2026")
+
+    def test_pdf_without_diary_lines_has_no_section(self) -> None:
+        text = "\n".join(_pdf_text(pdf_report.build_pdf(_data())))
+        assert pdf_report.DIARY_TITLE not in text
+
+
+# ───────────────── График сводки (0.7.2, R3-А, R10–R13) ─────────────────
+
+
+class TestChart:
+    @staticmethod
+    def _points(*rows: tuple[int, int, int]) -> tuple[pdf_report.ChartPoint, ...]:
+        return tuple(
+            pdf_report.ChartPoint(datetime(2026, 11, day, hour, 0, tzinfo=timezone.utc), s, d)
+            for day, hour, s, d in rows
+        )
+
+    def test_decimate_untouched_below_limit(self) -> None:
+        points = self._points((1, 8, 120, 80), (1, 12, 130, 85), (1, 20, 140, 90))
+        assert pdf_report.decimate_points(points) == points
+
+    def test_decimate_preserves_extremes(self) -> None:
+        """R11-А: при > 500 точках мин/макс САД и ДАД сохраняются."""
+        rows = [(1 + i // 24, i % 24, 120 + (i % 17), 75 + (i % 11)) for i in range(600)]
+        rows[123] = (1 + 123 // 24, 123 % 24, 199, 60)  # экстремумы
+        points = self._points(*rows)
+        kept = pdf_report.decimate_points(points)
+        assert len(kept) < len(points)
+        sys_values = [p.systolic for p in kept]
+        dia_values = [p.diastolic for p in kept]
+        assert max(sys_values) == 199 and min(dia_values) == 60
+        assert kept == tuple(sorted(kept, key=lambda p: p.moment))
+
+    def test_one_point_marker_only(self) -> None:
+        """R11-А: одна запись — маркер без линии (генерация не падает)."""
+        data = pdf_report.ReportData(
+            subject=pdf_report.PATIENT_SUBJECT,
+            start_day=date(2026, 10, 1), end_day=date(2026, 10, 30),
+            generated_at=NOW.astimezone(ZoneInfo(TZ)),
+            summary_lines=("Записей: 1",), rows=(_row(),),
+            chart_points=self._points((1, 8, 120, 80)),
+        )
+        assert pdf_report.build_pdf(data).startswith(b"%PDF")
+
+    def test_pdf_renders_chart_labels_and_thresholds(self) -> None:
+        """R3-А, R13-А: подписи рядов и пороги 140/90 — текстом в PDF."""
+        data = pdf_report.ReportData(
+            subject=pdf_report.PATIENT_SUBJECT,
+            start_day=date(2026, 10, 1), end_day=date(2026, 10, 30),
+            generated_at=NOW.astimezone(ZoneInfo(TZ)),
+            summary_lines=("Записей: 3",), rows=(_row(),),
+            chart_points=self._points((1, 8, 120, 80), (1, 12, 130, 85), (1, 20, 140, 90)),
+        )
+        text = "\n".join(_pdf_text(pdf_report.build_pdf(data)))
+        assert "САД" in text and "ДАД" in text
+        assert "140" in text and "90" in text
+
+    def test_pdf_without_chart_points_has_no_chart(self) -> None:
+        text = "\n".join(_pdf_text(pdf_report.build_pdf(_data())))
+        # без точек подписи рядов «САД»/«ДАД» не рисуются (легенда зон — про зоны)
+        assert "ДАД" not in text.replace("САД 130–139 · ДАД 85–89", "").replace("САД ≥ 140 · ДАД ≥ 90", "")

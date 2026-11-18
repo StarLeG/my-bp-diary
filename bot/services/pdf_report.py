@@ -25,12 +25,14 @@ from typing import Optional, Sequence
 from zoneinfo import ZoneInfo
 
 from fpdf import FPDF
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import Appointment, Measurement, User
+from bot.models import Appointment, DiaryEvent, Measurement, MeasurementMedication, MedicationLog, User
 from bot.services import appointments as appointments_service
 from bot.services import csv_export
+from bot.services import events as events_service
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services import stats as stats_service
@@ -91,6 +93,31 @@ HEADINGS_FILL = (232, 240, 250)
 _RGBA_RE = re.compile(
     r"rgba\(\s*(\d+)\s*,\s*(\d+)\s*,\s*(\d+)\s*,\s*([0-9]*\.?[0-9]+)\s*\)"
 )
+
+#: Высота графика сводки, мм (0.7.2, R10-А: сводка + график + легенда укладываются
+#: в ~105 мм — таблица гарантированно начинается на первой странице).
+CHART_HEIGHT = 50
+#: Маркеры точек — до этого числа записей (0.7.2, R11-А); одна запись — только маркер.
+CHART_MARK_LIMIT = 30
+#: С этого числа точек — прореживание (0.7.2, R11-А).
+CHART_DECIMATE_LIMIT = 500
+#: Пороговые линии графика (0.7.2, R13-А): единообразие с зонами ЛК.
+CHART_THRESHOLD_SYS = 140
+CHART_THRESHOLD_DIA = 90
+#: Цвета рядов графика.
+CHART_COLOR_SYS = (200, 70, 70)
+CHART_COLOR_DIA = (70, 110, 200)
+#: Заголовок раздела «События дневника» (§10.1, 0.7.2, R9-Б).
+DIARY_TITLE = "События дневника"
+
+
+@dataclass(frozen=True)
+class ChartPoint:
+    """Точка графика сводки (0.7.2, R3-А); `moment` — UTC (как `measurements.timestamp`)."""
+
+    moment: datetime
+    systolic: int
+    diastolic: int
 
 
 class ReportEmptyError(Exception):
@@ -158,6 +185,10 @@ class ReportData:
     """Начало имени файла врача: `Ivanov_I_I` (§10.1, 0.5.1); None — `bp_diary`."""
     conclusions: tuple[ConclusionGroup, ...] = ()
     """«Заключения врачей» — только в PDF пациента (У2-А); у врача пусто."""
+    chart_points: tuple[ChartPoint, ...] = ()
+    """Точки графика САД/ДАД после сводки (0.7.2, R3-А); пусто — графика нет."""
+    diary_lines: tuple[str, ...] = ()
+    """Строки раздела «События дневника» (0.7.2, R9-Б); пусто — раздела нет."""
 
     @property
     def file_name(self) -> str:
@@ -220,13 +251,21 @@ def zone_fill(level: int) -> tuple[int, int, int]:
     return opaque_fill(CHART_ZONES["systolic"][level]["fill"])
 
 
-def summary_lines(summary: stats_service.StatsSummary) -> tuple[str, ...]:
-    """Строки сводки — те же метрики, что в блоке «Сводка» ЛК (§16.2, §10.1)."""
+def summary_lines(summary: stats_service.StatsSummary, tz_name: str) -> tuple[str, ...]:
+    """Строки сводки — те же метрики, что в блоке «Сводка» ЛК (§16.2, §10.1).
+
+    `tz_name` — часовой пояс пациента: моменты записей-экстремумов (0.7.2, R1-А)
+    показываются в локальном времени.
+    """
     lines = [
         f"Записей: {summary.count}",
         f"Систолическое: в среднем {summary.sys_avg} ({summary.sys_min}–{summary.sys_max})",
         f"Диастолическое: в среднем {summary.dia_avg} ({summary.dia_min}–{summary.dia_max})",
     ]
+    if summary.max_entry is not None:
+        lines.append(f"Максимальное: {summary.max_entry.text(tz_name)}")
+    if summary.min_entry is not None:
+        lines.append(f"Минимальное: {summary.min_entry.text(tz_name)}")
     if summary.pulse_avg is not None:
         lines.append(f"Пульс: в среднем {summary.pulse_avg}")
     lines.append(f"Тренд: {summary.trend}")
@@ -260,6 +299,89 @@ def report_rows(
             )
         )
     return tuple(rows)
+
+
+# ─────────────────────── Раздел «События дневника» (0.7.2) ───────────────────────
+
+
+def diary_event_line(event: DiaryEvent, tz_name: str) -> str:
+    """Строка события раздела: «ДД.ММ.ГГГГ ЧЧ:ММ — тип — текст» (§10.1, R9-Б).
+
+    Текст — `summary` по словарю CSV событий (§10) плюс `note` полностью через
+    «; » (для `stress` заметка в ленте ЛК скрыта, §6.4, но в PDF нужна врачу);
+    у `note`-события `summary` пуст — текст только из заметки.
+    """
+    local = event.moment.astimezone(ZoneInfo(tz_name))
+    title = texts.EVENT_TYPE_TITLES.get(event.type, texts.EVENT_TYPE_TITLES["note"])
+    summary = csv_export.event_summary(event)
+    note = (event.note or "").strip()
+    text = "; ".join(part for part in (summary, note) if part)
+    head = f"{local:%d.%m.%Y %H:%M} — {title}"
+    return f"{head} — {text}" if text else head
+
+
+def diary_intake_line(log: MedicationLog, name: str, dosage: str, tz_name: str) -> str:
+    """Строка standalone-приёма: «ДД.ММ.ГГГГ ЧЧ:ММ — Приём лекарств: … — Принято».
+
+    Статус — словами («Принято» / «Пропущено» / «Частично»), без ✓/✗/~ —
+    как в колонке «Лекарство» таблицы (§10.1).
+    """
+    local = log.timestamp.astimezone(ZoneInfo(tz_name))
+    item = texts.fmt_intake_item(name, dosage, log.slot)
+    status = texts.PDF_INTAKE_STATUS.get(log.status, log.status)
+    return f"{local:%d.%m.%Y %H:%M} — Приём лекарств: {item} — {status}"
+
+
+async def _journal_pairs(
+    session: AsyncSession, user: User, measurements: Sequence[Measurement]
+) -> set[tuple[int, datetime]]:
+    """Пары (лекарство, момент) журнала записей (§4.11) — для исключения дублей.
+
+    Строка `medication_logs`, чья пара `medication_id + timestamp` совпадает со
+    связью `measurement_medications` измерения этого момента, — журнал записи:
+    в раздел не попадает (уже отражена в колонке «Лекарство», §10.1).
+    """
+    ids = [m.id for m in measurements]
+    if not ids:
+        return set()
+    rows = await session.execute(
+        select(MeasurementMedication.medication_id, Measurement.timestamp)
+        .join(Measurement, Measurement.id == MeasurementMedication.measurement_id)
+        .where(
+            MeasurementMedication.measurement_id.in_(ids),
+            Measurement.user_id == user.id,
+        )
+    )
+    return {(medication_id, timestamp) for medication_id, timestamp in rows.all()}
+
+
+async def diary_lines(
+    session: AsyncSession,
+    user: User,
+    start_day: date,
+    end_day: date,
+    measurements: Sequence[Measurement],
+) -> tuple[str, ...]:
+    """Строки раздела «События дневника» (§10.1, 0.7.2, R8/R9): по времени вверх.
+
+    События дневника и standalone-приёмы; журналы приёмов, привязанные к
+    измерению, не дублируются (§4.11). Без измерений раздел не строится —
+    PDF в этом случае не формируется вовсе (R14-А).
+    """
+    events = await events_service.events_for_period(session, user, start_day, end_day)
+    logs = await medications_service.logs_for_period(session, user, start_day, end_day)
+    journal = await _journal_pairs(session, user, measurements)
+    entries: list[tuple[datetime, str]] = [
+        (event.moment, diary_event_line(event, user.timezone)) for event in events
+    ]
+    for log, name, dosage in logs:
+        if (log.medication_id, log.timestamp) in journal:
+            continue
+        entries.append(
+            (log.timestamp, diary_intake_line(log, name, dosage, user.timezone))
+        )
+    entries.sort(key=lambda pair: pair[0])
+    return tuple(line for _, line in entries)
 
 
 async def collect_report(
@@ -307,10 +429,14 @@ async def collect_report(
         start_day=start_day,
         end_day=end_day,
         generated_at=generated_at,
-        summary_lines=summary_lines(summary),
+        summary_lines=summary_lines(summary, user.timezone),
         rows=report_rows(measurements, cells, user.timezone),
         file_stem=file_stem,
         conclusions=conclusions,
+        chart_points=tuple(
+            ChartPoint(m.timestamp, m.systolic, m.diastolic) for m in measurements
+        ),
+        diary_lines=await diary_lines(session, user, start_day, end_day, measurements),
     )
 
 
@@ -360,10 +486,131 @@ def build_pdf(data: ReportData) -> bytes:
 
     _draw_header(pdf, data)
     _draw_summary(pdf, data.summary_lines)
+    _draw_chart(pdf, data.chart_points)
     _draw_legend(pdf)
     _draw_table(pdf, data.rows)
+    _draw_diary(pdf, data.diary_lines)
     _draw_conclusions(pdf, data.conclusions)
     return bytes(pdf.output())
+
+
+# ─────────────────────────── График сводки (0.7.2) ───────────────────────────
+
+
+def decimate_points(
+    points: Sequence[ChartPoint], limit: int = CHART_DECIMATE_LIMIT
+) -> tuple[ChartPoint, ...]:
+    """Прореживание точек графика (R11-А); до `limit` — без изменений.
+
+    При > 500 точках (экспорт «всё время») в каждом отрезке времени
+    сохраняются точки с минимумом и максимумом САД и ДАД — экстремумы не
+    теряются, линия остаётся (в отличие от «только маркеры», R11-Б).
+    """
+    pts = list(points)
+    if len(pts) <= limit:
+        return tuple(pts)
+    buckets = limit // 4  # до 4 точек на отрезок: мин/макс САД и ДАД
+    chosen = {0, len(pts) - 1}
+    for i in range(buckets):
+        lo = i * len(pts) // buckets
+        hi = (i + 1) * len(pts) // buckets
+        chunk = pts[lo:hi] or [pts[lo]]
+        for attr in ("systolic", "diastolic"):
+            chosen.add(lo + min(range(len(chunk)), key=lambda j: getattr(chunk[j], attr)))
+            chosen.add(lo + max(range(len(chunk)), key=lambda j: getattr(chunk[j], attr)))
+    return tuple(pts[i] for i in sorted(chosen))
+
+
+def _draw_chart(pdf: FPDF, points: Sequence[ChartPoint]) -> None:
+    """Линейный график САД/ДАД после сводки, до легенды зон (§10.1, R3-А).
+
+    Ось X — по реальному времени (R12-А): пропуски между днями видны; ось Y —
+    авто-шкала по данным с запасом. Пороги 140/90 — тонкий пунктир (R13-А).
+    Одна запись — маркер без линии; до 30 точек — линия + маркеры; больше —
+    линия (R11-А). Без пульса — другая область значений (R3-А).
+    """
+    if not points:
+        return
+    pts = list(decimate_points(points))
+    left = pdf.l_margin
+    width = pdf.w - pdf.l_margin - pdf.r_margin
+    top = pdf.get_y()
+    plot_h = CHART_HEIGHT - 8  # запас под подписи рядов и ось X
+    plot_top = top + 5
+
+    values = [p.systolic for p in pts] + [p.diastolic for p in pts]
+    v_min = min(min(values), CHART_THRESHOLD_DIA)
+    v_max = max(max(values), CHART_THRESHOLD_SYS)
+    pad = max(5, round((v_max - v_min) * 0.05))
+    v_min -= pad
+    v_max += pad
+    t_min = min(p.moment for p in pts)
+    t_max = max(p.moment for p in pts)
+    span = (t_max - t_min).total_seconds()
+
+    def x_at(moment: datetime) -> float:
+        if span <= 0:
+            return left + width / 2
+        return left + (moment - t_min).total_seconds() / span * width
+
+    def y_at(value: int) -> float:
+        return plot_top + plot_h * (v_max - value) / (v_max - v_min)
+
+    # Пороги 140/90 — тонкий пунктир с подписями у оси Y (R13-А).
+    pdf.set_draw_color(170, 170, 170)
+    pdf.set_line_width(0.2)
+    pdf.set_font(FONT_FAMILY, size=7)
+    pdf.set_dash_pattern(dash=1.5, gap=1.5)
+    for value in (CHART_THRESHOLD_SYS, CHART_THRESHOLD_DIA):
+        y = y_at(value)
+        pdf.line(left, y, left + width, y)
+        pdf.set_text_color(110, 110, 110)
+        pdf.text(left + 2, y - 1, text=str(value))
+    pdf.set_dash_pattern()  # сплошные линии для рядов
+
+    # Ряды: линия, маркеры — до 30 точек (R11-А).
+    single = len(pts) == 1
+    mark = single or len(pts) <= CHART_MARK_LIMIT
+    for attr, color in (("systolic", CHART_COLOR_SYS), ("diastolic", CHART_COLOR_DIA)):
+        pdf.set_draw_color(*color)
+        pdf.set_fill_color(*color)
+        pdf.set_line_width(0.4)
+        if not single:
+            for a, b in zip(pts, pts[1:]):
+                pdf.line(
+                    x_at(a.moment), y_at(getattr(a, attr)),
+                    x_at(b.moment), y_at(getattr(b, attr)),
+                )
+        if mark:
+            for p in pts:
+                pdf.circle(x_at(p.moment), y_at(getattr(p, attr)), 0.6, style="F")
+
+    # Подписи рядов (R3-А) — над графиком, слева.
+    pdf.set_font(FONT_FAMILY, "B", 8)
+    pdf.set_text_color(*CHART_COLOR_SYS)
+    pdf.text(left, top + 3, text="САД")
+    pdf.set_text_color(*CHART_COLOR_DIA)
+    pdf.text(left + 12, top + 3, text="ДАД")
+    pdf.set_text_color(0, 0, 0)
+    pdf.set_xy(left, top + CHART_HEIGHT + 1)
+
+
+def _draw_diary(pdf: FPDF, lines: Sequence[str]) -> None:
+    """Раздел «События дневника» после таблицы (§10.1, 0.7.2, R9-Б).
+
+    Заголовок — как у «Заключений врачей»; строки — по одной, длинный текст
+    переносится по словам (правило таблицы).
+    """
+    if not lines:
+        return
+    pdf.ln(4)
+    pdf.set_font(FONT_FAMILY, "B", 12)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 7, text=DIARY_TITLE)
+    pdf.set_font(FONT_FAMILY, "", 10)
+    for line in lines:
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(0, 5.5, text=line)
 
 
 def _draw_conclusions(pdf: FPDF, groups: Sequence[ConclusionGroup]) -> None:

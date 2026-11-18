@@ -41,36 +41,40 @@
               </td>
               {% if history_can_edit %}
                 <td data-label="Действия" class="actions">
-                  <a class="btn btn-ghost" href="/?edit={{ m.id }}#history" title="Изменить">✏️</a>
-                  <a class="btn-del" href="/?confirm_delete={{ m.id }}#history" title="Удалить">🗑</a>
+                  <a class="btn btn-ghost icon-btn" href="/?edit={{ m.id }}#history" title="Изменить" aria-label="Изменить">✏️</a>
+                  <a class="btn-del icon-btn" href="/?confirm_delete={{ m.id }}#history" title="Удалить" aria-label="Удалить">🗑</a>
                 </td>
               {% endif %}
             </tr>
           {% elif item.kind == "event" %}
             <tr class="feed-row feed-event">
-              <td class="feed-line" colspan="{{ 8 if history_can_edit else 7 }}">
+              <td class="feed-line" colspan="7">
                 {% if history_can_edit %}
                   <span class="feed-text">{{ event_row_text(item.event, user.timezone) }}</span>
-                  <span class="actions">
-                    <a class="btn btn-ghost" href="/?edit_ev={{ item.event.id }}#history" title="Изменить">✏️</a>
-                    <a class="btn-del" href="/?confirm_delete_ev={{ item.event.id }}#history" title="Удалить">🗑</a>
-                  </span>
                 {% else %}
                   <a class="feed-link" href="{{ history_view_prefix }}?ev={{ item.event.id }}#history">{{ event_row_text(item.event, user.timezone) }}</a>
                 {% endif %}
               </td>
+              {% if history_can_edit %}
+                <td data-label="Действия" class="actions">
+                  <a class="btn btn-ghost icon-btn" href="/?edit_ev={{ item.event.id }}#history" title="Изменить" aria-label="Изменить">✏️</a>
+                  <a class="btn-del icon-btn" href="/?confirm_delete_ev={{ item.event.id }}#history" title="Удалить" aria-label="Удалить">🗑</a>
+                </td>
+              {% endif %}
             </tr>
           {% else %}
             <tr class="feed-row feed-intake">
-              <td class="feed-line" colspan="{{ 8 if history_can_edit else 7 }}">
+              <td class="feed-line" colspan="7">
                 <span class="feed-text">{{ intake_row_text(item.intake, user.timezone) }}</span>
-                {% if history_can_edit and item.intake.editable %}
-                  <span class="actions">
-                    <a class="btn btn-ghost" href="/?edit_int={{ item.intake.log.id }}#history" title="Изменить">✏️</a>
-                    <a class="btn-del" href="/?confirm_delete_int={{ item.intake.log.id }}#history" title="Удалить">🗑</a>
-                  </span>
-                {% endif %}
               </td>
+              {% if history_can_edit %}
+                <td data-label="Действия" class="actions">
+                  {% if item.intake.editable %}
+                    <a class="btn btn-ghost icon-btn" href="/?edit_int={{ item.intake.log.id }}#history" title="Изменить" aria-label="Изменить">✏️</a>
+                    <a class="btn-del icon-btn" href="/?confirm_delete_int={{ item.intake.log.id }}#history" title="Удалить" aria-label="Удалить">🗑</a>
+                  {% endif %}
+                </td>
+              {% endif %}
             </tr>
           {% endif %}
         {% endfor %}

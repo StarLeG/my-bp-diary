@@ -37,6 +37,25 @@ TREND_MIN_MEASUREMENTS = 4
 GOAL_TOLERANCE = 5
 
 
+@dataclass(frozen=True)
+class ExtremeEntry:
+    """Запись-экстремум сводки (0.7.2, R1-А, R2-А): реальная запись с одним моментом.
+
+    Не «смесь» чисел из разных записей: пара САД/ДАД и момент — из одной записи
+    измерения. `moment` — UTC (как `measurements.timestamp`), формат строки
+    («180/100 (13.11.2026, 12:48)») — на местах показа (`text`, §10.1, §16.2).
+    """
+
+    systolic: int
+    diastolic: int
+    moment: datetime
+
+    def text(self, tz_name: str) -> str:
+        """Строка сводки: «180/100 (13.11.2026, 12:48)» — время по `tz_name`."""
+        local = self.moment.astimezone(ZoneInfo(tz_name))
+        return f"{self.systolic}/{self.diastolic} ({local:%d.%m.%Y, %H:%M})"
+
+
 @dataclass
 class StatsSummary:
     """Числа сводки; None — если данных нет или поле не считается."""
@@ -52,6 +71,34 @@ class StatsSummary:
     trend: str = texts.STATS_TREND_FEW
     goal_verdict: Optional[str] = None
     adherence: Optional[tuple[int, int]] = None  # (taken, planned); None — лекарств нет
+    #: Запись с максимальным давлением (0.7.2, R1-А) — критерий R2-А (см. `pick_extremes`).
+    max_entry: Optional[ExtremeEntry] = None
+    #: Запись с минимальным давлением (0.7.2, R1-А) — критерий R2-А.
+    min_entry: Optional[ExtremeEntry] = None
+
+
+def pick_extremes(
+    measurements: Sequence[Measurement],
+) -> tuple[Optional[ExtremeEntry], Optional[ExtremeEntry]]:
+    """Записи-экстремумы сводки (0.7.2, R2-А); пустой список — (None, None).
+
+    Максимум — по САД, при равенстве по большему ДАД, равны оба значения —
+    более поздняя запись. Минимум — по САД, при равенстве по меньшему ДАД,
+    равны оба — более поздняя запись. Так экстремум остаётся реальной записью
+    с одним моментом времени (не смесью чисел из разных записей).
+    """
+    if not measurements:
+        return None, None
+    max_m = max(measurements, key=lambda m: (m.systolic, m.diastolic, m.timestamp))
+    min_pair = min((m.systolic, m.diastolic) for m in measurements)
+    min_m = max(
+        (m for m in measurements if (m.systolic, m.diastolic) == min_pair),
+        key=lambda m: m.timestamp,
+    )
+    return (
+        ExtremeEntry(max_m.systolic, max_m.diastolic, max_m.timestamp),
+        ExtremeEntry(min_m.systolic, min_m.diastolic, min_m.timestamp),
+    )
 
 
 def compute_trend(systolic_values: Sequence[int], timestamps: Sequence[datetime]) -> str:
@@ -107,6 +154,7 @@ async def summary(
 
     sys_avg = round(sum(systolic) / count)
     dia_avg = round(sum(diastolic) / count)
+    max_entry, min_entry = pick_extremes(measurements)
     return StatsSummary(
         count=count,
         sys_avg=sys_avg,
@@ -121,6 +169,8 @@ async def summary(
             sys_avg, dia_avg, user.target_systolic, user.target_diastolic
         ),
         adherence=adherence_value,
+        max_entry=max_entry,
+        min_entry=min_entry,
     )
 
 

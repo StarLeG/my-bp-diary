@@ -6,7 +6,7 @@ from datetime import date, datetime, timezone
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import texts
-from bot.models import User
+from bot.models import Measurement, User
 from bot.services import measurements as measurements_service
 from bot.services import medications as medications_service
 from bot.services import stats as service
@@ -81,6 +81,54 @@ class TestComputeGoal:
     def test_below_requires_both(self) -> None:
         # Систолическое ниже, диастолическое в цели — «в пределах», не «ниже».
         assert service.compute_goal(115, 80, 130, 80) == texts.STATS_GOAL_OK
+
+
+class TestPickExtremes:
+    """Критерий R2-А (0.7.2): по САД → по ДАД → более поздняя запись."""
+
+    @staticmethod
+    def _m(sys_v: int, dia_v: int, *stamp: int) -> "Measurement":
+        return Measurement(
+            id=0, user_id=1, timestamp=datetime(*stamp, tzinfo=UTC),
+            systolic=sys_v, diastolic=dia_v,
+        )
+
+    def test_empty(self) -> None:
+        assert service.pick_extremes([]) == (None, None)
+
+    def test_by_systolic(self) -> None:
+        rows = [self._m(150, 110, 2026, 11, 1, 8, 0), self._m(180, 100, 2026, 11, 2, 8, 0)]
+        # R2-А: экстремум по САД — запись 180/100, а не «смесь» 180/110
+        max_e, min_e = service.pick_extremes(rows)
+        assert (max_e.systolic, max_e.diastolic) == (180, 100)
+        assert (min_e.systolic, min_e.diastolic) == (150, 110)
+
+    def test_tie_systolic_decided_by_diastolic(self) -> None:
+        rows = [
+            self._m(180, 90, 2026, 11, 1, 8, 0),
+            self._m(180, 100, 2026, 11, 2, 8, 0),
+            self._m(116, 90, 2026, 11, 3, 8, 0),
+            self._m(116, 81, 2026, 11, 4, 8, 0),
+        ]
+        max_e, min_e = service.pick_extremes(rows)
+        # максимум: при равном САД — больший ДАД; минимум — меньший
+        assert (max_e.systolic, max_e.diastolic) == (180, 100)
+        assert (min_e.systolic, min_e.diastolic) == (116, 81)
+
+    def test_full_tie_takes_later_record(self) -> None:
+        rows = [
+            self._m(180, 100, 2026, 11, 1, 8, 0),
+            self._m(180, 100, 2026, 11, 2, 9, 30),
+            self._m(116, 81, 2026, 11, 3, 8, 0),
+            self._m(116, 81, 2026, 11, 4, 7, 15),
+        ]
+        max_e, min_e = service.pick_extremes(rows)
+        assert max_e.moment == aware(2026, 11, 2, 9, 30)
+        assert min_e.moment == aware(2026, 11, 4, 7, 15)
+
+    def test_text_local_time(self) -> None:
+        entry = service.ExtremeEntry(180, 100, aware(2026, 11, 13, 9, 48))  # 12:48 по Минску
+        assert entry.text("Europe/Minsk") == "180/100 (13.11.2026, 12:48)"
 
 
 class TestSummary:

@@ -316,3 +316,42 @@ class TestDoctor:
         response = client.get(f"/doctor/patient/{other_id}")
         assert response.status_code == 303
         assert response.headers["location"] == "/doctor?error=denied"
+
+
+# ─────────── Строки «Максимальное» / «Минимальное» (0.7.2, R1-А, R4-А) ───────────
+
+
+class TestSummaryExtremes:
+    """Две строки записей-экстремумов в «Сводке за период» — единообразно с PDF."""
+
+    def test_rows_with_dates_in_cabinet(self, app_client, settings) -> None:
+        client, user_id, *_ = app_client
+        _register(client)
+        today = _today()
+        # R2-А: экстремум по САД, при равенстве — по ДАД; запись с одним моментом
+        _add(settings, user_id, today - timedelta(days=2), 150, 110, hour=9)
+        _add(settings, user_id, today - timedelta(days=1), 180, 100, hour=21, )
+        _add(settings, user_id, today, 116, 81, hour=8)
+        html = client.get("/").text
+        summary = html[html.index('id="summary"') : html.index('id="history"')]
+        assert "Максимальное" in summary and "180/100" in summary
+        assert "Минимальное" in summary and "116/81" in summary
+        # момент записи-экстремума — с датой и временем (год обязателен, R1-А)
+        assert re.search(r"Максимальное.*180/100 \(\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\)", summary, re.S)
+
+    def test_rows_in_doctor_dashboard(self, app_client, settings) -> None:
+        client, user_id, _, doctor_id = app_client
+        _link(settings, doctor_id, user_id)
+        today = _today()
+        _add(settings, user_id, today, 180, 100, hour=21)
+        _login_doctor(client, doctor_id)
+        html = client.get(f"/doctor/patient/{user_id}").text
+        summary = html[html.index('id="summary"') : html.index('id="history"')]
+        assert "Максимальное" in summary and "180/100" in summary
+        assert "Минимальное" in summary
+
+    def test_no_rows_without_measurements(self, app_client, settings) -> None:
+        client, *_ = app_client
+        _register(client)
+        html = client.get("/").text
+        assert "Максимальное" not in html and "Минимальное" not in html
