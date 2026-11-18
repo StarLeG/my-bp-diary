@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import time
 import urllib.request
 
@@ -530,7 +531,12 @@ class TestUserFindings:
     «Например: 120/80 72»» → `test_commands`; F3 «/start не вызывает главное
     окно» → `test_start_does_not_duplicate`; F4 «Что-то пошло не так» на ЛК →
     сообщение без ошибки; F5 антиспам гасит нажатия → быстрые клики живые;
-    F6 ложный «Бот не отвечает» → свежий хартбит `status.json`.
+    F6 ложный «Бот не отвечает» → свежий хартбит `status.json`; F7 «шапка
+    отчёта: макс/мин» → `test_f7_*` (все три точки экспорта PDF и сводка ЛК,
+    R14-А — пустой период); F8 «единообразие ленты» →
+    `test_f8_feed_actions_are_uniform`; F9 «данные ленты в PDF» →
+    `test_f9_pdf_has_diary_events_section`; F10 закреп меню без посторонней
+    подсказки (находка 2026-11-18) → `test_f10_menu_pin_has_no_stray_hint`.
     """
 
     def test_f1_cabinet_link_has_clickable_button(self, menu, dialog) -> None:
@@ -591,6 +597,234 @@ class TestUserFindings:
         payload = json_module.loads(open(path, encoding="utf-8").read())
         assert payload.get("ok") is True
         assert is_fresh(payload["at"]), f"хартбит устарел: {payload.get('at')}"
+
+    # ── F7–F9: отчёт и лента (0.7.2, п. 30; REPORT-UX R1–R9) ──
+
+    @staticmethod
+    def _utc(epoch: float) -> str:
+        """Момент в UTC для `QaDb.add_*` (`ГГГГ-ММ-ДД ЧЧ:ММ:СС`)."""
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(epoch))
+
+    @staticmethod
+    def _local(db, tg_id: int, utc_stamp: str) -> str:
+        """Момент в локальном времени пользователя — как в подписи экстремума."""
+        from datetime import datetime, timezone
+        from zoneinfo import ZoneInfo
+
+        user = db.user(tg_id)
+        moment = datetime.strptime(utc_stamp, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
+        return moment.astimezone(ZoneInfo(user["timezone"])).strftime("%d.%m.%Y, %H:%M")
+
+    def _seed_extremes(self, db, tg_id: int) -> tuple[str, str]:
+        """Образец F7 (R1/R2-А): максимум/минимум и «хвосты» ДАД.
+
+        160/120 и 130/56 — ложные экстремумы по ДАД: старый баг давал
+        «смесь» 180/120. Возвращает ожидаемые строки экстремумов.
+        """
+        db.delete_measurements(tg_id)
+        db.delete_events(tg_id)
+        now = time.time()
+        t_max = self._utc(now - 5 * 3600)
+        db.add_measurement(tg_id, 180, 100, 66, moment=t_max)
+        db.add_measurement(tg_id, 160, 120, 70, moment=self._utc(now - 4 * 3600))
+        db.add_measurement(tg_id, 130, 56, 64, moment=self._utc(now - 3 * 3600))
+        t_min = self._utc(now - 2 * 3600)
+        db.add_measurement(tg_id, 116, 81, 62, moment=t_min)
+        return (
+            f"Максимальное: 180/100 ({self._local(db, tg_id, t_max)})",
+            f"Минимальное: 116/81 ({self._local(db, tg_id, t_min)})",
+        )
+
+    @staticmethod
+    def _pdf_text(payload: bytes) -> str:
+        import io
+
+        from pypdf import PdfReader
+
+        return "\n".join(page.extract_text() for page in PdfReader(io.BytesIO(payload)).pages)
+
+    @staticmethod
+    def _doctor_cookie(db, tg_id: int) -> str:
+        """Сессионная cookie врача активной связи (§21) — как в `shot_landing.py`."""
+        from web.cabinet.doctor_auth import DoctorSession
+
+        secret = os.environ.get("WEB_SECRET_KEY", "")
+        assert secret, "WEB_SECRET_KEY не задан: им подписывается сессия врача"
+        return DoctorSession(secret).make(db.ensure_doctor_link(tg_id))
+
+    def test_f7_extrema_at_every_pdf_export_point(self, menu, dialog, db, tg_me, cabinet_url) -> None:
+        """F7: строки экстремумов с датой и временем (R1/R2-А) везде, где
+        выгружается PDF: бот (§6.5/§6.6), ЛК и кабинет врача (§10.1), плюс
+        сводка ЛК (R4-А). Экстремум — одна запись, не «смесь» 180/120."""
+        import io
+
+        import httpx
+
+        expected_max, expected_min = self._seed_extremes(db, tg_me.id)
+        user_id = db.user(tg_me.id)["id"]
+        token = db.web_session(tg_me.id)
+        doctor_cookie = self._doctor_cookie(db, tg_me.id)
+
+        def check_pdf(payload: bytes, where: str) -> None:
+            assert payload.startswith(b"%PDF"), f"{where}: это не PDF"
+            text = self._pdf_text(payload)
+            assert expected_max in text, f"{where}: нет строки {expected_max!r}"
+            assert expected_min in text, f"{where}: нет строки {expected_min!r}"
+            assert "180/120" not in text, f"{where}: экстремум — «смесь» 180/120"
+
+        # ── ЛК: сводка (R4-А) и PDF ──
+        with httpx.Client(
+            base_url=cabinet_url, cookies={"cabinet_session": token}, follow_redirects=False
+        ) as client:
+            html = client.get("/?days=7").text
+            assert re.search(
+                r"Максимальное.*180/100 \(\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\)", html, re.S
+            ), "в сводке ЛК нет строки «Максимальное»"
+            assert re.search(
+                r"Минимальное.*116/81 \(\d{2}\.\d{2}\.\d{4}, \d{2}:\d{2}\)", html, re.S
+            ), "в сводке ЛК нет строки «Минимальное»"
+            assert "180/120" not in html
+            response = client.get("/export/report.pdf?days=7")
+            assert response.status_code == 200, "ЛК не отдал PDF"
+            check_pdf(response.content, "ЛК")
+
+        # ── Кабинет врача (§21) ──
+        with httpx.Client(
+            base_url=cabinet_url, cookies={"doctor_session": doctor_cookie}, follow_redirects=False
+        ) as client:
+            response = client.get(f"/doctor/patient/{user_id}/export.pdf?days=7")
+            assert response.status_code == 200, "кабинет врача не отдал PDF"
+            check_pdf(response.content, "врач")
+
+        # ── Бот: «Настройки и профиль» → «Экспорт PDF» (§6.6, §10.1) ──
+        dialog.press("menu:config", contains=texts.CONFIG_MENU, message=menu)
+        dialog.press("menu:settings", message=menu)
+        dialog.press("set:pdf", contains=texts.CSV_ASK, message=menu)
+        known = dialog.known_ids()
+        dialog.press("pdf:7", message=menu)  # экран: «Готовлю отчёт…» → документ
+        doc_message = dialog.wait_new(["Отчёт по давлению за"], since=known)
+        assert doc_message.document is not None, "бот прислал не документ"
+        buffer = io.BytesIO()
+        dialog._loop.run(doc_message.download_media(file=buffer))
+        check_pdf(buffer.getvalue(), "бот")
+        open_menu(dialog)
+
+    def test_f7_empty_period_refused_at_every_export_point(
+        self, menu, dialog, db, tg_me, cabinet_url
+    ) -> None:
+        """F7, R14-А: PDF за период без измерений (но с событиями) не
+        формируется ни в одной из трёх точек — «За этот период записей нет»."""
+        import httpx
+
+        db.delete_measurements(tg_me.id)
+        db.delete_events(tg_me.id)
+        db.add_event(tg_me.id, type_="note", note="событие без измерений")
+        user_id = db.user(tg_me.id)["id"]
+        token = db.web_session(tg_me.id)
+        doctor_cookie = self._doctor_cookie(db, tg_me.id)
+        for label, cookies, url in (
+            ("ЛК", {"cabinet_session": token}, "/export/report.pdf?days=7"),
+            (
+                "врач",
+                {"doctor_session": doctor_cookie},
+                f"/doctor/patient/{user_id}/export.pdf?days=7",
+            ),
+        ):
+            with httpx.Client(base_url=cabinet_url, cookies=cookies, follow_redirects=False) as client:
+                response = client.get(url)
+                assert response.status_code in (302, 303), f"{label}: пустой период — только редирект"
+                assert "error=empty" in response.headers["location"], f"{label}: нет error=empty"
+        dialog.press("menu:config", contains=texts.CONFIG_MENU, message=menu)
+        dialog.press("menu:settings", message=menu)
+        dialog.press("set:pdf", contains=texts.CSV_ASK, message=menu)
+        screen = dialog.press("pdf:7", contains=texts.PDF_EMPTY, message=menu)
+        assert texts.PDF_EMPTY in (screen.text or ""), "бот не сказал «За этот период записей нет»"
+        open_menu(dialog)
+
+    def test_f8_feed_actions_are_uniform(self, db, tg_me, cabinet_url) -> None:
+        """F8: единая колонка «Действия» у всех типов строк ленты (R6-А),
+        иконки «✏️»/«🗑» с `title` и `aria-label` (R7-А); журнал записи
+        отдельной строкой не идёт (§4.11), строка бота — только просмотр."""
+        import httpx
+
+        db.delete_measurements(tg_me.id)
+        db.delete_events(tg_me.id)
+        db.delete_all_medications(tg_me.id)
+        now = time.time()
+        med_journal = db.add_medication(tg_me.id, "QA-Журнальное", "5 мг", "morning")
+        med_cabinet = db.add_medication(tg_me.id, "QA-Кабинетное", "10 мг", "noon")
+        med_bot = db.add_medication(tg_me.id, "QA-Ботовское", "20 мг", "evening")
+        moment = self._utc(now - 3 * 3600)
+        measurement_id = db.add_measurement(tg_me.id, 128, 82, 70, moment=moment)
+        db.link_measurement_medication(measurement_id, med_journal)
+        db.add_intake_log(tg_me.id, med_journal, moment=moment)  # журнал записи
+        db.add_intake_log(tg_me.id, med_cabinet, moment=self._utc(now - 2 * 3600))
+        db.add_intake_log(tg_me.id, med_bot, moment=self._utc(now - 3600), source="bot")
+        db.add_event(tg_me.id, type_="note", moment=self._utc(now - 900), note="QA-прогулка")
+        token = db.web_session(tg_me.id)
+        with httpx.Client(base_url=cabinet_url, cookies={"cabinet_session": token}) as client:
+            html = client.get("/?days=7").text
+        rows = [chunk.split("</tr>")[0] for chunk in html.split('<tr class="feed-row')[1:]]
+        assert len(rows) == 4, f"ожидали 4 строки ленты, получили {len(rows)}"
+        for row in rows:
+            assert 'data-label="Действия"' in row, "нет колонки «Действия»"
+        # журнал записи отдельной строкой не идёт — виден в «Лекарстве» измерения
+        assert all(
+            "Приём лекарств" not in row or "QA-Журнальное" not in row for row in rows
+        ), "журнал записи задублирован отдельной строкой"
+        # правимые строки (измерение, событие, приём кабинета) — иконки канона
+        for row in rows:
+            if "QA-Ботовское" in row:
+                continue
+            assert "icon-btn" in row, "кнопки строки — не канонические иконки"
+            assert 'title="Изменить"' in row and 'aria-label="Изменить"' in row
+            assert 'title="Удалить"' in row and 'aria-label="Удалить"' in row
+        # строка бота — только просмотр: пустая ячейка «Действий»
+        bot_row = next(row for row in rows if "QA-Ботовское" in row)
+        assert "?edit_int=" not in bot_row and "?confirm_delete_int=" not in bot_row
+
+    def test_f9_pdf_has_diary_events_section(self, db, tg_me, cabinet_url) -> None:
+        """F9: в PDF раздел «События дневника» после таблицы (R9-Б): события и
+        standalone-приёмы хронологически, журнал приёма не дублируется (уже в
+        колонке «Лекарство»)."""
+        import httpx
+
+        db.delete_measurements(tg_me.id)
+        db.delete_events(tg_me.id)
+        db.delete_all_medications(tg_me.id)
+        now = time.time()
+        med_journal = db.add_medication(tg_me.id, "QA-Журнальное", "5 мг", "morning")
+        med_standalone = db.add_medication(tg_me.id, "QA-Стandalone", "10 мг", "noon")
+        moment = self._utc(now - 4 * 3600)
+        measurement_id = db.add_measurement(tg_me.id, 128, 82, 70, moment=moment)
+        db.link_measurement_medication(measurement_id, med_journal)
+        db.add_intake_log(tg_me.id, med_journal, moment=moment)  # журнал записи
+        db.add_event(tg_me.id, type_="note", moment=self._utc(now - 3 * 3600), note="QA-событие")
+        db.add_intake_log(tg_me.id, med_standalone, moment=self._utc(now - 2 * 3600))
+        token = db.web_session(tg_me.id)
+        with httpx.Client(base_url=cabinet_url, cookies={"cabinet_session": token}) as client:
+            response = client.get("/export/report.pdf?days=7")
+        assert response.status_code == 200, "ЛК не отдал PDF"
+        text = self._pdf_text(response.content)
+        assert "События дневника" in text, "нет раздела «События дневника»"
+        tail = text.split("События дневника", 1)[1]
+        assert "QA-событие" in tail, "событие не попало в раздел"
+        assert "QA-Стandalone" in tail, "standalone-приём не попал в раздел"
+        assert "QA-Журнальное" not in tail, "журнал приёма задублирован"
+        assert tail.index("QA-событие") < tail.index("QA-Стandalone"), "не по хронологии"
+
+    def test_f10_menu_pin_has_no_stray_hint(self, menu, dialog) -> None:
+        """F10 (находка 2026-11-18): закреп канонического меню (§6.2) не
+        порождает постороннего «Выберите пункт меню» — служебное сообщение
+        не свободный ввод (§7.3)."""
+        known = dialog.known_ids()
+        dialog.send_input("/start")
+        dialog.wait_new([texts.MAIN_MENU], since=known)
+        time.sleep(3)  # окно для ложного ответа на закреп
+        last = dialog.last()
+        assert texts.MENU_HINT not in (last.text or ""), (
+            "закреп меню породил постороннее «Выберите пункт меню»"
+        )
 
 
 # ─────────────────────── «📄 Отчет», «ℹ️ О боте», команды ───────────────────────

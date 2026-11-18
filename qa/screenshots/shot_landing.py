@@ -27,6 +27,7 @@ import asyncio
 import io
 import os
 import sqlite3
+import time
 from pathlib import Path
 
 from PIL import Image
@@ -272,17 +273,20 @@ def tg_login(timeout_min: int = 10) -> None:
 BOT_USERNAME_ENV = "QA_BOT_USERNAME"
 
 #: Скрыть то, что не относится к диалогу: счётчик непрочитанных других чатов
-#: на кнопке «назад» (личные данные аккаунта) и плашки дат.
+#: на кнопке «назад» (личные данные аккаунта), плашки дат и служебные пузыри
+#: (закрепы меню — с 0.7.0 бот закрепляет каноническое меню, §6.2).
 _TG_CSS = """
 #column-center .sidebar-close-button .badge, #column-center .badge { display: none !important; }
-.bubble.service.is-date, .bubbles-date-group .is-sticky { display: none !important; }
+.bubble.service, .bubbles-date-group .is-sticky { display: none !important; }
 """
 
 #: Оставить видимыми только последние `n` пузырей диалога (старые прогоны QA
-#: скрываются на время кадра; история чата не удаляется).
+#: скрываются на время кадра; история чата не удаляется). Служебные пузыри
+#: (закрепы) не считаются и не показываются: 0.7.0 закрепляет меню (§6.2).
 _TG_KEEP_LAST = """
 (n) => {
-  const all = [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')];
+  const all = [...document.querySelectorAll(
+      '#column-center .bubbles-inner .bubble:not(.is-date):not(.service)')];
   all.forEach((el, i) => { if (i >= all.length - n) el.setAttribute('data-keep', '1');
                            else el.removeAttribute('data-keep'); });
   let style = document.getElementById('shot-keep');
@@ -334,6 +338,25 @@ _TG_HIDE_COMPOSER = """
             if (el) el.style.display = hide ? 'none' : ''; }
 """
 
+#: «Встряска» прокрутки: вернуть выгруженные пузыри в DOM. Виртуализация
+#: Telegram Web удаляет `display:none`-узлы: после `shot()` хвост истории
+#: исчезал из DOM, а прокрутка «вниз» не генерировала событий (уже внизу) —
+#: кнопки экрана не находились (найдено при съёмке 2026-11-18).
+_TG_JIGGLE = """
+() => { const inner = document.querySelector('#column-center .bubbles-inner');
+        if (!inner) return;
+        for (let n = inner.parentElement; n; n = n.parentElement) {
+          const oy = getComputedStyle(n).overflowY;
+          if ((oy === 'auto' || oy === 'scroll' || oy === 'overlay')
+              && n.scrollHeight > n.clientHeight + 5) {
+            const behavior = n.style.scrollBehavior;
+            n.style.scrollBehavior = 'auto';
+            n.scrollTop = Math.max(0, n.scrollTop - 150);
+            n.scrollTop = n.scrollHeight;
+            n.style.scrollBehavior = behavior;
+          } } }
+"""
+
 #: Низ видимой части последнего оставленного пузыря (его последней кнопки),
 #: viewport px; -1 — пузыря нет.
 _TG_KEPT_BOTTOM = """
@@ -346,45 +369,45 @@ _TG_KEPT_BOTTOM = """
 
 
 #: Хвост диалога для диагностики: тексты последних пузырей и подписи кнопок.
+#: `total`/`markup` — признак выгрузки пузырей виртуализацией (0 в DOM).
 _DUMP_LAST = """
-() => [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')]
-        .slice(-3)
-        .map(el => ({text: (el.innerText || '').slice(0, 60),
-                    buttons: [...el.querySelectorAll('.reply-markup-button')].map(b => (b.innerText || '').trim())}))
+() => { const all = [...document.querySelectorAll(
+            '#column-center .bubbles-inner .bubble:not(.is-date)')];
+        return {total: all.length,
+                markup: all.filter(b => b.querySelector('.reply-markup-button')).length,
+                tail: all.slice(-3).map(el => ({
+                    text: (el.innerText || '').slice(0, 60),
+                    buttons: [...el.querySelectorAll('.reply-markup-button')]
+                        .map(b => (b.innerText || '').trim())}))}; }
 """
 
-#: Номер inline-кнопки в последнем пузыре **с кнопками** (экран бота).
-#: Посторонние сообщения (команды, ввод) без кнопок не перебивают поиск —
-#: найдено при съёмке 2026-11-17: `/visits` и `/cabinet` пользователя вставали
-#: последними пузырями и тап не находил кнопки экрана.
-_TG_BUTTON_INDEX = """
-(label) => {
+#: Найти inline-кнопку по подписи **текущего** экрана (последний пузырь с
+#: кнопками) и пометить её `data-shot-target` для клика. Поиск только по
+#: последнему пузырю: поиск по всей истории нажимал кнопки устаревших
+#: экранов (найдено при съёмке 2026-11-18). Посторонние сообщения (команды,
+#: ввод) без кнопок не перебивают поиск (2026-11-17). Подписи сравниваются
+#: вместе с `alt` картинок эмодзи (Telegram Web рисует их картинками) и без
+#: U+FE0F. `exact=false` — поиск по вхождению (кнопки с динамической датой,
+#: «🩺 Кардиолог · ДД.ММ»).
+_TG_BUTTON_MARK = """
+([label, exact]) => {
   const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
   const text = el => { const c = el.cloneNode(true);
     c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
     return strip(c.textContent); };
   const all = [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')]
       .filter(b => b.querySelector('.reply-markup-button'));
-  if (!all.length) return -1;
+  document.querySelectorAll('[data-shot-target]')
+      .forEach(el => el.removeAttribute('data-shot-target'));
+  if (!all.length) return false;
   const buttons = [...all[all.length - 1].querySelectorAll('.reply-markup-button')];
-  return buttons.findIndex(b => text(b) === strip(label));
-}
-"""
-
-#: Как `_TG_BUTTON_INDEX`, но поиск по вхождению подписи — для кнопок с
-#: динамической датой («🩺 Кардиолог · ДД.ММ»). Тот же экран — последний
-#: пузырь с кнопками (устойчивость к посторонним сообщениям, 2026-11-17).
-_TG_BUTTON_INDEX_CONTAINS = """
-(label) => {
-  const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
-  const text = el => { const c = el.cloneNode(true);
-    c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
-    return strip(c.textContent); };
-  const all = [...document.querySelectorAll('#column-center .bubbles-inner .bubble:not(.is-date)')]
-      .filter(b => b.querySelector('.reply-markup-button'));
-  if (!all.length) return -1;
-  const buttons = [...all[all.length - 1].querySelectorAll('.reply-markup-button')];
-  return buttons.findIndex(b => text(b).includes(strip(label)));
+  const wanted = strip(label);
+  const found = buttons.findIndex(b => exact ? text(b) === wanted : text(b).includes(wanted));
+  if (found >= 0) {
+    buttons[found].setAttribute('data-shot-target', '1');
+    return true;
+  }
+  return false;
 }
 """
 
@@ -414,10 +437,11 @@ class TelegramDialog:
         Экран — последний пузырь с кнопками (устойчивость к посторонним
         сообщениям). Сверка — по тексту с подстановкой `alt` картинок (эмодзи
         Telegram Web рисует картинками, и «🗂 Прошедшие» в `innerText`
-        выглядит как «Прошедшие») и со схлопыванием пробелов.
+        выглядит как «Прошедшие») и со схлопыванием пробелов. Опрос чанками
+        по 5 с: между чанками — встряска, на середине таймаута — одна
+        перезагрузка (виртуализация Telegram Web выгружает пузыри из DOM).
         """
-        self.page.wait_for_function(
-            """(t) => {
+        predicate = """(t) => {
                  const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
                  const all = [...document.querySelectorAll(
                      '#column-center .bubbles-inner .bubble:not(.is-date)')]
@@ -426,10 +450,76 @@ class TelegramDialog:
                  const c = all[all.length - 1].cloneNode(true);
                  c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
                  return strip(c.textContent).includes(strip(t));
+               }"""
+        deadline = time.monotonic() + timeout / 1000
+        reloaded = False
+        while True:
+            remaining_ms = int((deadline - time.monotonic()) * 1000)
+            if remaining_ms <= 0:
+                raise AssertionError(
+                    f"нет экрана с текстом {text!r} за {timeout / 1000:.0f} с; "
+                    f"хвост: {self.page.evaluate(_DUMP_LAST)}"
+                )
+            try:
+                self.page.wait_for_function(
+                    predicate,
+                    arg=text, timeout=min(5_000, remaining_ms),
+                    # Опрос раз в 0,5 с, а не на каждом кадре: за 10 минут ожидания
+                    # напоминания опрос по requestAnimationFrame ронял вкладку.
+                    polling=500,
+                )
+                self.page.wait_for_timeout(700)  # дорисовка клавиатуры
+                return
+            except Exception:  # noqa: BLE001 — чанк истёк, см. deadline
+                self.page.evaluate(_TG_JIGGLE)
+                if not reloaded and remaining_ms < timeout / 2:
+                    reloaded = True
+                    self.page.reload()
+                    self.page.wait_for_timeout(3000)
+                    self.page.add_style_tag(content=_TG_CSS)
+                    _ensure_history(self.page)
+                    self.bottom()
+
+    def send_screen(self, text: str, marker: str, timeout: int = 30_000) -> None:
+        """Отправить сообщение и дождаться **нового** экрана бота с маркером.
+
+        В отличие от `send()` + `wait_text()` не спотыкается о старый пузырь:
+        `/start` после напоминания ждал бы «Записать давление» в самом
+        напоминании и кадр «Главное меню» снимался без меню (найдено при
+        съёмке 2026-11-17). Новый экран — пузырь с кнопками и маркером, чей
+        `data-mid` новее последнего до отправки (по текстовому ключу — если
+        `data-mid` нет): виртуализация Telegram Web подкидывает в DOM старые
+        пузыри, и сравнение «последнего в DOM» с ними ложно срабатывало
+        (найдено при съёмке 2026-11-18).
+        """
+        old_key = self.page.evaluate(
+            "() => { const all = [...document.querySelectorAll("
+            "'#column-center .bubbles-inner .bubble:not(.is-date):not(.service):has(.reply-markup-button)')];"
+            " if (!all.length) return '';"
+            " const el = all[all.length - 1];"
+            " return el.dataset.mid || (el.textContent || '').slice(0, 120); }"
+        )
+        self.send(text)
+        self.page.wait_for_function(
+            """([t, old]) => {
+                 const strip = s => s.replace(/\\uFE0F/g, '').replace(/\\s+/g, ' ').trim();
+                 const all = [...document.querySelectorAll(
+                     '#column-center .bubbles-inner .bubble:not(.is-date):not(.service)')]
+                     .filter(b => b.querySelector('.reply-markup-button'));
+                 const oldMid = parseInt(old, 10);
+                 for (const b of all) {
+                   const key = b.dataset.mid || (b.textContent || '').slice(0, 120);
+                   if (key === old) continue;
+                   const c = b.cloneNode(true);
+                   c.querySelectorAll('img').forEach(i => i.replaceWith(i.alt || ''));
+                   if (!strip(c.textContent).includes(strip(t))) continue;
+                   const mid = parseInt(b.dataset.mid || '', 10);
+                   if (!isNaN(mid) && !isNaN(oldMid)) { if (mid > oldMid) return true; }
+                   else return true;
+                 }
+                 return false;
                }""",
-            arg=text, timeout=timeout,
-            # Опрос раз в 0,5 с, а не на каждом кадре: за 10 минут ожидания
-            # напоминания опрос по requestAnimationFrame ронял вкладку Telegram Web.
+            arg=[marker, old_key], timeout=timeout,
             polling=500,
         )
         self.page.wait_for_timeout(700)  # дорисовка клавиатуры
@@ -457,54 +547,63 @@ class TelegramDialog:
                 ))
             )
         box.click()
-        box.type(text)
+        box.fill("")  # очистка: остаток текста давал боту мусор → фолбэк «Выберите пункт меню»
+        # Задержка на символ: Telegram Web роняет символы при мгновенном type()
+        # и «/start» уезжал в неизвестный текст (найдено при съёмке 2026-11-18).
+        box.type(text, delay=40)
         self.page.keyboard.press("Enter")
 
     def tap(self, label: str) -> None:
-        """Нажать inline-кнопку последнего сообщения с точным текстом.
+        """Нажать inline-кнопку с точным текстом.
 
         Пауза перед нажатием — как у человека: антидребезг бота
-        (`DebounceMiddleware`) отбрасывает слишком частые нажатия. Прокрутка
-        вниз обязательна: после кадра виртуализация Telegram Web может держать
-        хвост истории не в DOM, и поиск кнопки не найдёт последнего пузыря.
+        (`DebounceMiddleware`) отбрасывает слишком частые нажатия. Каждые 5
+        опросов — прокрутка вниз со встряской: Telegram Web выгружает пузыри
+        из DOM (виртуализация) после скрытий `shot()`.
         """
-        self.page.wait_for_timeout(1300)
-        self.bottom()
-        # Эмодзи («📅 По дням», «◀») Telegram Web рисует картинками: подпись
-        # кнопки сравнивается вместе с `alt` этих картинок, без U+FE0F.
-        index = -1
-        for _ in range(60):
-            index = self.page.evaluate(_TG_BUTTON_INDEX, label)
-            if index >= 0:
-                break
-            self.page.wait_for_timeout(500)
-        if index < 0:
-            raise AssertionError(
-                f"нет кнопки {label!r} в экране бота; "
-                f"хвост: {self.page.evaluate(_DUMP_LAST)}"
-            )
-        self._markup_bubble().locator(".reply-markup-button").nth(index).click()
+        self._tap_marked(label, exact=True)
 
     def tap_contains(self, label: str) -> None:
-        """Нажать inline-кнопку последнего сообщения, содержащую `label`.
+        """Нажать inline-кнопку, содержащую `label`.
 
         Для кнопок с динамической подписью («🩺 Кардиолог · ДД.ММ») точный
         `tap` неприменим. Пауза перед нажатием — как у `tap` (антидребезг).
         """
+        self._tap_marked(label, exact=False)
+
+    def _tap_marked(self, label: str, *, exact: bool) -> None:
+        """Найти кнопку по подписи (с новейшего экрана истории) и нажать."""
         self.page.wait_for_timeout(1300)
         self.bottom()
-        index = -1
-        for _ in range(60):
-            index = self.page.evaluate(_TG_BUTTON_INDEX_CONTAINS, label)
-            if index >= 0:
+        self.page.evaluate(_TG_JIGGLE)
+        found = False
+        for attempt in range(50):
+            if attempt == 10:
+                # Кнопки нет уже ~5 с — DOM обеднён виртуализацией:
+                # перезагрузка возвращает хвост истории (стиль — заново,
+                # reload теряет injected-тег; см. `_ensure_history`).
+                self.page.reload()
+                self.page.wait_for_timeout(3000)
+                self.page.add_style_tag(content=_TG_CSS)
+                _ensure_history(self.page)
+                self.bottom()
+            elif attempt and attempt % 5 == 0:
+                self.bottom()
+                self.page.evaluate(_TG_JIGGLE)
+            found = self.page.evaluate(_TG_BUTTON_MARK, [label, exact])
+            if found:
                 break
             self.page.wait_for_timeout(500)
-        if index < 0:
+        if not found:
             raise AssertionError(
-                f"нет кнопки с текстом {label!r} в последнем сообщении; "
+                f"нет кнопки {label!r} в экране бота; "
                 f"хвост: {self.page.evaluate(_DUMP_LAST)}"
             )
-        self._markup_bubble().locator(".reply-markup-button").nth(index).click()
+        self.page.locator("[data-shot-target]").first.click()
+        self.page.evaluate(
+            "() => document.querySelectorAll('[data-shot-target]')"
+            ".forEach(el => el.removeAttribute('data-shot-target'))"
+        )
 
     def bottom(self) -> None:
         """К низу чата перед поиском кнопок.
@@ -528,7 +627,10 @@ class TelegramDialog:
         перекрывает низ кнопки и кадр обрезает её («Напоминание о визите»).
         """
         self.page.evaluate(_TG_HIDE_COMPOSER, True)
-        self.page.wait_for_timeout(300)  # пересчёт раскладки Telegram Web
+        # Встряска ДО разметки: виртуализация могла выгрузить целевой пузырь,
+        # и `keep` пометил бы не тот (кадр «Калькулятор» снимался с «/start»).
+        self.page.evaluate(_TG_JIGGLE)
+        self.page.wait_for_timeout(800)  # пересчёт раскладки Telegram Web
         column = self.page.locator("#column-center").bounding_box()
         limit = column["y"] + column["height"] - 15
         last_bottom = -1.0
@@ -572,6 +674,9 @@ class TelegramDialog:
         save(buffer.getvalue(), name, width=780)
         self.page.evaluate(_TG_HIDE_COMPOSER, False)
         self.page.evaluate(_TG_SHOW_ALL)
+        # Встряска: вернуть выгруженные виртуализацией пузыри в DOM.
+        self.page.evaluate(_TG_JIGGLE)
+        self.page.wait_for_timeout(800)
 
 
 #: Длина своего периода в кадре календаря, дней (§6.5, 0.5.3).
@@ -583,7 +688,9 @@ def _ensure_history(page) -> None:
 
     Telegram Web иногда зависает на спиннере истории на десятки минут (проверено
     2026-11-14): `wait_for_function` кадров не дождётся. Перезагрузка страницы
-    помогает — сессия (`tg_state.json`) сохраняется.
+    помогает — сессия (`tg_state.json`) сохраняется. После перезагрузки стиль
+    `_TG_CSS` внедряется заново: reload теряет injected-тег, и в кадры возвращался
+    счётчик непрочитанных (найдено при съёмке 2026-11-18).
     """
     for attempt in range(3):
         for _ in range(24):
@@ -595,6 +702,7 @@ def _ensure_history(page) -> None:
         print(f"  история не загрузилась (попытка {attempt + 1}) — перезагрузка…", flush=True)
         page.reload()
         page.wait_for_timeout(3000)
+        page.add_style_tag(content=_TG_CSS)  # reload теряет injected-стиль
         go_down = page.locator("#column-center .bubbles-go-down")
         if go_down.count() and go_down.first.is_visible():
             go_down.first.click()
@@ -660,8 +768,7 @@ def shoot_bot(
             нажатием — к низу чата: Web виртуализует список, и после `shot()`
             хвост сообщений может выпасть из DOM.
             """
-            dialog.send("/start")
-            dialog.wait_text(texts.BTN_MEASURE)
+            dialog.send_screen("/start", texts.MAIN_MENU)
             dialog.tap(texts.BTN_MENU_VIEWS)  # 0.7.0: визиты — в подменю (MU1)
             dialog.tap(texts.BTN_APPOINTMENTS)
             dialog.wait_text(texts.AP_SOON)
@@ -691,8 +798,7 @@ def shoot_bot(
             dialog.wait_text("Завтра визит", timeout=600_000)
             dialog.shot("bot-visit-reminder", keep=1)
 
-            dialog.send("/start")
-            dialog.wait_text(texts.BTN_MEASURE)  # главное меню
+            dialog.send_screen("/start", texts.MAIN_MENU)  # главное меню
             dialog.tap(texts.BTN_MENU_VIEWS)  # 0.7.0: визиты — в подменю (MU1)
             dialog.tap(texts.BTN_APPOINTMENTS)
             dialog.wait_text(texts.AP_SOON)  # эмодзи заголовка в Telegram Web — картинка
@@ -707,8 +813,7 @@ def shoot_bot(
             dialog.wait_text("Пора измерить давление", timeout=600_000)
             dialog.shot("bot-reminder", keep=1)
 
-            dialog.send("/start")
-            dialog.wait_text(texts.BTN_MEASURE)
+            dialog.send_screen("/start", texts.MAIN_MENU)
             dialog.shot("bot-menu", keep=2)
 
             dialog.tap(texts.BTN_MEASURE)
@@ -735,8 +840,7 @@ def shoot_bot(
             dialog.page.wait_for_timeout(1000)
 
             # «Дневник за сегодня» со строкой лекарств (§6.4; 0.7.0 — из подменю).
-            dialog.send("/start")
-            dialog.wait_text(texts.BTN_MENU_VIEWS)
+            dialog.send_screen("/start", texts.MAIN_MENU)
             dialog.tap(texts.BTN_MENU_VIEWS)
             dialog.wait_text(texts.BTN_DIARY)
             dialog.tap(texts.BTN_DIARY)
@@ -744,8 +848,7 @@ def shoot_bot(
             dialog.shot("bot-diary", keep=1)
 
             # «Настройки» → «Напоминания»: пауза, режим слота, повтор (§6.6; 0.7.0 — из подменю).
-            dialog.send("/start")
-            dialog.wait_text(texts.BTN_MENU_CONFIG)
+            dialog.send_screen("/start", texts.MAIN_MENU)
             dialog.tap(texts.BTN_MENU_CONFIG)
             dialog.wait_text(texts.BTN_SETTINGS)
             dialog.tap(texts.BTN_SETTINGS)
@@ -754,8 +857,7 @@ def shoot_bot(
             dialog.wait_text("Повторять, если не ответил")
             dialog.shot("bot-reminder-settings", keep=1)
 
-        dialog.send("/start")
-        dialog.wait_text(texts.BTN_MENU_VIEWS)  # 0.7.0: статистика — в подменю (MU1)
+        dialog.send_screen("/start", texts.MAIN_MENU)  # 0.7.0: статистика — в подменю (MU1)
         dialog.tap(texts.BTN_MENU_VIEWS)
         dialog.wait_text(texts.BTN_STATS)
         dialog.tap(texts.BTN_STATS)

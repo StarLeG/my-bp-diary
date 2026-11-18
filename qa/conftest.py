@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import secrets
 import logging
 import os
 import re
@@ -196,12 +197,20 @@ class QaDb:
             self._conn.execute(f"DELETE FROM {table} WHERE {column} = ?", (user_id,))
 
     def add_measurement(
-        self, telegram_id: int, systolic: int, diastolic: int, pulse: Optional[int] = None
+        self,
+        telegram_id: int,
+        systolic: int,
+        diastolic: int,
+        pulse: Optional[int] = None,
+        moment: Optional[str] = None,
     ) -> int:
-        """Добавить измерение напрямую (подготовка данных для Web-сценариев)."""
+        """Добавить измерение напрямую (подготовка данных для Web-сценариев).
+
+        `moment` — UTC `ГГГГ-ММ-ДД ЧЧ:ММ:СС`; по умолчанию текущий.
+        """
         user = self.user(telegram_id)
         assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
-        timestamp = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        timestamp = moment or time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
         cursor = self._conn.execute(
             "INSERT INTO measurements (user_id, timestamp, systolic, diastolic, pulse)"
             " VALUES (?, ?, ?, ?, ?)",
@@ -237,6 +246,150 @@ class QaDb:
             "SELECT COUNT(*) AS n FROM measurements WHERE user_id = ?", (user["id"],)
         ).fetchone()
         return int(row["n"])
+
+    def delete_measurements(self, telegram_id: int) -> int:
+        """Удалить все измерения (проверка R14-А: PDF без измерений не формируется)."""
+        user = self.user(telegram_id)
+        if user is None:
+            return 0
+        cursor = self._conn.execute(
+            "DELETE FROM measurements WHERE user_id = ?", (user["id"],)
+        )
+        self._conn.commit()
+        return int(cursor.rowcount)
+
+    def delete_events(self, telegram_id: int) -> int:
+        """Удалить все события дневника (детерминированная лента в проверках)."""
+        user = self.user(telegram_id)
+        if user is None:
+            return 0
+        cursor = self._conn.execute(
+            "DELETE FROM diary_events WHERE user_id = ?", (user["id"],)
+        )
+        self._conn.commit()
+        return int(cursor.rowcount)
+
+    def add_event(
+        self,
+        telegram_id: int,
+        type_: str = "note",
+        moment: Optional[str] = None,
+        payload: str = "",
+        note: str = "",
+    ) -> int:
+        """Событие дневника напрямую (подготовка данных для ленты и PDF, §4.18).
+
+        `moment` — UTC `ГГГГ-ММ-ДД ЧЧ:ММ:СС`; по умолчанию текущий.
+        """
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        stamp = moment or time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        cursor = self._conn.execute(
+            "INSERT INTO diary_events (user_id, type, moment, payload, note, created_at)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (user["id"], type_, stamp, payload or None, note or None, now),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def add_intake_log(
+        self,
+        telegram_id: int,
+        medication_id: int,
+        moment: Optional[str] = None,
+        status: str = "taken",
+        slot: str = "morning",
+        source: str = "cabinet",
+    ) -> int:
+        """Строка `medication_logs` напрямую (standalone-приём, §4.5)."""
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        stamp = moment or time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        cursor = self._conn.execute(
+            "INSERT INTO medication_logs (user_id, medication_id, timestamp, status, slot, source)"
+            " VALUES (?, ?, ?, ?, ?, ?)",
+            (user["id"], medication_id, stamp, status, slot, source),
+        )
+        self._conn.commit()
+        return int(cursor.lastrowid)
+
+    def link_measurement_medication(self, measurement_id: int, medication_id: int) -> None:
+        """Связь «измерение ↔ отмеченное лекарство» (§4.11) — делает приём
+        журналом записи (`is_journal_log`)."""
+        self._conn.execute(
+            "INSERT OR IGNORE INTO measurement_medications (measurement_id, medication_id)"
+            " VALUES (?, ?)",
+            (measurement_id, medication_id),
+        )
+        self._conn.commit()
+
+    def ensure_doctor_link(self, telegram_id: int, name: str = "QA-Терапевт") -> int:
+        """Связь врач–пациент `status='active'` для сценария (§4.9, §21).
+
+        Врач создаётся с вымышленным e-mail и паролем-заглушкой: в проверках
+        вход — сессионной cookie `DoctorSession`, не паролем. Возвращает
+        `doctor_id`; согласия доводит `ensure_patient_consents`.
+        """
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        row = self._conn.execute(
+            "SELECT id FROM doctors WHERE email = ?", ("qa-doctor@example.org",)
+        ).fetchone()
+        if row is None:
+            cursor = self._conn.execute(
+                "INSERT INTO doctors (email, name, password_hash, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                ("qa-doctor@example.org", name, "!", now),
+            )
+            doctor_id = int(cursor.lastrowid)
+        else:
+            doctor_id = int(row["id"])
+        self._conn.execute(
+            "INSERT INTO doctor_patients (doctor_id, user_id, status, created_at)"
+            " VALUES (?, ?, 'active', ?)"
+            " ON CONFLICT (doctor_id, user_id) DO UPDATE SET status = 'active'",
+            (doctor_id, user["id"], now),
+        )
+        self._conn.commit()
+        self.ensure_patient_consents(telegram_id)
+        return doctor_id
+
+    def web_session(self, telegram_id: int) -> str:
+        """Сессия личного кабинета для HTTP-проверок: cookie `cabinet_session`.
+
+        Учётная запись создаётся при отсутствии (e-mail вымышленный, пароль —
+        заглушка): в проверках вход сессионной cookie, как в `shot_landing.py`.
+        """
+        user = self.user(telegram_id)
+        assert user is not None, f"нет пользователя {telegram_id} — сначала онбординг"
+        now = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime())
+        row = self._conn.execute(
+            "SELECT id FROM web_users WHERE user_id = ?", (user["id"],)
+        ).fetchone()
+        if row is None:
+            cursor = self._conn.execute(
+                "INSERT INTO web_users (user_id, email, password_hash, created_at)"
+                " VALUES (?, ?, ?, ?)",
+                (user["id"], f"qa-user-{telegram_id}@example.org", "!", now),
+            )
+            web_user_id = int(cursor.lastrowid)
+        else:
+            web_user_id = int(row["id"])
+        token = secrets.token_hex(32)
+        self._conn.execute(
+            "INSERT INTO web_sessions (token, web_user_id, created_at, expires_at)"
+            " VALUES (?, ?, ?, ?)",
+            (
+                token,
+                web_user_id,
+                now,
+                time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(time.time() + 7 * 24 * 3600)),
+            ),
+        )
+        self._conn.commit()
+        return token
 
     def last_measurement(self, telegram_id: int) -> Optional[sqlite3.Row]:
         user = self.user(telegram_id)
