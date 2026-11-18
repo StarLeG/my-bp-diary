@@ -35,6 +35,7 @@ import os
 import re
 import time
 import urllib.request
+from pathlib import Path
 
 import pytest
 
@@ -536,7 +537,9 @@ class TestUserFindings:
     R14-А — пустой период); F8 «единообразие ленты» →
     `test_f8_feed_actions_are_uniform`; F9 «данные ленты в PDF» →
     `test_f9_pdf_has_diary_events_section`; F10 закреп меню без посторонней
-    подсказки (находка 2026-11-18) → `test_f10_menu_pin_has_no_stray_hint`.
+    подсказки (находка 2026-11-18) → `test_f10_menu_pin_has_no_stray_hint`;
+    F11 дубль ключа в compose-файле (находка 2026-11-18) →
+    `test_f11_compose_yaml_has_no_duplicate_keys`.
     """
 
     def test_f1_cabinet_link_has_clickable_button(self, menu, dialog) -> None:
@@ -825,6 +828,24 @@ class TestUserFindings:
         assert texts.MENU_HINT not in (last.text or ""), (
             "закреп меню породил постороннее «Выберите пункт меню»"
         )
+
+    def test_f11_compose_yaml_has_no_duplicate_keys(self) -> None:
+        """F11 (находка 2026-11-18): compose-файлы без дублей ключей YAML.
+
+        Дубль `CABINET_URL` в `qa/docker-compose.qa.yml` PyYAML молча съедал
+        (остаётся последний), а docker compose отклонял файл целиком
+        («mapping key already defined») — стенд не пересобирался. В образе
+        робота виден только qa-файл; корневые compose-файлы проверяет
+        юнит-тест `tests/test_compose_yaml.py` (он же ловит рецидив, когда
+        сам робот из-за сломанного compose уже не стартует).
+        """
+        from qa.acceptance_common import compose_files, load_yaml_strict
+
+        root = Path(__file__).resolve().parents[1]
+        files = compose_files(root)
+        assert files, f"compose-файлы не найдены под {root}"
+        for path in files:
+            load_yaml_strict(path)  # YAMLError с файлом и строкой на дубле
 
 
 # ─────────────────────── «📄 Отчет», «ℹ️ О боте», команды ───────────────────────

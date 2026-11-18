@@ -36,6 +36,9 @@ dev = [
     # Тест QR-блоков PDF (R4): растеризация страницы и декодирование QR.
     "opencv-python-headless>=4.10",
     "pypdfium2>=4.30",
+    # Дубли ключей в compose-файлах (находка F11, 2026-11-18): PyYAML молча
+    # берёт последний дубль, а docker compose отклоняет файл целиком.
+    "pyyaml>=6.0",
 ]
 # Нагрузочные тесты qa/ (SPEC §22): Locust, HTML-отчёт pytest, Playwright.
 load = [

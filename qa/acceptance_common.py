@@ -9,6 +9,8 @@
 - метрики: p95 (ближайший ранг), наклон линейной регрессии, RSS процесса;
 - артефакты `qa/reports/load/acceptance_<тест>.json` для
   `qa/test_acceptance_regression.py`;
+- проверка compose-файлов на дубли ключей YAML (F11: `compose_files`,
+  `load_yaml_strict`);
 - **runtime** (`python -m qa.acceptance_common runtime …`) — процесс «бот»
   (движок + прод-планировщик `build_scheduler` + тик раз в минуту) и/или
   «кабинет» (uvicorn программно) на копии стенда: для замера RSS («Длительная
@@ -279,6 +281,56 @@ async def spawn_uvicorn(db: Path, port: int, workers: int = 2):
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
     )
+
+
+# ─────────────────── Compose-файлы: дубли ключей YAML (F11) ───────────────────
+
+#: Compose-файлы репозитория. В образе робота (`qa/Dockerfile`) есть только
+#: qa-файл — корневые образ не копирует, `compose_files()` вернёт существующие.
+COMPOSE_FILES = (
+    Path("docker-compose.yml"),
+    Path("docker-compose.override.yml"),
+    Path("qa") / "docker-compose.qa.yml",
+)
+
+
+def compose_files(root: Path) -> list[Path]:
+    """Compose-файлы, существующие под `root` (корень репозитория)."""
+    return [root / rel for rel in COMPOSE_FILES if (root / rel).exists()]
+
+
+def load_yaml_strict(path: Path) -> object:
+    """Разобрать YAML, отклоняя дубли ключей mapping; вернуть разобранное.
+
+    Находка F11 (2026-11-18): дубль `CABINET_URL` в `qa/docker-compose.qa.yml`
+    PyYAML молча съедал (остаётся последний), а docker compose — нет
+    («mapping key already defined»), и стенд не пересобирался. Свой
+    конструктор mapping обнаруживает дубль на любой вложенности и сообщает
+    файл и строку.
+    """
+    import yaml
+
+    class _UniqueKeyLoader(yaml.SafeLoader):
+        """`SafeLoader`, падающий на дублях ключей mapping."""
+
+    def _construct_mapping(loader, node, deep=False):
+        mapping = {}
+        for key_node, value_node in node.value:
+            key = loader.construct_object(key_node, deep=deep)
+            if key in mapping:
+                mark = key_node.start_mark
+                raise yaml.YAMLError(
+                    f"{path}:{mark.line + 1}: дубль ключа {key!r} — "
+                    "docker compose отклонит файл"
+                )
+            mapping[key] = loader.construct_object(value_node, deep=deep)
+        return mapping
+
+    _UniqueKeyLoader.add_constructor(
+        yaml.resolver.BaseResolver.DEFAULT_MAPPING_TAG, _construct_mapping
+    )
+    with open(path, encoding="utf-8") as handle:
+        return yaml.load(handle, Loader=_UniqueKeyLoader)  # noqa: S506 — свой Loader
 
 
 # ─────────────────────────── Runtime «бот» / «кабинет» ───────────────────────────
