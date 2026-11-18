@@ -17,6 +17,7 @@
 """
 from __future__ import annotations
 
+import logging
 import re
 from dataclasses import dataclass
 from datetime import date, datetime
@@ -110,6 +111,23 @@ CHART_COLOR_DIA = (70, 110, 200)
 #: Заголовок раздела «События дневника» (§10.1, 0.7.2, R9-Б).
 DIARY_TITLE = "События дневника"
 
+#: Заголовок блока проекта с QR в конце документа (§10.1, 2026-11-18, R1).
+PROJECT_TITLE = "Проект «Дневник гипертоника»"
+#: Сторона QR-кода на печати: ≥25–30 мм — читается с бумажной распечатки (R4).
+QR_SIZE_MM = 30.0
+#: Тихая зона QR — не менее 4 модулей со всех сторон (R4).
+QR_QUIET_MODULES = 4
+#: Уровень коррекции ошибок QR (R4).
+QR_ERROR_LEVEL = "m"
+#: Подписи QR-кодов блока проекта (R2: роли различаются).
+QR_LANDING_CAPTION = "О проекте"
+QR_BOT_CAPTION = "Открыть бота"
+#: Метки источника в QR (доля трафика из PDF; данных пациента в URL нет).
+QR_LANDING_TAG = "utm_source=pdf"
+QR_BOT_TAG = "start=pdf"
+
+logger = logging.getLogger(__name__)
+
 
 @dataclass(frozen=True)
 class ChartPoint:
@@ -189,6 +207,12 @@ class ReportData:
     """Точки графика САД/ДАД после сводки (0.7.2, R3-А); пусто — графика нет."""
     diary_lines: tuple[str, ...] = ()
     """Строки раздела «События дневника» (0.7.2, R9-Б); пусто — раздела нет."""
+    qr_landing_url: str = ""
+    """URL лендинга для QR-блока в конце документа (§10.1, 2026-11-18); пусто — QR нет."""
+    qr_bot_url: str = ""
+    """URL бота для QR-блока; пусто — QR нет."""
+    show_bot_qr: bool = True
+    """Показывать QR бота (§10.1): флаг для кабинета врача, по умолчанию включён."""
 
     @property
     def file_name(self) -> str:
@@ -395,6 +419,9 @@ async def collect_report(
     now: Optional[datetime] = None,
     file_stem: Optional[str] = None,
     include_conclusions: bool = False,
+    qr_landing_url: str = "",
+    qr_bot_url: str = "",
+    show_bot_qr: bool = True,
 ) -> ReportData:
     """Данные отчёта за период; `start_day=None` — «всё время» (§10.1).
 
@@ -402,6 +429,9 @@ async def collect_report(
     пациента). Нет записей — `ReportEmptyError`; больше `limit` (по
     умолчанию `REPORT_LIMIT`) — `ReportTooLargeError`. `include_conclusions` —
     раздел «Заключения врачей» (В32-Г): только у пациента (У2-А), у врача — False.
+    `qr_landing_url`/`qr_bot_url` — QR-блок в конце документа (§10.1): вызывающий
+    код передаёт их из настроек (`Settings.landing_url`/`bot_url`); `show_bot_qr` —
+    флаг QR бота (у врача можно отключить).
     """
     tz = ZoneInfo(user.timezone)
     generated_at = (now or measurements_service.utcnow()).astimezone(tz)
@@ -437,6 +467,9 @@ async def collect_report(
             ChartPoint(m.timestamp, m.systolic, m.diastolic) for m in measurements
         ),
         diary_lines=await diary_lines(session, user, start_day, end_day, measurements),
+        qr_landing_url=qr_landing_url,
+        qr_bot_url=qr_bot_url,
+        show_bot_qr=show_bot_qr,
     )
 
 
@@ -491,6 +524,7 @@ def build_pdf(data: ReportData) -> bytes:
     _draw_table(pdf, data.rows)
     _draw_diary(pdf, data.diary_lines)
     _draw_conclusions(pdf, data.conclusions)
+    _draw_project_block(pdf, data)
     return bytes(pdf.output())
 
 
@@ -637,6 +671,96 @@ def _draw_conclusions(pdf: FPDF, groups: Sequence[ConclusionGroup]) -> None:
                 pdf.set_x(pdf.l_margin)
                 pdf.multi_cell(0, 5, text=line)
         pdf.ln(1)
+
+
+def _qr_url(raw: str, label: str) -> str:
+    """Валидный URL для QR: trim, только `https://`; иначе пусто и warning (R3)."""
+    url = (raw or "").strip()
+    if url and not url.startswith("https://"):
+        logger.warning("QR: %s — не https-адрес, QR не рисуется: %r", label, url)
+        return ""
+    return url
+
+
+def _qr_tag(url: str, query: str) -> str:
+    """Метка источника в QR-ссылке (?utm_source=pdf / ?start=pdf); данных пациента нет."""
+    return f"{url}{'&' if '?' in url else '?'}{query}"
+
+
+def _draw_qr(pdf: FPDF, url: str, x: float, y: float) -> None:
+    """QR-код векторными прямоугольниками: segno + fpdf2, без Pillow (R4).
+
+    Тихая зона (4 модуля) — белой подложкой; подряд идущие чёрные модули
+    строки склеены в один прямоугольник — между модулями не появляются
+    белые швы в PDF-просмотрщиках, файл меньше.
+    """
+    import segno
+
+    matrix = segno.make(url, error=QR_ERROR_LEVEL).matrix
+    modules = len(matrix)
+    module = QR_SIZE_MM / (modules + 2 * QR_QUIET_MODULES)
+    pdf.set_fill_color(255, 255, 255)
+    pdf.rect(x, y, QR_SIZE_MM, QR_SIZE_MM, style="F")
+    pdf.set_fill_color(0, 0, 0)
+    for row_index, row in enumerate(matrix):
+        column = 0
+        while column < modules:
+            if row[column]:
+                run = column
+                while run < modules and row[run]:
+                    run += 1
+                pdf.rect(
+                    x + (column + QR_QUIET_MODULES) * module,
+                    y + (row_index + QR_QUIET_MODULES) * module,
+                    (run - column) * module,
+                    module,
+                    style="F",
+                )
+                column = run
+            else:
+                column += 1
+
+
+def _draw_project_block(pdf: FPDF, data: ReportData) -> None:
+    """Блок проекта с QR в конце документа (§10.1, 2026-11-18; R1–R4).
+
+    Два QR — лендинг и бот — с подписями и текстовыми URL под ними (текст —
+    чистый адрес: на бумаге его печатают руками; метка источника живёт в QR).
+    Один валидный URL — один QR по центру; валидных нет — блока нет (как
+    скрытие кнопки «Поддержать» при пустом `SUPPORT_URL`). Блок целиком не
+    разрывается между страницами.
+    """
+    landing = _qr_url(data.qr_landing_url, "лендинг")
+    bot = _qr_url(data.qr_bot_url, "бот") if data.show_bot_qr else ""
+    targets: list[tuple[str, str, str]] = []
+    if landing:
+        targets.append((QR_LANDING_CAPTION, landing, _qr_tag(landing, QR_LANDING_TAG)))
+    if bot:
+        targets.append((QR_BOT_CAPTION, bot, _qr_tag(bot, QR_BOT_TAG)))
+    if not targets:
+        return
+    # Заголовок + QR + подпись + URL — целиком на одной странице (R1).
+    block_height = 7 + QR_SIZE_MM + 14
+    if pdf.will_page_break(block_height):
+        pdf.add_page()
+    pdf.ln(4)
+    pdf.set_font(FONT_FAMILY, "B", 12)
+    pdf.set_x(pdf.l_margin)
+    pdf.multi_cell(0, 7, text=PROJECT_TITLE)
+    pdf.ln(2)
+    column_width = min(90.0, pdf.epw / len(targets))
+    left = pdf.l_margin + (pdf.epw - column_width * len(targets)) / 2
+    top = pdf.get_y()
+    for index, (caption, url, encoded) in enumerate(targets):
+        x = left + index * column_width
+        _draw_qr(pdf, encoded, x + (column_width - QR_SIZE_MM) / 2, top)
+        pdf.set_xy(x, top + QR_SIZE_MM + 1.5)
+        pdf.set_font(FONT_FAMILY, "B", 9)
+        pdf.multi_cell(column_width, 5, text=caption, align="C")
+        pdf.set_x(x)
+        pdf.set_font(FONT_FAMILY, "", 8)
+        pdf.multi_cell(column_width, 4, text=url, align="C")
+    pdf.ln(2)
 
 
 def _draw_header(pdf: FPDF, data: ReportData) -> None:

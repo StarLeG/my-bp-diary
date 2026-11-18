@@ -176,6 +176,8 @@ async def _pdf_report_response(
     period: Mapping[str, str],
     file_stem: Optional[str] = None,
     include_conclusions: bool = False,
+    qr_landing_url: str = "",
+    qr_bot_url: str = "",
 ) -> Response:
     """PDF-отчёт за период — общий для ЛК и кабинета врача (§10.1).
 
@@ -189,6 +191,7 @@ async def _pdf_report_response(
         data = await pdf_report.collect_report(
             db, user, start_day, end_day, subject=subject, file_stem=file_stem,
             include_conclusions=include_conclusions,
+            qr_landing_url=qr_landing_url, qr_bot_url=qr_bot_url,
         )
     except (pdf_report.ReportEmptyError, pdf_report.ReportTooLargeError) as exc:
         error = "empty" if isinstance(exc, pdf_report.ReportEmptyError) else "too_many"
@@ -2721,6 +2724,7 @@ def create_app(
             back_url="/",
             period={"days": days, "date_from": date_from, "date_to": date_to},
             include_conclusions=True,
+            qr_landing_url=settings.landing_url, qr_bot_url=settings.bot_url,
         )
 
     # ───────────────────── Кабинет врача (SPEC.md, раздел 21) ─────────────────────
@@ -3116,6 +3120,7 @@ def create_app(
             back_url=f"/doctor/patient/{user_id}",
             file_stem=profile_service.file_base(user),
             period={"days": days, "date_from": date_from, "date_to": date_to},
+            qr_landing_url=settings.landing_url, qr_bot_url=settings.bot_url,
         )
 
     @app.post("/doctor/patient/{user_id}/note")

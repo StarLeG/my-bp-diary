@@ -130,6 +130,14 @@ class Settings(BaseModel):
     """Ссылка на сообщество в Telegram — группа с темами (`GROUP_URL`).
     Пусто или плейсхолдер → кнопка «Наше сообщество» скрыта."""
 
+    landing_url: str = ""
+    """Адрес лендинга проекта (`LANDING_URL`) — QR в PDF-отчёте (§10.1).
+    Умолчание — канонический адрес (§16.1); не `https://` → QR не рисуется."""
+
+    bot_url: str = ""
+    """Ссылка на бота (`BOT_URL`) — QR в PDF-отчёте (§10.1).
+    Умолчание — `https://t.me/my_bp_diary_bot`; не `https://` → QR не рисуется."""
+
     db_path: str = "data/bot.sqlite3"
     """Путь к файлу SQLite."""
     #: Файл-хартбит для статус-строки лендинга (0.7.0, ST2-А): в статической
@@ -357,6 +365,8 @@ def get_settings() -> Settings:
         support_url=os.getenv("SUPPORT_URL", ""),
         author_contact=os.getenv("AUTHOR_CONTACT", ""),
         group_url=os.getenv("GROUP_URL", ""),
+        landing_url=os.getenv("LANDING_URL", "https://bp-diary.electroman.by/"),
+        bot_url=os.getenv("BOT_URL", "https://t.me/my_bp_diary_bot"),
         db_path=os.getenv("DB_PATH", "data/bot.sqlite3"),
         status_path=os.getenv("STATUS_PATH", "web/landing/status.json"),
         debounce_seconds=_env_float("DEBOUNCE_SECONDS", 1.5),

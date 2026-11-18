@@ -34,6 +34,7 @@ from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from bot import keyboards, texts
+from bot.config import get_settings
 from bot.models import Measurement, User
 from bot.services import csv_export
 from bot.services import pdf_report
@@ -640,6 +641,8 @@ async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
             data = await pdf_report.collect_report(
                 session, user, start, end, subject=pdf_report.patient_subject(user),
                 include_conclusions=True,
+                qr_landing_url=get_settings().landing_url,
+                qr_bot_url=get_settings().bot_url,
             )
         except pdf_report.ReportEmptyError:
             problem = texts.PDF_EMPTY

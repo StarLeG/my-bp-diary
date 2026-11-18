@@ -715,3 +715,20 @@ class TestFallback:
 
     def test_fallback_router_exists(self) -> None:
         assert fallback_router.name == "fallback"
+
+
+class TestStartPayload:
+    async def test_pdf_payload_matches_command_filter(self) -> None:
+        """`?start=pdf` приходит как «/start pdf»: фильтр `Command` его пропускает
+        и сценарий стартует — метка источника QR безопасна (§10.1, R2)."""
+        from aiogram.filters import Command
+
+        result = await Command("start")(make_message("/start pdf"), {})
+        assert result, "фильтр Command('start') не принял /start с payload"
+
+    async def test_pdf_payload_does_not_break_menu(self, answer, session, user) -> None:
+        """Сценарий стартует как обычный /start: payload игнорируется (§6.1)."""
+        state = make_state()
+        await state.set_state(start.Onboarding.tz_input)
+        await start.cmd_start(make_message("/start pdf"), state, session)
+        assert answer.await_count == 1  # экран перезапуска онбординга, как без payload

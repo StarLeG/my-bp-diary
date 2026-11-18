@@ -668,3 +668,124 @@ class TestChart:
         text = "\n".join(_pdf_text(pdf_report.build_pdf(_data())))
         # без точек подписи рядов «САД»/«ДАД» не рисуются (легенда зон — про зоны)
         assert "ДАД" not in text.replace("САД 130–139 · ДАД 85–89", "").replace("САД ≥ 140 · ДАД ≥ 90", "")
+
+
+# ───────────── Блок проекта с QR (2026-11-18, R1–R4) ─────────────
+
+
+def _qr_data(
+    landing: str = "", bot: str = "", show_bot_qr: bool = True
+) -> pdf_report.ReportData:
+    from dataclasses import replace
+
+    return replace(
+        _data(), qr_landing_url=landing, qr_bot_url=bot, show_bot_qr=show_bot_qr
+    )
+
+
+def _decoded_qrs(payload: bytes) -> list[str]:
+    """Страницы PDF → растр (pypdfium2) → декод QR (OpenCV, R4)."""
+    import cv2
+    import numpy as np
+    import pypdfium2
+
+    urls: list[str] = []
+    document = pypdfium2.PdfDocument(payload)
+    for index in range(len(document)):
+        # scale=4: детектору OpenCV нужен растр ~10+ пикселей на модуль
+        # (QR версии 4 на 30 мм при scale=2–3 не распознаётся; на бумаге
+        # 30 мм читается сканерами без проблем — R4).
+        image = document[index].render(scale=4).to_pil()
+        matrix = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        ok, decoded, _points, _ = cv2.QRCodeDetector().detectAndDecodeMulti(matrix)
+        if ok:
+            urls.extend(item for item in decoded if item)
+    return urls
+
+
+class TestProjectQrBlock:
+    """Блок проекта с QR в конце PDF: лендинг и бот (§10.1, R1–R4)."""
+
+    def test_two_qr_with_captions_and_tagged_urls(self) -> None:
+        """Оба URL: два QR с подписями; QR — с меткой источника (R2)."""
+        data = _qr_data("https://bp-diary.electroman.by/", "https://t.me/my_bp_diary_bot")
+        payload = pdf_report.build_pdf(data)
+        text = "\n".join(_pdf_text(payload))
+        assert pdf_report.PROJECT_TITLE in text
+        assert pdf_report.QR_LANDING_CAPTION in text and pdf_report.QR_BOT_CAPTION in text
+        # текстовый URL — чистый адрес: на бумаге его печатают руками
+        assert "https://bp-diary.electroman.by/" in text
+        assert "https://t.me/my_bp_diary_bot" in text
+        assert set(_decoded_qrs(payload)) == {
+            "https://bp-diary.electroman.by/?utm_source=pdf",
+            "https://t.me/my_bp_diary_bot?start=pdf",
+        }
+
+    def test_hidden_without_urls(self) -> None:
+        payload = pdf_report.build_pdf(_qr_data())
+        assert pdf_report.PROJECT_TITLE not in "\n".join(_pdf_text(payload))
+        assert _decoded_qrs(payload) == []
+
+    def test_single_qr_when_one_url(self) -> None:
+        """Задан только лендинг — один QR (R2); ссылки бота в документе нет."""
+        data = _qr_data("https://bp-diary.electroman.by/")
+        payload = pdf_report.build_pdf(data)
+        text = "\n".join(_pdf_text(payload))
+        assert pdf_report.QR_LANDING_CAPTION in text
+        assert pdf_report.QR_BOT_CAPTION not in text
+        assert _decoded_qrs(payload) == ["https://bp-diary.electroman.by/?utm_source=pdf"]
+
+    def test_bot_qr_flag_controls_doctor_pdf(self) -> None:
+        """Флаг `show_bot_qr` (кабинет врача): выключен — QR бота нет (R2)."""
+        data = _qr_data(
+            "https://bp-diary.electroman.by/", "https://t.me/my_bp_diary_bot", show_bot_qr=False
+        )
+        payload = pdf_report.build_pdf(data)
+        text = "\n".join(_pdf_text(payload))
+        assert pdf_report.QR_BOT_CAPTION not in text
+        assert _decoded_qrs(payload) == ["https://bp-diary.electroman.by/?utm_source=pdf"]
+
+    def test_invalid_url_skipped_with_warning(self, caplog) -> None:
+        """Не `https://` — QR не рисуется и пишется warning в лог (R3)."""
+        with caplog.at_level("WARNING", logger="bot.services.pdf_report"):
+            data = _qr_data("http://old.example.org", "https://t.me/my_bp_diary_bot")
+            payload = pdf_report.build_pdf(data)
+        text = "\n".join(_pdf_text(payload))
+        assert "old.example.org" not in text
+        assert "не https-адрес" in caplog.text
+        assert _decoded_qrs(payload) == ["https://t.me/my_bp_diary_bot?start=pdf"]
+
+    def test_both_invalid_hide_block(self, caplog) -> None:
+        """Оба URL невалидны — блока нет, генерация не падает (R2, R3)."""
+        with caplog.at_level("WARNING", logger="bot.services.pdf_report"):
+            data = _qr_data("http://a.example.org", "ftp://b.example.org")
+            payload = pdf_report.build_pdf(data)
+        assert pdf_report.PROJECT_TITLE not in "\n".join(_pdf_text(payload))
+        assert caplog.text.count("не https-адрес") == 2
+
+    def test_qr_tag_appends_with_ampersand_for_query(self) -> None:
+        """Метка источника дополняет URL с уже имеющейся строкой запроса (R2)."""
+        assert pdf_report._qr_tag("https://x.org/?a=1", "utm_source=pdf") == (
+            "https://x.org/?a=1&utm_source=pdf"
+        )
+
+    def test_block_moves_whole_to_new_page_when_no_space(self) -> None:
+        """Мало места на странице — блок целиком переносится на новую (R1)."""
+        pdf = pdf_report._ReportPDF(orientation="L", format="A4")
+        pdf.set_margins(
+            pdf_report.PAGE_MARGIN, pdf_report.PAGE_MARGIN, pdf_report.PAGE_MARGIN
+        )
+        pdf.set_auto_page_break(auto=True, margin=pdf_report.BOTTOM_MARGIN)
+        pdf.add_font(pdf_report.FONT_FAMILY, "", str(pdf_report.FONT_REGULAR_PATH))
+        pdf.add_font(pdf_report.FONT_FAMILY, "B", str(pdf_report.FONT_BOLD_PATH))
+        pdf.add_page()
+        # до низа страницы меньше высоты блока (7 + 30 + 14 мм)
+        pdf.set_y(pdf.h - pdf_report.BOTTOM_MARGIN - 20)
+        pdf_report._draw_project_block(
+            pdf, _qr_data("https://bp-diary.electroman.by/")
+        )
+        payload = bytes(pdf.output())
+        text = _pdf_text(payload)
+        assert pdf_report.PROJECT_TITLE not in text[0]
+        assert pdf_report.PROJECT_TITLE in text[1]
+        assert _decoded_qrs(payload) == ["https://bp-diary.electroman.by/?utm_source=pdf"]
