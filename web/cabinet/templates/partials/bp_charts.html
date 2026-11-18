@@ -1,18 +1,27 @@
 {# Три панели графиков сводки с легендой зон (SPEC.md, раздел 16.2).
    Ожидает chart_zones (web/cabinet/chart_zones.py); id "bp-chart" — на панели
-   САД, ровно один на страницу (E2E-локатор qa/test_web_e2e.py). #}
+   САД, ровно один на страницу (E2E-локатор qa/test_web_e2e.py).
+   С 2026-11-18 (A4, R4): клик или Enter/Space по панели открывает модалку
+   `role="dialog"` с увеличенным графиком САД+ДАД (общая шкала, как в PDF
+   §10.1) и отдельной панелью пульса; дни без измерений — разрывом линии. #}
 <div class="chart-grid">
-  <div class="chart-panel">
+  <div class="chart-panel chart-panel--zoom" role="button" tabindex="0"
+       aria-label="Увеличить графики" data-bp-zoom="1">
     <h3 class="chart-title">Систолическое</h3>
     <div class="chart-wrap"><canvas id="bp-chart"></canvas></div>
+    <p class="chart-hint">Нажмите, чтобы увеличить</p>
   </div>
-  <div class="chart-panel">
+  <div class="chart-panel chart-panel--zoom" role="button" tabindex="0"
+       aria-label="Увеличить графики" data-bp-zoom="1">
     <h3 class="chart-title">Диастолическое</h3>
     <div class="chart-wrap"><canvas id="bp-chart-dia"></canvas></div>
+    <p class="chart-hint">Нажмите, чтобы увеличить</p>
   </div>
-  <div class="chart-panel chart-panel--pulse">
+  <div class="chart-panel chart-panel--pulse chart-panel--zoom" role="button" tabindex="0"
+       aria-label="Увеличить графики" data-bp-zoom="1">
     <h3 class="chart-title">Пульс</h3>
     <div class="chart-wrap"><canvas id="bp-chart-pulse"></canvas></div>
+    <p class="chart-hint">Нажмите, чтобы увеличить</p>
   </div>
 </div>
 <ul class="zone-legend">
@@ -23,3 +32,14 @@
     <li><span class="zone-swatch" style="background: {{ band.fill }}"></span>ДАД: {{ band.label }}</li>
   {% endfor %}
 </ul>
+<div class="bp-modal is-hidden" id="bp-chart-modal" role="dialog" aria-modal="true"
+     aria-label="Графики давления и пульса">
+  <div class="bp-modal__card">
+    <div class="bp-modal__head">
+      <h3>Графики за период</h3>
+      <button type="button" class="btn btn-ghost" id="bp-modal-close">Закрыть</button>
+    </div>
+    <div class="chart-wrap chart-wrap--tall"><canvas id="bp-modal-combined"></canvas></div>
+    <div class="chart-wrap chart-wrap--tall"><canvas id="bp-modal-pulse"></canvas></div>
+  </div>
+</div>

@@ -243,6 +243,67 @@ fieldset.checks {
   color: var(--color-muted);
 }
 
+/* Утилиты: скрытие (форма периода, A2) и подсказка формы (A3). */
+.is-hidden {
+  display: none !important;
+}
+
+.form-hint {
+  color: var(--color-muted);
+  font-style: italic;
+}
+
+/* Чипы слотов лекарства (R5). */
+.med-chip {
+  display: inline-block;
+  margin: 2px 6px 2px 0;
+  padding: 2px 10px;
+  border-radius: 999px;
+  background: #eef4fb;
+  border: 1px solid #cfe0f2;
+  font-size: 0.92em;
+  white-space: nowrap;
+}
+
+/* Увеличение графиков (A4, R4): модалка на всю страницу. */
+.chart-panel--zoom {
+  cursor: pointer;
+}
+.chart-hint {
+  margin: 4px 0 0;
+  color: var(--color-muted);
+  font-size: 0.85em;
+}
+.bp-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgba(15, 23, 42, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+}
+.bp-modal__card {
+  background: #fff;
+  border-radius: 16px;
+  padding: 16px 20px;
+  width: min(1100px, 100%);
+  max-height: 92vh;
+  overflow: auto;
+}
+.bp-modal__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 8px;
+}
+.chart-wrap--tall {
+  height: 320px;
+  margin-bottom: 12px;
+}
+
 /* Фильтр периода */
 .filter-row {
   display: flex;

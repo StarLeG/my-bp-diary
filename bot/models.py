@@ -236,6 +236,9 @@ class Medication(Base):
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     dosage: Mapped[str] = mapped_column(String(50), nullable=False)
     slot: Mapped[str] = mapped_column(String(16), nullable=False)
+    #: Время приёма `ЧЧ:ММ` (§4.4, 2026-11-18, R6); NULL — «время слота из
+    #: напоминаний» (§6.7). У `crisis` не заполняется.
+    time: Mapped[Optional[str]] = mapped_column(String(5), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         UTCDateTime(), nullable=False, default=_utcnow
     )
@@ -249,6 +252,7 @@ class Medication(Base):
         CheckConstraint(
             "length(dosage) BETWEEN 0 AND 50", name="ck_medications_dosage_length"
         ),
+        CheckConstraint("time IS NULL OR length(time) <= 5", name="ck_medications_time_length"),
     )
 
 

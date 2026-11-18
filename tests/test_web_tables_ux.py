@@ -104,13 +104,18 @@ def _insert_measurement(
 
 
 def _insert_med(
-    settings, user_id: int, name: str = "Лозартан", dosage: str = "50 мг", slot: str = "morning"
+    settings,
+    user_id: int,
+    name: str = "Лозартан",
+    dosage: str = "50 мг",
+    slot: str = "morning",
+    time: str | None = None,
 ) -> int:
     con = sqlite3.connect(settings.db_path)
     cur = con.execute(
-        "INSERT INTO medications (user_id, name, dosage, slot, created_at)"
-        " VALUES (?, ?, ?, ?, '2026-01-01 00:00:00')",
-        (user_id, name, dosage, slot),
+        "INSERT INTO medications (user_id, name, dosage, slot, time, created_at)"
+        " VALUES (?, ?, ?, ?, ?, '2026-01-01 00:00:00')",
+        (user_id, name, dosage, slot, time),
     )
     con.commit()
     new_id = cur.lastrowid
@@ -382,7 +387,7 @@ class TestMedications:
         assert 'class="btn-del icon-btn"' in table
 
     def test_edit_form_by_edit_med(self, app_client, settings) -> None:  # noqa: F811
-        """`?edit_med={id}` — форма «Изменить лекарство», предзаполненная (не `?edit={id}`)."""
+        """`?edit_med={id}` — форма «Изменить лекарство» группы (R5/R6), не `?edit={id}`."""
         client, user_id = app_client
         _register(client)
         med_id = _insert_med(settings, user_id)
@@ -390,8 +395,13 @@ class TestMedications:
         assert "<h3>Изменить лекарство</h3>" in page
         form = page[page.index("<h3>Изменить лекарство</h3>") :]
         assert f'action="/medications/{med_id}"' in form
-        assert 'value="Лозартан"' in form and 'value="50 мг"' in form
-        assert '<select name="slot">' in form
+        assert 'value="Лозартан"' in form
+        # Слоты группы — чекбоксами, у каждого — дозировка и время (R5/R6).
+        assert 'name="slot_morning" value="1" checked' in form
+        assert 'value="50 мг"' in form
+        assert 'name="dosage_morning"' in form
+        assert 'name="time_morning"' in form
+        assert '<select name="slot">' not in form
         assert '<button type="submit" class="btn">Сохранить</button>' in form
         assert 'class="btn btn-ghost" href="/#medications">Отмена</a>' in form
         assert "Добавить лекарство" not in form.split("</form>")[0]
@@ -399,15 +409,46 @@ class TestMedications:
         assert "<h3>Изменить лекарство</h3>" not in client.get(f"/?edit={med_id}").text
 
     def test_delete_confirm_block(self, app_client, settings) -> None:  # noqa: F811
-        """Подтверждение удаления лекарства — блоком, финал — залитая красная."""
+        """Подтверждение удаления лекарства — блоком, финал — залитая красная.
+
+        Удаление всего лекарства (R5): подтверждение перечисляет все приёмы.
+        """
         client, user_id = app_client
         _register(client)
         med_id = _insert_med(settings, user_id)
         page = client.get(f"/?confirm_delete_med={med_id}").text
         section = _section(page, "medications")
-        assert "Удалить «Лозартан»? Это действие нельзя отменить." in section
+        assert "Удалить «Лозартан»? Удалятся все приёмы: утро. Это действие нельзя отменить." in section
         assert '<button type="submit" class="btn btn-danger">Удалить</button>' in section
         assert 'class="btn btn-ghost" href="/#medications">Отмена</a>' in section
+
+    def test_grouped_row_with_chips(self, app_client, settings) -> None:  # noqa: F811
+        """R5/R6: один препарат — одна строка; чипы со своими дозировками
+        («Утро 500 мг · 08:30»), общая дозировка — только когда одинакова;
+        «При кризе» — без времени."""
+        client, user_id = app_client
+        _register(client)
+        _insert_med(settings, user_id, "Глицин", "500 мг", "morning", time="08:30")
+        _insert_med(settings, user_id, "Глицин", "1000 мг", "evening")
+        _insert_med(settings, user_id, "Глицин", "500 мг", "crisis")
+        section = _section(client.get("/").text, "medications")
+        assert section.count('data-label="Название"') == 1  # одна строка на лекарство
+        assert 'data-label="Дозировка">—' in section  # дозировки различаются
+        assert "Утро 500 мг · 08:30" in section
+        assert "Вечер 1000 мг · 20:00" in section  # пусто → время слота по умолчанию
+        assert "При кризе 500 мг" in section and "При кризе 500 мг ·" not in section
+
+    def test_uniform_dosage_in_column_not_chips(self, app_client, settings) -> None:  # noqa: F811
+        """Одинаковая дозировка — в колонке; чипы — слот и время (R5)."""
+        client, user_id = app_client
+        _register(client)
+        _insert_med(settings, user_id, "Лозартан", "50 мг", "morning")
+        _insert_med(settings, user_id, "Лозартан", "50 мг", "evening", time="21:00")
+        section = _section(client.get("/").text, "medications")
+        assert section.count('data-label="Название"') == 1
+        assert 'data-label="Дозировка">50 мг' in section
+        assert "Утро · 08:00" in section
+        assert "Вечер · 21:00" in section
 
 
 # ─────────────────────────── Единый UI-канон ───────────────────────────
@@ -439,7 +480,7 @@ class TestUnifiedLabels:
             in client.get(f"/?confirm_delete={measurement_id}").text
         )
         assert (
-            "Удалить «Лозартан»? Это действие нельзя отменить."
+            "Удалить «Лозартан»? Удалятся все приёмы: утро. Это действие нельзя отменить."
             in client.get(f"/?confirm_delete_med={med_id}").text
         )
         page = client.get(f"/?confirm_delete_ap={appt_id}").text

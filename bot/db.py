@@ -52,9 +52,9 @@ RETRY_BASE_DELAY = 0.05
 #:     §4.5, 0.6.2; правило правки standalone-строк в ЛК, M3 = В).
 #: 13 — закреплённое сообщение главного меню: `users.last_menu_message_id`
 #:     (§4.1, §6.2, 0.7.0, MU6: `/start` редактирует его вместо дублей).
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
-#: Колонки поколений 4–13 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3, §4.5).
+#: Колонки поколений 4–14 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3, §4.5).
 _ADDED_COLUMNS = (
     ("users", "deletion_requested_at", "DATETIME"),
     ("doctors", "consent_version", "VARCHAR(32)"),
@@ -95,6 +95,8 @@ _ADDED_COLUMNS = (
         "CHECK (source IN ('bot', 'cabinet'))",
     ),
     ("users", "last_menu_message_id", "INTEGER"),
+    # Поколение 14 (2026-11-18, R6): время приёма пары «лекарство + слот».
+    ("medications", "time", "TEXT"),
 )
 
 T = TypeVar("T")
@@ -181,7 +183,18 @@ async def _migrate_medications(engine: AsyncEngine) -> None:
             return  # таблицы ещё нет или схема уже новая
         ddl = str(CreateTable(Medication.__table__).compile(dialect=engine.dialect))
         ddl = ddl.replace("CREATE TABLE medications", "CREATE TABLE medications_migrate", 1)
-        columns = ", ".join(column.name for column in Medication.__table__.columns)
+        # Копируем только колонки, которые есть в старой таблице: новые
+        # NULL-able (например `time`, поколение 14) заполнит
+        # `_add_missing_columns` или останутся NULL.
+        existing_columns = {
+            row[1]
+            for row in (await conn.exec_driver_sql("PRAGMA table_info(medications)")).all()
+        }
+        columns = ", ".join(
+            column.name
+            for column in Medication.__table__.columns
+            if column.name in existing_columns
+        )
         try:
             await conn.exec_driver_sql("PRAGMA foreign_keys=OFF")
             await conn.exec_driver_sql("DROP TABLE IF EXISTS medications_migrate")

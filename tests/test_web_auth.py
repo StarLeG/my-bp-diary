@@ -874,36 +874,39 @@ class TestDashboardRoutes:
                 "name": "Лозартан",
                 "dosage": "50 мг",
                 "slot_morning": "1",
+                "time_morning": "08:00",
             },
         )
         assert response.status_code == 303
         rows = self._sql(
             settings,
-            "SELECT id, name, dosage, slot FROM medications WHERE user_id = ?",
+            "SELECT id, name, dosage, slot, time FROM medications WHERE user_id = ?",
             (user_id,),
         )
-        assert rows[0][1:] == ("Лозартан", "50 мг", "morning")
+        assert rows[0][1:] == ("Лозартан", "50 мг", "morning", "08:00")
         med_id = rows[0][0]
 
+        # Правка группы (R5/R6): слот переезжает со своей дозировкой и временем.
         response = client.post(
             f"/medications/{med_id}",
             data={
                 "csrf_token": _csrf(client),
                 "name": "Лозартан",
-                "dosage": "100 мг",
-                "slot": "evening",
+                "slot_evening": "1",
+                "dosage_evening": "100 мг",
+                "time_evening": "20:00",
             },
         )
         assert response.status_code == 303
         rows = self._sql(
             settings,
-            "SELECT dosage, slot FROM medications WHERE id = ?",
-            (med_id,),
+            "SELECT id, dosage, slot, time FROM medications WHERE user_id = ?",
+            (user_id,),
         )
-        assert rows == [("100 мг", "evening")]
+        assert [(r[1], r[2], r[3]) for r in rows] == [("100 мг", "evening", "20:00")]
 
         response = client.post(
-            f"/medications/{med_id}/delete", data={"csrf_token": _csrf(client)}
+            f"/medications/{rows[0][0]}/delete", data={"csrf_token": _csrf(client)}
         )
         assert response.status_code == 303
         assert self._sql(settings, "SELECT id FROM medications") == []
@@ -931,8 +934,8 @@ class TestDashboardRoutes:
             data={
                 "csrf_token": _csrf(client),
                 "name": rows[1][1],  # имя уже занято в слоте noon
-                "dosage": "5 мг",
-                "slot": "noon",
+                "slot_noon": "1",
+                "dosage_noon": "5 мг",
             },
         )
         assert response.status_code == 303
@@ -965,8 +968,8 @@ class TestDashboardRoutes:
             data={
                 "csrf_token": _csrf(client),
                 "name": "Каптоприл",
-                "dosage": "",
-                "slot": "crisis",
+                "slot_crisis": "1",
+                "dosage_crisis": "",
             },
         )
         assert response.status_code == 303
@@ -995,8 +998,8 @@ class TestDashboardRoutes:
             data={
                 "csrf_token": _csrf(client),
                 "name": "Лозартан",
-                "dosage": "50 мг",
-                "slot": "night",
+                "slot_night": "1",
+                "dosage_night": "50 мг",
             },
         )
         assert response.status_code == 303
@@ -1254,6 +1257,88 @@ class TestDashboardCharts:
         assert '<span class="med-group-title">Вечер</span>' not in text
         assert "<li>Лозартан (50 мг)</li>" in text
         assert "<li>Моксонидин</li>" in text
+
+    def test_chart_modal_markup_and_hint(self, app_client, settings) -> None:
+        """Увеличение графиков (R4): модалка `role="dialog"` и подсказка у панелей."""
+        client, user_id = app_client
+        _register(client)
+        self._add_measurement(settings, user_id)
+        text = client.get("/?days=custom&date_from=2026-01-01&date_to=2026-01-03").text
+        assert 'id="bp-chart-modal"' in text
+        assert 'role="dialog"' in text and 'aria-modal="true"' in text
+        assert 'id="bp-modal-close"' in text
+        assert 'id="bp-modal-combined"' in text and 'id="bp-modal-pulse"' in text
+        assert "Нажмите, чтобы увеличить" in text
+
+
+# ─────────────────── Форма периода (A1–A3, 2026-11-18) ───────────────────
+
+
+class TestPeriodForm:
+    """Форма периода сводки (R1–R3, `doc/CABINET-AUDIT-QUESTIONS.md`)."""
+
+    @staticmethod
+    def _add_today_measurement(settings: Settings, user_id: int) -> None:
+        """Запись «сегодня»: пустое состояние не должно выдавать её за «Свой период»."""
+        con = sqlite3.connect(settings.db_path)
+        con.execute(
+            "INSERT INTO measurements (user_id, timestamp, systolic, diastolic, pulse,"
+            " medication_taken, feeling, note)"
+            " VALUES (?, datetime('now'), 128, 82, 64, 0, NULL, '')",
+            (user_id,),
+        )
+        con.commit()
+        con.close()
+
+    def test_anchor_hidden_dates_and_toggle(self, app_client, settings) -> None:
+        """Якорь `#summary` в action (R1); «С/По» скрыты при пресетах (R2);
+        селект переключает их без сабмита (JS `bpPeriodChange`)."""
+        client, user_id = app_client
+        _register(client)
+        text = client.get("/").text
+        marker = text.index('id="period-form"')
+        form = text[text.rfind("<form", 0, marker) : text.index("</form>", marker)]
+        assert 'action="/#summary"' in form
+        assert 'onchange="bpPeriodChange(this)"' in form
+        assert form.count("period-dates") == 2
+        assert form.count("period-dates is-hidden") == 2  # «7 дней» — поля скрыты
+
+    def test_custom_shows_date_fields(self, app_client, settings) -> None:
+        """`days=custom` — поля дат видны сразу, без мигания (R2)."""
+        client, user_id = app_client
+        _register(client)
+        text = client.get("/?days=custom&date_from=2026-11-01&date_to=2026-11-05").text
+        form = text[text.index('id="period-form"') :]
+        form = form[: form.index("</form>")]
+        assert 'class="period-dates"' in form
+        assert "period-dates is-hidden" not in form
+
+    def test_custom_without_dates_empty_state(self, app_client, settings) -> None:
+        """A3: без дат — пустое состояние с подсказкой, а не фолбэк на 7 дней."""
+        client, user_id = app_client
+        _register(client)
+        self._add_today_measurement(settings, user_id)
+        text = client.get("/?days=custom").text
+        assert "Выберите даты «С» и «По»" in text
+        assert "Период: " not in text  # строки «Период: ДД.ММ…» нет
+        # Данные за «сегодня» не выдаются за «Свой период»: сводка пуста
+        # (у «Истории» — своё пустое состояние, это нормально).
+        assert "Записей" not in text
+
+    def test_custom_future_rejected(self, app_client, settings) -> None:
+        """Будущее запрещено (как в боте, §6.5) — пустое состояние с текстом ошибки."""
+        client, user_id = app_client
+        _register(client)
+        text = client.get("/?days=custom&date_from=2027-01-01&date_to=2027-01-05").text
+        assert "Период не может заканчиваться в будущем" in text
+        assert "Период: " not in text
+
+    def test_custom_reversed_dates_swapped(self, app_client, settings) -> None:
+        """Обратный порядок дат меняется местами (§6.5)."""
+        client, user_id = app_client
+        _register(client)
+        text = client.get("/?days=custom&date_from=2026-11-05&date_to=2026-11-01").text
+        assert "Период: 01.11.2026 — 05.11.2026" in text
 
 
 # ─────────────────── Argon2id вне event loop (§7.2 п.7) ───────────────────

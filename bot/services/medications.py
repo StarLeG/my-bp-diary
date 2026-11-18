@@ -30,8 +30,9 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from dataclasses import dataclass, field
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Iterable, Mapping, Optional
 from zoneinfo import ZoneInfo
 
@@ -49,6 +50,37 @@ SLOTS = ("morning", "noon", "evening", "crisis")
 #: Слоты с расписанием (утро/обед/вечер) — только они участвуют в приверженности:
 #: кризисный препарат принимают по факту, планировать его нельзя (§6.7).
 SCHEDULED_SLOTS = ("morning", "noon", "evening")
+
+#: Умолчания времени приёма расписания (§4.4, 2026-11-18, R6): равномерные
+#: интервалы — только умолчание; назначенный час — в `Medication.time`.
+SLOT_DEFAULT_TIMES = {"morning": "08:00", "noon": "14:00", "evening": "20:00"}
+
+
+def valid_hhmm(raw: str) -> Optional[str]:
+    """`ЧЧ:ММ` → нормализованное время; мусор — None (§4.4)."""
+    match = re.fullmatch(r"(\d{1,2}):(\d{2})", (raw or "").strip())
+    if match is None:
+        return None
+    hour, minute = int(match.group(1)), int(match.group(2))
+    if hour > 23 or minute > 59:
+        return None
+    return f"{hour:02d}:{minute:02d}"
+
+
+def slot_time(medication: Medication) -> Optional[str]:
+    """Время приёма строки: своё `ЧЧ:ММ` или умолчание слота (§4.4, R6).
+
+    У `crisis` (и слота без умолчания) — None: чип «При кризе» без времени.
+    """
+    if medication.time:
+        return medication.time
+    return SLOT_DEFAULT_TIMES.get(medication.slot)
+
+
+def _minutes(hhmm: str) -> int:
+    """Время `ЧЧ:ММ` → минуты от полуночи (для ближайшего слота, R7)."""
+    hour, minute = hhmm.split(":")
+    return int(hour) * 60 + int(minute)
 
 _intake_lock: Optional[asyncio.Lock] = None
 _intake_lock_loop: Optional[asyncio.AbstractEventLoop] = None
@@ -108,14 +140,18 @@ async def add_medication(
     name: str,
     dosage: str,
     slots: Iterable[str],
+    times: Optional[Mapping[str, str]] = None,
 ) -> list[Medication]:
     """Добавить лекарство: по строке на каждый выбранный слот.
 
     Если лекарство с таким именем в слоте уже есть — обновляется дозировка
-    (`UNIQUE(user_id, name, slot)` не нарушается, дублей строк нет).
+    (`UNIQUE(user_id, name, slot)` не нарушается, дублей строк нет). `times` —
+    время приёма по слотам (`ЧЧ:ММ`, §4.4, R6): ключ отсутствует или пустое
+    значение — «время слота из напоминаний» (`NULL`).
     """
     result: list[Medication] = []
     for slot in slots:
+        hhmm = valid_hhmm((times or {}).get(slot, "")) if times else None
         medication = (
             await session.execute(
                 select(Medication).where(
@@ -126,10 +162,14 @@ async def add_medication(
             )
         ).scalar_one_or_none()
         if medication is None:
-            medication = Medication(user_id=user.id, name=name, dosage=dosage, slot=slot)
+            medication = Medication(
+                user_id=user.id, name=name, dosage=dosage, slot=slot, time=hhmm
+            )
             session.add(medication)
         else:
             medication.dosage = dosage
+            if times is not None:
+                medication.time = hhmm  # без `times` (бот) назначенное время не трогаем
         result.append(medication)
     await session.flush()
     return result
@@ -212,13 +252,15 @@ class MedicationGroup:
     """Лекарство целиком: одна кнопка выбора в изменении/удалении (§6.6).
 
     `id` — любой id строки группы (значение `callback_data`); слоты — в
-    порядке `SLOTS`.
+    порядке `SLOTS`. `rows` — строки группы (дозировка и время могут
+    различаться по слотам, §4.4; чипы ЛК, R5/R6) в том же порядке.
     """
 
     id: int
     name: str
     dosage: str
     slots: tuple[str, ...]
+    rows: tuple[Medication, ...] = ()
 
 
 def _sort_by_slots(rows: list[Medication]) -> list[Medication]:
@@ -262,6 +304,7 @@ async def list_medication_groups(
                 name=name,
                 dosage=group[0].dosage,
                 slots=tuple(row.slot for row in group),
+                rows=tuple(group),
             )
         )
     return groups
@@ -293,13 +336,17 @@ async def update_medication(
     new_name: str,
     dosage: str,
     slots: Iterable[str],
+    slot_values: Optional[Mapping[str, tuple[str, str]]] = None,
 ) -> Optional[list[Medication]]:
     """Пересобрать лекарство (группу строк) по новым значениям одной транзакцией.
 
     Переживающие слоты обновляются на месте (id строк и история
     `medication_logs` сохраняются); снятые слоты удаляются (их логи каскадом);
     новые слоты — добавляются. Пустой набор слотов не проверяется — его
-    отсекает вызывающая стор (как в `add_medication`).
+    отсекает вызывающая стор (как в `add_medication`). `slot_values` —
+    значения по слотам `{слот: (дозировка, время ЧЧ:ММ)}` (§4.4, R5/R6:
+    дозировка и время могут различаться по слотам); без него — единая
+    `dosage`, назначенное время строк не трогается (путь бота).
 
     Возвращает итоговые строки группы или None, если группы уже нет (stale:
     лекарство удалили, пока шла правка). Бросает
@@ -331,13 +378,23 @@ async def update_medication(
     await session.flush()
     for slot in target:
         row = current.get(slot)
+        if slot_values is not None and slot in slot_values:
+            slot_dosage, slot_time_raw = slot_values[slot]
+            hhmm_value = valid_hhmm(slot_time_raw) or None
+        else:
+            slot_dosage = dosage
+            hhmm_value = row.time if row is not None else None
         if row is None:
             session.add(
-                Medication(user_id=user.id, name=new_name, dosage=dosage, slot=slot)
+                Medication(
+                    user_id=user.id, name=new_name, dosage=slot_dosage,
+                    slot=slot, time=hhmm_value,
+                )
             )
         else:
             row.name = new_name
-            row.dosage = dosage
+            row.dosage = slot_dosage
+            row.time = hhmm_value
     await session.flush()
     await reset_empty_meds_modes(session, user.id)
     return await medications_by_name(session, user, new_name)
@@ -1011,28 +1068,96 @@ async def planned_intakes(
 async def adherence(
     session: AsyncSession, user: User, start_day: date, end_day: date
 ) -> tuple[int, int]:
-    """Приверженность за период: (принято taken, всего запланировано).
+    """Приверженность за период: (засчитано, всего запланировано) (§6.5).
 
     Считаются только расписание слоты: приёмы кризисных препаратов и в
-    числитель, и в знаменатель не входят (§6.7).
+    числитель, и в знаменатель не входят (§6.7). **С 2026-11-18** (A6, R7):
+    приём засчитывается по логу **или** связи `measurement_medications` —
+    цифра не противоречит колонке «Лекарство» «Истории записей». Правила:
+    слот плана за локальные сутки засчитывается не больше одного раза
+    (числитель ≤ знаменателя); приоритет лога — есть лог за сутки, решает он
+    (`taken` — засчитано, `skipped`/`partial` — нет), связь не перебивает;
+    связь без лога засчитывается слоту, ближайшему по времени приёма
+    (`slot_time`, §4.4) к локальному времени измерения.
     """
+    tz = ZoneInfo(user.timezone)
     start, _ = day_bounds_utc(user.timezone, start_day)
     _, end = day_bounds_utc(user.timezone, end_day)
-    taken = (
-        await session.execute(
-            select(func.count())
-            .select_from(MedicationLog)
-            .where(
-                MedicationLog.user_id == user.id,
-                MedicationLog.status == "taken",
-                MedicationLog.slot.in_(SCHEDULED_SLOTS),
-                MedicationLog.timestamp >= start,
-                MedicationLog.timestamp < end,
+    rows = (
+        (
+            await session.execute(
+                select(Medication).where(
+                    Medication.user_id == user.id,
+                    Medication.slot.in_(SCHEDULED_SLOTS),
+                )
             )
         )
-    ).scalar_one()
+        .scalars()
+        .all()
+    )
     planned = await planned_intakes(session, user, start_day, end_day)
-    return int(taken), planned
+    if not rows:
+        return 0, 0
+    # 1. Логи — явная отметка; один приём в сутки — строка одна (идемпотентность).
+    log_rows = (
+        (
+            await session.execute(
+                select(MedicationLog).where(
+                    MedicationLog.user_id == user.id,
+                    MedicationLog.timestamp >= start,
+                    MedicationLog.timestamp < end,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+    logged: dict[tuple[date, int], str] = {
+        (log.timestamp.astimezone(tz).date(), log.medication_id): log.status
+        for log in log_rows
+    }
+    # 2. Связи без лога: ближайший слот по времени приёма к моменту измерения.
+    link_rows = (
+        await session.execute(
+            select(Measurement.timestamp, MeasurementMedication.medication_id)
+            .join(
+                MeasurementMedication,
+                MeasurementMedication.measurement_id == Measurement.id,
+            )
+            .where(
+                Measurement.user_id == user.id,
+                Measurement.timestamp >= start,
+                Measurement.timestamp < end,
+            )
+        )
+    ).all()
+    row_by_id = {row.id: row for row in rows}
+    by_name: dict[str, list[Medication]] = {}
+    for row in rows:
+        by_name.setdefault(row.name, []).append(row)
+    linked: set[tuple[date, int]] = set()
+    for stamp, medication_id in link_rows:
+        row = row_by_id.get(medication_id)
+        if row is None:
+            continue  # связь с кризисной строкой — вне плана (§6.7)
+        local = stamp.astimezone(tz)
+        moment = local.hour * 60 + local.minute
+        nearest = min(
+            by_name[row.name],
+            key=lambda item: abs(_minutes(slot_time(item) or "00:00") - moment),
+        )
+        linked.add((local.date(), nearest.id))
+    # 3. Слот плана за сутки — максимум один раз (лог решает, иначе связь).
+    taken = 0
+    for row in rows:
+        for offset in range((end_day - start_day).days + 1):
+            key = (start_day + timedelta(days=offset), row.id)
+            if key in logged:
+                if logged[key] == "taken":
+                    taken += 1
+            elif key in linked:
+                taken += 1
+    return taken, planned
 
 
 async def logs_for_period(

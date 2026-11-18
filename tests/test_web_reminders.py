@@ -267,3 +267,17 @@ class TestTickAfterCabinet:
         assert run_at.astimezone(TZ).strftime("%H:%M") == "09:45"
         assert run_at.replace(tzinfo=None).isoformat(" ").startswith(stored[:16])
         assert "Бот применит изменения в течение минуты." in client.get("/").text
+
+
+class TestSlotTimeDefaults:
+    """Умолчания времени слотов напоминаний (A7, 2026-11-18): 08:00 / 14:00 / 20:00."""
+
+    def test_defaults_are_realistic(self, app_client, settings) -> None:  # noqa: F811
+        """Обед и вечер не показывают 08:00 (находка веб-аудита A7)."""
+        client, user_id = app_client
+        _register(client)
+        text = client.get("/").text
+        for slot, hhmm in (("morning", "08:00"), ("noon", "14:00"), ("evening", "20:00")):
+            match = re.search(rf'name="slot_{slot}_time"\s+value="([^"]+)"', text)
+            assert match, f"нет поля времени слота {slot}"
+            assert match.group(1) == hhmm

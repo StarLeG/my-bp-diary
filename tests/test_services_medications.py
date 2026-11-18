@@ -359,6 +359,153 @@ class TestAdherence:
             session, user, date(2026, 11, 7), date(2026, 11, 1)
         ) == 0
 
+    # ── Приём по логу или связи (A6, R7, 2026-11-18) ──
+
+    async def _link(
+        self, session: AsyncSession, user: User, medication_id: int, when: datetime
+    ) -> None:
+        """Связь «лекарство отмечено у измерения» без лога (путь ЛК, M1-А)."""
+        measurement = Measurement(
+            user_id=user.id, timestamp=when, systolic=128, diastolic=82
+        )
+        session.add(measurement)
+        await session.flush()
+        session.add(
+            MeasurementMedication(
+                measurement_id=measurement.id, medication_id=medication_id
+            )
+        )
+
+    async def test_link_without_log_counts(self, session: AsyncSession, user: User) -> None:
+        """Связь без лога засчитывает приём — цифра не противоречит истории (A6)."""
+        meds = await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        await self._link(session, user, meds[0].id, aware(2026, 11, 4, 8, 10))
+        await session.commit()
+        assert await service.adherence(
+            session, user, date(2026, 11, 4), date(2026, 11, 4)
+        ) == (1, 1)
+
+    async def test_log_and_link_same_slot_once(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Лог и связь в один слот — приём один: не больше 100% (R7)."""
+        meds = await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "taken"},
+            timestamp=aware(2026, 11, 4, 8, 5),
+        )
+        await self._link(session, user, meds[0].id, aware(2026, 11, 4, 8, 10))
+        await session.commit()
+        assert await service.adherence(
+            session, user, date(2026, 11, 4), date(2026, 11, 4)
+        ) == (1, 1)
+
+    async def test_log_skipped_beats_link(self, session: AsyncSession, user: User) -> None:
+        """Лог «пропущено» побеждает связь «принято» — приоритет лога (R7)."""
+        meds = await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "skipped"},
+            timestamp=aware(2026, 11, 4, 8, 5),
+        )
+        await self._link(session, user, meds[0].id, aware(2026, 11, 4, 8, 10))
+        await session.commit()
+        assert await service.adherence(
+            session, user, date(2026, 11, 4), date(2026, 11, 4)
+        ) == (0, 1)
+
+    async def test_link_maps_to_nearest_slot(self, session: AsyncSession, user: User) -> None:
+        """Связь — слоту, ближайшему по времени приёма к моменту измерения (R7).
+
+        Глицин утро (08:00) и вечер (20:00): связь у измерения 20:00 (даже
+        на утреннюю строку) засчитывает вечерний приём; утренний решает лог.
+        """
+        meds = await service.add_medication(
+            session, user, "Глицин", "500 мг", ("morning", "evening")
+        )
+        await session.flush()
+        await service.log_slot_intake(
+            session, user, "morning", {meds[0].id: "skipped"},
+            timestamp=aware(2026, 11, 4, 8, 5),
+        )
+        # 17:00 UTC = 20:00 по Минску — часовой пояс тестового пользователя.
+        await self._link(session, user, meds[0].id, aware(2026, 11, 4, 17, 0))
+        await session.commit()
+        assert await service.adherence(
+            session, user, date(2026, 11, 4), date(2026, 11, 4)
+        ) == (1, 2)
+
+    async def test_link_ignores_crisis_row(self, session: AsyncSession, user: User) -> None:
+        """Связь с кризисной строкой — вне плана, приверженность не меняет (§6.7)."""
+        crisis = await service.add_medication(session, user, "Каптоприл", "25 мг", ("crisis",))
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        await self._link(session, user, crisis[0].id, aware(2026, 11, 4, 15, 0))
+        await session.commit()
+        assert await service.adherence(
+            session, user, date(2026, 11, 4), date(2026, 11, 4)
+        ) == (0, 1)
+
+
+class TestIntakeTime:
+    """Время приёма пары «лекарство + слот» (§4.4, R6, 2026-11-18)."""
+
+    def test_valid_hhmm(self) -> None:
+        assert service.valid_hhmm("8:05") == "08:05"
+        assert service.valid_hhmm(" 20:00 ") == "20:00"
+        assert service.valid_hhmm("24:00") is None
+        assert service.valid_hhmm("12:60") is None
+        assert service.valid_hhmm("") is None
+        assert service.valid_hhmm("вечер") is None
+
+    async def test_slot_time_defaults_and_own(self, session: AsyncSession, user: User) -> None:
+        """Своё время — `ЧЧ:ММ`; пусто — умолчание слота (08:00/14:00/20:00);
+        «Кризис» — без времени (чип «При кризе» без времени)."""
+        meds = await service.add_medication(
+            session, user, "Глицин", "500 мг", ("morning", "noon", "evening", "crisis"),
+            times={"morning": "07:30"},
+        )
+        await session.flush()
+        by_slot = {row.slot: row for row in meds}
+        assert service.slot_time(by_slot["morning"]) == "07:30"
+        assert service.slot_time(by_slot["noon"]) == "14:00"
+        assert service.slot_time(by_slot["evening"]) == "20:00"
+        assert service.slot_time(by_slot["crisis"]) is None
+
+    async def test_add_without_times_keeps_existing(self, session: AsyncSession, user: User) -> None:
+        """Повторное добавление без `times` (бот) назначенное время не трогает."""
+        await service.add_medication(
+            session, user, "Лозартан", "50 мг", ("morning",), times={"morning": "07:30"}
+        )
+        await session.flush()
+        await service.add_medication(session, user, "Лозартан", "50 мг", ("morning",))
+        await session.flush()
+        row = (
+            await session.execute(select(Medication).where(Medication.user_id == user.id))
+        ).scalars().one()
+        assert row.time == "07:30"
+
+    async def test_update_slot_values_sets_time_and_dosage(
+        self, session: AsyncSession, user: User
+    ) -> None:
+        """Правка группы (R5/R6): дозировка и время по слотам, снятый слот удаляется."""
+        await service.add_medication(
+            session, user, "Глицин", "500 мг", ("morning", "evening")
+        )
+        await session.flush()
+        rows = await service.update_medication(
+            session, user, "Глицин", "Глицин", "",
+            ("morning", "evening"),
+            slot_values={"morning": ("500 мг", "08:30"), "evening": ("1000 мг", "")},
+        )
+        await session.flush()
+        assert rows is not None
+        by_slot = {row.slot: row for row in rows}
+        assert (by_slot["morning"].dosage, by_slot["morning"].time) == ("500 мг", "08:30")
+        assert (by_slot["evening"].dosage, by_slot["evening"].time) == ("1000 мг", None)
+
 
 class TestLogsExport:
     async def test_logs_for_period_and_all(self, session: AsyncSession, user: User) -> None:

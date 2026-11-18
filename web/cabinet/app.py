@@ -71,7 +71,7 @@ from bot.services.measurements import (
     save_measurement,
     update_measurement_values,
 )
-from bot.services.medications import MedicationNotFoundError
+from bot.services.medications import MedicationNameConflictError, MedicationNotFoundError
 from bot.services.reminders import (
     DEFAULT_SLOT_TIMES,
     enable_slot_row,
@@ -149,20 +149,87 @@ def _client_ip(request: Request) -> str:
 
 def _resolve_period(
     tz_name: str, days: str, date_from: str, date_to: str
-) -> tuple[date, date]:
-    """Границы периода фильтра: 7 / 30 дней / произвольный (локальные сутки)."""
+) -> tuple[Optional[tuple[date, date]], Optional[str]]:
+    """Границы периода фильтра: 7 / 30 дней / произвольный (локальные сутки).
+
+    Возвращает `(период, ошибка)`. «Свой период» без дат или с неверными —
+    `(None, подсказка)` без молчаливого фолбэка на 7 дней (A3, 2026-11-18,
+    `doc/CABINET-AUDIT-QUESTIONS.md` R3); будущее запрещено (как в боте,
+    §6.5); обратный порядок дат меняется местами. Пресеты всегда валидны.
+    """
     today = datetime.now(ZoneInfo(tz_name)).date()
     if days == "custom":
+        if not date_from or not date_to:
+            return None, texts.STATS_CAL_SELECT_DATES
         try:
             start = date.fromisoformat(date_from)
             end = date.fromisoformat(date_to)
         except ValueError:
-            return today - timedelta(days=6), today
+            return None, texts.STATS_CAL_SELECT_DATES
+        if start > today or end > today:
+            return None, texts.STATS_CAL_FUTURE
         if start > end:
             start, end = end, start
-        return start, end
+        return (start, end), None
     span = 30 if days == "30" else 7
-    return today - timedelta(days=span - 1), today
+    return (today - timedelta(days=span - 1), today), None
+
+
+def _resolve_period_loose(
+    tz_name: str, days: str, date_from: str, date_to: str
+) -> tuple[date, date]:
+    """Период кабинета врача: прежний фолбэк на 7 дней (без пустого состояния).
+
+    Строгая проверка — у пациента (R3); карточка врача (§21) работает как
+    прежде: неверный «Свой период» — окно за 7 дней.
+    """
+    period, _problem = _resolve_period(tz_name, days, date_from, date_to)
+    if period is not None:
+        return period
+    today = datetime.now(ZoneInfo(tz_name)).date()
+    return today - timedelta(days=6), today
+
+
+def _period_url(days: str, date_from: str, date_to: str) -> str:
+    """URL возврата к фильтру с тем же периодом (пустое состояние, R3)."""
+    return f"/?days={days}&date_from={date_from}&date_to={date_to}#summary"
+
+
+def _med_group_view(
+    group,
+    slot_times: Mapping[str, str],
+    slot_labels: Mapping[str, str],
+) -> dict:
+    """Строка таблицы «Лекарства»: один препарат, чипы слотов (R5/R6).
+
+    `dosage` — общая дозировка (пусто, если различается по слотам — тогда она
+    в каждом чипе); `intakes` — приёмы в порядке `SLOTS`: метка, дозировка,
+    время (`ЧЧ:ММ` — своё или время слота из напоминаний; у «Кризис» пусто).
+    """
+    dosages = {row.dosage for row in group.rows}
+    intakes = [
+        {
+            "id": row.id,
+            "slot": row.slot,
+            # Чип кризисного слота — «При кризе», без времени (R5, дословно).
+            "label": (
+                texts.MED_CHIP_CRISIS if row.slot == "crisis" else slot_labels[row.slot]
+            ),
+            "dosage": row.dosage,
+            "time": (
+                ""
+                if row.slot == "crisis"
+                else (row.time or slot_times.get(row.slot, ""))
+            ),
+        }
+        for row in group.rows
+    ]
+    return {
+        "id": group.id,
+        "name": group.name,
+        "dosage": next(iter(dosages)) if len(dosages) == 1 else "",
+        "intakes": intakes,
+    }
 
 
 async def _pdf_report_response(
@@ -1185,7 +1252,13 @@ def create_app(
         """
         tz = ZoneInfo(user.timezone)
         now_local = datetime.now(tz)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        period, period_problem = _resolve_period(user.timezone, days, date_from, date_to)
+        if period is None:
+            # Пустое состояние сводки (R3): вымышленный пустой период — блоки
+            # данных рендерятся пустыми, сводка показывает подсказку.
+            start_day = end_day = date(1970, 1, 1)
+        else:
+            start_day, end_day = period
         measurements = await measurements_for_period(db, user, start_day, end_day)
         feed_events, feed_intakes, linked_med_ids = await _feed_data(
             db, user, start_day, end_day, measurements
@@ -1285,6 +1358,21 @@ def create_app(
                 )
             ).scalars()
         )
+        # Лекарства — строками групп (R5/R6): чипы слотов с дозировками и
+        # временем (своё `ЧЧ:ММ` или время слота из напоминаний, §4.4).
+        slot_times = dict(medications_service.SLOT_DEFAULT_TIMES)
+        for reminder in reminders:
+            if reminder.type in slot_times and reminder.local_time is not None:
+                raw_time = reminder.local_time
+                slot_times[reminder.type] = (
+                    raw_time.strftime("%H:%M")
+                    if hasattr(raw_time, "strftime")
+                    else str(raw_time)
+                )
+        med_groups = [
+            _med_group_view(group, slot_times, texts.SLOT_LABELS)
+            for group in await medications_service.list_medication_groups(db, user)
+        ]
         csrf_token = csrf.issue()
         context = {
             "web_user": web_user,
@@ -1308,6 +1396,9 @@ def create_app(
             "daily": daily,
             "daily_max_days": DAILY_AVERAGES_MAX_DAYS,
             "medications": medications,
+            "med_groups": med_groups,
+            "med_slot_defaults": medications_service.SLOT_DEFAULT_TIMES,
+            "med_slot_times": slot_times,
             "reminders": {r.type: r for r in reminders},
             "slot_has_meds": {slot: any(m.slot == slot for m in medications) for slot in SLOT_ORDER},
             "mode_labels": texts.MODE_LABELS,
@@ -1337,6 +1428,7 @@ def create_app(
             "date_to": date_to,
             "start_day": start_day,
             "end_day": end_day,
+            "period_problem": period_problem,
             "error": error,
             "saved": saved,
             "csrf_token": csrf_token,
@@ -1520,14 +1612,15 @@ def create_app(
                 ).strftime("%d.%m.%Y %H:%M")
         if import_form:
             extra["show_import_form"] = True
-        medications = await medications_service.list_medications(db, user)
+        med_groups_all = await medications_service.list_medication_groups(db, user)
+        medications = [row for group in med_groups_all for row in group.rows]
         if edit_med.isdigit():
             extra["edit_medication"] = next(
-                (m for m in medications if m.id == int(edit_med)), None
+                (g for g in med_groups_all if g.id == int(edit_med)), None
             )
         if confirm_delete_med.isdigit():
             extra["confirm_delete_med"] = next(
-                (m for m in medications if m.id == int(confirm_delete_med)), None
+                (g for g in med_groups_all if g.id == int(confirm_delete_med)), None
             )
         for raw, key in (
             (edit_ap, "edit_ap_id"),
@@ -1707,19 +1800,29 @@ def create_app(
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
-        """Добавить лекарство: по строке на каждый выбранный слот."""
+        """Добавить лекарство: по строке на каждый выбранный слот (§4.4).
+
+        Слот несёт необязательное время приёма `ЧЧ:ММ` (R6): пустое —
+        «время слота из напоминаний».
+        """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
         name = str(form.get("name", "")).strip()
         dosage = str(form.get("dosage", "")).strip()
         slots = [slot for slot in medications_service.SLOTS if form.get(f"slot_{slot}")]
+        times = {
+            slot: str(form.get(f"time_{slot}", ""))
+            for slot in medications_service.SLOTS
+        }
         # Дозировка опциональна: пустая строка — «без дозировки» (§4.4).
         if not (1 <= len(name) <= 100) or len(dosage) > 50:
             return RedirectResponse(url="/?error=medication", status_code=303)
-        if not slots:
+        if not slots or any(
+            raw and medications_service.valid_hhmm(raw) is None for raw in times.values()
+        ):
             return RedirectResponse(url="/?error=medication", status_code=303)
-        await medications_service.add_medication(db, user, name, dosage, slots)
+        await medications_service.add_medication(db, user, name, dosage, slots, times=times)
         await db.commit()
         return RedirectResponse(url="/?saved=medication#medications", status_code=303)
 
@@ -1730,7 +1833,13 @@ def create_app(
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
-        """Отредактировать лекарство: название, дозировку и слот (проверка владельца)."""
+        """Изменить лекарство целиком: слоты группы с дозировками и временем (R5/R6).
+
+        `medication_id` — любой id строки группы (§6.6): правка действует на
+        всю группу `(user_id, name)`. Снятый чекбокс слота убирает приём;
+        дозировка и время `ЧЧ:ММ` — по слотам (пустое время — «время слота
+        из напоминаний»). Проверка владельца.
+        """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
@@ -1744,21 +1853,26 @@ def create_app(
         if medication is None:
             return RedirectResponse(url="/?error=medication#medications", status_code=303)
         name = str(form.get("name", "")).strip()
-        dosage = str(form.get("dosage", "")).strip()
-        slot = str(form.get("slot", ""))
-        # Дозировка опциональна: пустая строка — «без дозировки» (§4.4).
-        if (
-            not (1 <= len(name) <= 100)
-            or len(dosage) > 50
-            or slot not in medications_service.SLOTS
-        ):
+        slots = [slot for slot in medications_service.SLOTS if form.get(f"slot_{slot}")]
+        slot_values: dict[str, tuple[str, str]] = {}
+        for slot in slots:
+            slot_dosage = str(form.get(f"dosage_{slot}", "")).strip()
+            slot_time = str(form.get(f"time_{slot}", "")).strip()
+            if len(slot_dosage) > 50 or (
+                slot_time and medications_service.valid_hhmm(slot_time) is None
+            ):
+                return RedirectResponse(
+                    url="/?error=medication#medications", status_code=303
+                )
+            slot_values[slot] = (slot_dosage, slot_time)
+        if not (1 <= len(name) <= 100) or not slots:
             return RedirectResponse(url="/?error=medication#medications", status_code=303)
         try:
-            medication.name = name
-            medication.dosage = dosage
-            medication.slot = slot
+            await medications_service.update_medication(
+                db, user, medication.name, name, "", slots, slot_values=slot_values
+            )
             await db.flush()
-        except IntegrityError:
+        except (IntegrityError, MedicationNameConflictError):
             await db.rollback()
             return RedirectResponse(url="/?error=medication#medications", status_code=303)
         return RedirectResponse(url="/?saved=medication#medications", status_code=303)
@@ -1770,11 +1884,23 @@ def create_app(
         db: AsyncSession = Depends(get_db),
         web_user: WebUser = Depends(require_user),
     ) -> Response:
-        """Удалить лекарство (проверка владельца, логи — каскадом)."""
+        """Удалить лекарство целиком (R5): все слоты группы, логи — каскадом.
+
+        `medication_id` — любой id строки группы (§6.6); подтверждение в ЛК
+        перечисляет слоты: «удалятся все приёмы: …».
+        """
         form = await request.form()
         check_csrf(request, str(form.get("csrf_token", "")))
         user = await load_user(db, web_user)
-        await medications_service.delete_medication(db, user, medication_id)
+        medication = (
+            await db.execute(
+                select(Medication).where(
+                    Medication.id == medication_id, Medication.user_id == user.id
+                )
+            )
+        ).scalar_one_or_none()
+        if medication is not None:
+            await medications_service.delete_medication_group(db, user, medication.name)
         await db.commit()
         return RedirectResponse(url="/?saved=medication#medications", status_code=303)
 
@@ -2628,7 +2754,12 @@ def create_app(
     ) -> Response:
         """CSV измерений за период (UTF-8 с BOM; лимит — как в боте)."""
         user = await load_user(db, web_user)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        period, _problem = _resolve_period(user.timezone, days, date_from, date_to)
+        if period is None:
+            return RedirectResponse(
+                url=_period_url(days, date_from, date_to), status_code=303
+            )
+        start_day, end_day = period
         payload = await csv_export.export_measurements(
             db, user, start_day, end_day, limit=CSV_EXPORT_LIMIT
         )
@@ -2655,7 +2786,12 @@ def create_app(
     ) -> Response:
         """CSV приёмов лекарств за период (для приверженности у врача)."""
         user = await load_user(db, web_user)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        period, _problem = _resolve_period(user.timezone, days, date_from, date_to)
+        if period is None:
+            return RedirectResponse(
+                url=_period_url(days, date_from, date_to), status_code=303
+            )
+        start_day, end_day = period
         payload = await csv_export.export_medications(
             db, user, start_day, end_day, limit=CSV_EXPORT_LIMIT
         )
@@ -2687,7 +2823,12 @@ def create_app(
         `bp_events_<дата1>-<дата2>.csv`.
         """
         user = await load_user(db, web_user)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        period, _problem = _resolve_period(user.timezone, days, date_from, date_to)
+        if period is None:
+            return RedirectResponse(
+                url=_period_url(days, date_from, date_to), status_code=303
+            )
+        start_day, end_day = period
         payload = await csv_export.export_events(
             db, user, start_day, end_day, limit=CSV_EXPORT_LIMIT
         )
@@ -2714,7 +2855,12 @@ def create_app(
     ) -> Response:
         """PDF-отчёт пациента за период фильтра — только свои данные (§16.2, §10.1)."""
         user = await load_user(db, web_user)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        period, _problem = _resolve_period(user.timezone, days, date_from, date_to)
+        if period is None:
+            return RedirectResponse(
+                url=_period_url(days, date_from, date_to), status_code=303
+            )
+        start_day, end_day = period
         return await _pdf_report_response(
             db,
             user,
@@ -2992,7 +3138,7 @@ def create_app(
         показа как в ЛК.
         """
         user = await require_patient_link(db, doctor, user_id)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        start_day, end_day = _resolve_period_loose(user.timezone, days, date_from, date_to)
         measurements = await measurements_for_period(db, user, start_day, end_day)
         summary = await stats.summary(db, user, start_day, end_day)
         daily = _daily_averages(measurements, user.timezone, start_day, end_day)
@@ -3081,7 +3227,7 @@ def create_app(
     ) -> Response:
         """CSV измерений пациента за период (только `status='active'`, §21)."""
         user = await require_patient_link(db, doctor, user_id)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        start_day, end_day = _resolve_period_loose(user.timezone, days, date_from, date_to)
         payload = await csv_export.export_measurements(
             db, user, start_day, end_day, limit=CSV_EXPORT_LIMIT
         )
@@ -3110,7 +3256,7 @@ def create_app(
     ) -> Response:
         """PDF-отчёт по пациенту за период (только `status='active'`, §21, §10.1)."""
         user = await require_patient_link(db, doctor, user_id)
-        start_day, end_day = _resolve_period(user.timezone, days, date_from, date_to)
+        start_day, end_day = _resolve_period_loose(user.timezone, days, date_from, date_to)
         return await _pdf_report_response(
             db,
             user,
