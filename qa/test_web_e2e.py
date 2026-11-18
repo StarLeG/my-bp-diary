@@ -119,3 +119,100 @@ class TestWebE2E:
         page.click("form[action$='/note'] button[type='submit']")
         page.wait_for_selector(f"text={NOTE_TEXT}", timeout=15_000)
         shot("doctor_note_saved")
+
+
+# ─────────────── Находки веб-аудита (постоянные проверки) ───────────────
+
+
+class TestUserFindings:
+    """Находки веб-аудита 2026-11-18 (`doc/CABINET-WEB-AUDIT-2026-11-18.md`).
+
+    Правило «находки → в робота»: каждая исправленная находка — постоянная
+    проверка. F12 (A1) форма периода ведёт на `#summary` — экран не прыгает
+    вверх; F13 (A2) «С/По» скрыты при пресетах, «Свой период» открывает их
+    без сабмита; F14 (A3) «Свой период» без дат — подсказка «Выберите даты
+    «С» и «По»», не фолбэк на 7 дней; F15 (A4) клик по графику — модалка
+    `role="dialog"`, Esc закрывает; F16 (A5) один препарат — одна строка
+    с чипами слотов. A6 (приверженность) и A7 (умолчания времени слотов) —
+    в юнит-тестах `tests/test_services_medications.py` («лог и связь в один
+    слот», «не больше 100%») и `tests/test_web_reminders.py`.
+    """
+
+    def _open_dashboard(self, dialog, page, cabinet_url, ensure_onboarded, shot) -> None:
+        """Личный кабинет по magic link из бота — как в TestWebE2E (§22, п.4)."""
+        ensure_onboarded()
+        message = dialog.send("/cabinet")
+        if texts.CABINET_EMAIL_PROMPT in (message.text or ""):
+            dialog.send(f"qa-{int(time.time())}@example.org")
+            message = dialog.wait_screen(texts.CABINET_ACCOUNT_CREATED.format(url=""))
+        else:
+            assert texts.CABINET_LINK_SENT.format(url="") in (message.text or "")
+        page.goto(_extract_url(message))
+        assert "Сводка за период" in page.content()
+
+    def test_f12_period_form_keeps_position(
+        self, dialog, page, cabinet_url, ensure_onboarded, shot
+    ) -> None:
+        """F12 (A1): смена периода не перекидывает экран вверх."""
+        self._open_dashboard(dialog, page, cabinet_url, ensure_onboarded, shot)
+        form = page.locator("#period-form")
+        assert form.get_attribute("action") == "/#summary"
+        page.select_option('select[name="days"]', "30")
+        page.wait_for_load_state()
+        assert page.url.endswith("#summary"), f"нет якоря в URL: {page.url}"
+        shot("findings_f12_period_anchor")
+
+    def test_f13_date_fields_hidden_for_presets(
+        self, dialog, page, cabinet_url, ensure_onboarded, shot
+    ) -> None:
+        """F13 (A2): «С/По» скрыты при «7 дней»/«30 дней», у «Своего периода»
+        показываются сразу, без сабмита."""
+        self._open_dashboard(dialog, page, cabinet_url, ensure_onboarded, shot)
+        assert page.locator("#summary .period-dates.is-hidden").count() == 2
+        url_before = page.url
+        page.select_option('select[name="days"]', "custom")
+        assert page.locator("#summary .period-dates:not(.is-hidden)").count() == 2
+        assert page.url == url_before, "«Свой период» не должен сабмитить форму"
+        shot("findings_f13_custom_fields")
+
+    def test_f14_custom_without_dates_hints(
+        self, dialog, page, cabinet_url, ensure_onboarded, shot
+    ) -> None:
+        """F14 (A3): «Свой период» без дат — подсказка, а не окно за 7 дней."""
+        self._open_dashboard(dialog, page, cabinet_url, ensure_onboarded, shot)
+        page.select_option('select[name="days"]', "custom")
+        page.click("#period-form button[type=submit]")
+        page.wait_for_load_state()
+        content = page.content()
+        assert "Выберите даты «С» и «По»" in content
+        assert "Период: " not in content
+        shot("findings_f14_empty_state")
+
+    def test_f15_chart_zoom_modal(
+        self, dialog, page, db, tg_me, cabinet_url, ensure_onboarded, shot
+    ) -> None:
+        """F15 (A4): клик по графику — модалка `role="dialog"`, Esc закрывает."""
+        if db.measurement_count(tg_me.id) == 0:
+            db.add_measurement(tg_me.id, 130, 85, 70)  # данные для графика
+        self._open_dashboard(dialog, page, cabinet_url, ensure_onboarded, shot)
+        page.locator(".chart-panel--zoom").first.click()
+        modal = page.locator("#bp-chart-modal")
+        assert modal.is_visible(), "модалка графиков не открылась"
+        assert modal.get_attribute("role") == "dialog"
+        assert modal.get_attribute("aria-modal") == "true"
+        shot("findings_f15_chart_modal")
+        page.keyboard.press("Escape")
+        assert modal.is_hidden(), "Esc не закрыл модалку"
+
+    def test_f16_medications_grouped_by_name(
+        self, dialog, page, db, tg_me, cabinet_url, ensure_onboarded, shot
+    ) -> None:
+        """F16 (A5): один препарат в двух слотах — одна строка с чипами."""
+        db.add_medication(tg_me.id, "Глицин", "500 мг", "morning")
+        db.add_medication(tg_me.id, "Глицин", "500 мг", "evening")
+        self._open_dashboard(dialog, page, cabinet_url, ensure_onboarded, shot)
+        row = page.locator("#medications tbody tr", has_text="Глицин")
+        assert row.count() == 1, "препарат в двух слотах должен быть одной строкой"
+        text = row.inner_text()
+        assert "Утро" in text and "Вечер" in text, f"нет чипов слотов: {text}"
+        shot("findings_f16_meds_grouped")
