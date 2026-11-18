@@ -19,14 +19,35 @@
 """
 from __future__ import annotations
 
+import logging
 import time
-from typing import Any, Awaitable, Callable
+from typing import Any, Awaitable, Callable, Optional
 
 from aiogram import BaseMiddleware
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Message, TelegramObject
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from bot import texts
+
+logger = logging.getLogger(__name__)
+
+
+async def _safe_answer(event: CallbackQuery, text: Optional[str] = None) -> None:
+    """Ответить на callback, не роняя диспетчер на устаревшем запросе.
+
+    Ответ на callback живёт ~30 с: при запоздавшей обработке Telegram
+    отклоняет его («query is too old») — это не ошибка сценария, а
+    особенность протокола (найдено 2026-11-18: «бот в телефоне не
+    отвечает»). Текст — по подсказке; без текста — только снять «часики».
+    """
+    try:
+        if text:
+            await event.answer(text)
+        else:
+            await event.answer()
+    except TelegramBadRequest:
+        logger.debug("Ответ на callback не принят (запрос устарел)")
 
 #: Окно debounce для кнопок флоу записи давления (секунды).
 DEBOUNCE_SECONDS = 1.5
@@ -156,7 +177,7 @@ class DebounceMiddleware(BaseMiddleware):
         now = self._clock()
         last = self._last_seen.get(key)
         if last is not None and now - last < self._seconds:
-            await event.answer(texts.DEBOUNCE_NOTICE)
+            await _safe_answer(event, texts.DEBOUNCE_NOTICE)
             return None
         self._last_seen[key] = now
         if now - self._last_cleanup >= CLEANUP_INTERVAL:
@@ -166,7 +187,12 @@ class DebounceMiddleware(BaseMiddleware):
 
 
 class ThrottleMiddleware(BaseMiddleware):
-    """Общий throttle: не более одного действия в секунду на callback'и (§7.2)."""
+    """Общий throttle: не более одного действия в секунду на callback'и (§7.2).
+
+    Превысившему лимит — видимая подсказка «Слишком часто…», не тишина:
+    молчаливо съеденный тап на телефоне выглядит как «бот не отвечает»
+    (найдено 2026-11-18).
+    """
 
     def __init__(
         self,
@@ -190,7 +216,7 @@ class ThrottleMiddleware(BaseMiddleware):
         now = self._clock()
         last = self._last_seen.get(event.from_user.id)
         if last is not None and now - last < self._seconds:
-            await event.answer()  # снять «часики», без текста
+            await _safe_answer(event, texts.THROTTLE_NOTICE)  # «часики» + подсказка
             return None
         self._last_seen[event.from_user.id] = now
         if now - self._last_cleanup >= CLEANUP_INTERVAL:

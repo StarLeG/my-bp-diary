@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from unittest.mock import AsyncMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery, Chat, Message, User
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -48,6 +49,14 @@ def make_message() -> Message:
         message_id=1,
         date=datetime.now(timezone.utc),
         chat=Chat(id=1, type="private"),
+    )
+
+
+def _expired_query() -> TelegramBadRequest:
+    """Ответ на callback, который Telegram уже не примет (~30 с)."""
+    return TelegramBadRequest(
+        method="answerCallbackQuery",
+        message="Bad Request: query is too old and response timeout expired or query ID is invalid",
     )
 
 
@@ -220,6 +229,15 @@ class TestDebounceMiddleware:
         await middleware(handler, make_callback("m:med:no", user_id=3), {})
         assert list(middleware._last_seen) == [(3, "m:med:no")]
 
+    async def test_expired_query_answer_swallowed(self, answer_mock) -> None:
+        """Устаревший callback-запрос при ответе не роняет диспетчер (2026-11-18)."""
+        answer_mock.side_effect = _expired_query()
+        handler = AsyncMock(return_value="ok")
+        middleware = DebounceMiddleware(clock=FakeClock())
+        await middleware(handler, make_callback("m:med:yes"), {})
+        assert await middleware(handler, make_callback("m:med:yes"), {}) is None
+        assert handler.await_count == 1  # тап съеден, но исключения нет
+
     async def test_fresh_entries_survive_cleanup(self, answer_mock) -> None:
         """Чистка не трогает записи внутри окна — подавление повтора не ломается."""
         handler = AsyncMock(return_value="ok")
@@ -246,14 +264,15 @@ class TestThrottleMiddleware:
         handler.assert_awaited_once()
         answer_mock.assert_not_awaited()
 
-    async def test_rapid_tap_blocked_silently(self, answer_mock) -> None:
+    async def test_rapid_tap_blocked_with_notice(self, answer_mock) -> None:
+        """Превысившему лимит — видимая подсказка, не тишина (2026-11-18)."""
         handler = AsyncMock(return_value="ok")
         middleware = ThrottleMiddleware(clock=FakeClock())
         await middleware(handler, make_callback("menu:stats"), {})
         second = await middleware(handler, make_callback("menu:diary"), {})
         assert second is None
         handler.assert_awaited_once()
-        answer_mock.assert_awaited_once_with()  # без текста — только снять «часики»
+        answer_mock.assert_awaited_once_with(texts.THROTTLE_NOTICE)
 
     async def test_passes_after_window(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
@@ -279,6 +298,15 @@ class TestThrottleMiddleware:
         await middleware(handler, make_callback("menu:stats", user_id=1), {})
         assert await middleware(handler, make_callback("menu:stats", user_id=2), {}) == "ok"
         assert handler.await_count == 2
+
+    async def test_expired_query_answer_swallowed(self, answer_mock) -> None:
+        """Устаревший callback-запрос при ответе не роняет диспетчер (2026-11-18)."""
+        answer_mock.side_effect = _expired_query()
+        handler = AsyncMock(return_value="ok")
+        middleware = ThrottleMiddleware(clock=FakeClock())
+        await middleware(handler, make_callback("menu:stats"), {})
+        assert await middleware(handler, make_callback("menu:diary"), {}) is None
+        assert handler.await_count == 1  # тап съеден, но исключения нет
 
     async def test_message_passes(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")

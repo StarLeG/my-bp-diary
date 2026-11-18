@@ -9,6 +9,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import ErrorEvent, Update
 from sqlalchemy.exc import OperationalError
 
@@ -69,6 +70,29 @@ class TestOnError:
         event.update.callback_query.answer.assert_awaited_once_with(
             texts.ERROR_GENERIC, show_alert=True
         )
+
+    async def test_expired_callback_answer_falls_back_to_message(self) -> None:
+        """Алерт доставить нельзя (запрос устарел) — сбой сообщением (2026-11-18).
+
+        Ответ на callback живёт ~30 с: без фолбэка пользователь не получал
+        ничего (находка «бот в телефоне не отвечает»).
+        """
+        event = make_event(ValueError("сбой"), with_message=False)
+        event.update.callback_query.answer = AsyncMock(
+            side_effect=TelegramBadRequest(
+                method="answerCallbackQuery",
+                message="Bad Request: query is too old and response timeout expired"
+                " or query ID is invalid",
+            )
+        )
+        event.update.callback_query.message = MagicMock()
+        event.update.callback_query.message.answer = AsyncMock()
+        await on_error(event)
+        message_answer = event.update.callback_query.message.answer
+        message_answer.assert_awaited_once()
+        assert message_answer.await_args.args[0] == texts.ERROR_GENERIC
+        markup = message_answer.await_args.kwargs["reply_markup"]
+        assert "menu:back" in repr(markup)  # кнопка «В меню», как у ответа на сообщение
 
     async def test_reply_failure_does_not_raise(self) -> None:
         """Сбой ответа об ошибке не должен ронять диспетчер (§12)."""

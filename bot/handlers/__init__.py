@@ -8,6 +8,7 @@ from __future__ import annotations
 import logging
 
 from aiogram import Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.fsm.context import FSMContext
 from aiogram.types import CallbackQuery, ErrorEvent, Message
 from sqlalchemy.exc import SQLAlchemyError
@@ -92,7 +93,8 @@ async def on_error(event: ErrorEvent) -> bool:
     locked» после ретраев) → «⚙️ Бот временно недоступен…»; прочие ошибки —
     «Что-то пошло не так…». Пользователю — только текст без деталей, полная
     ошибка уходит в лог. Ответ: сообщением («В меню») или, от callback'а, —
-    предупреждением (`show_alert`), без нового сообщения (§6.2). Регистрируется
+    предупреждением (`show_alert`), без нового сообщения (§6.2); если алерт
+    доставить нельзя (запрос устарел) — сообщением (2026-11-18). Регистрируется
     в `bot/main.py` (`dp.errors.register`).
     """
     logger.error("Ошибка обработки апдейта: %r", event.exception, exc_info=event.exception)
@@ -107,7 +109,14 @@ async def on_error(event: ErrorEvent) -> bool:
                 text, reply_markup=keyboards.back_to_menu()
             )
         elif event.update.callback_query is not None:
-            await event.update.callback_query.answer(text, show_alert=True)
+            try:
+                await event.update.callback_query.answer(text, show_alert=True)
+            except TelegramBadRequest:
+                # Ответ на callback живёт ~30 с: алерт не доставить —
+                # единственный способ донести сбой — сообщение (2026-11-18).
+                message = event.update.callback_query.message
+                if message is not None:
+                    await message.answer(text, reply_markup=keyboards.back_to_menu())
     except Exception:  # noqa: BLE001 — ответ об ошибке не должен ронять диспетчер
         logger.warning("Не удалось ответить пользователю об ошибке", exc_info=True)
     return True  # ошибка обработана
