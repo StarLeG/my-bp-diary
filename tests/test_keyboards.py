@@ -538,8 +538,16 @@ class TestPdfKeyboards:
         assert buttons["set:pdf"] == texts.BTN_EXPORT_PDF
 
     def test_pdf_period_buttons(self) -> None:
+        """7 / 30 / всё время / 📆 Свой период (R1, 2026-11-18) + «Назад»."""
         data = [b.callback_data for b in callback_buttons(keyboards.pdf_period_kb())]
-        assert data == ["pdf:7", "pdf:30", "pdf:all", "menu:back"]
+        assert data == ["pdf:7", "pdf:30", "pdf:all", "pdf:custom", "menu:back"]
+
+    def test_export_retry_kb(self) -> None:
+        """Ошибка выгрузки своего периода (R3/R4): «Изменить период» / «Назад»."""
+        for area in ("pdf", "csv"):
+            buttons = callback_buttons(keyboards.export_retry_kb(area))
+            assert [b.callback_data for b in buttons] == [f"{area}:custom", f"stats:{area}"]
+            assert [b.text for b in buttons] == [texts.BTN_CHANGE_PERIOD, texts.BTN_BACK]
 
 
 class TestSettingsKeyboards:

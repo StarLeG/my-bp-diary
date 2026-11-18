@@ -9,18 +9,26 @@ Telegram) — оно удаляется и отправляется фото; к
 и показывают свой экран новым текстовым сообщением (§6.5). «📅 По дням» — список
 средних по дням с измерениями и итог «Среднее за день» (`stats.daily_averages`).
 «Экспорт CSV» → период
-(7 / 30 / всё время) → два файла документами: измерения и приёмы лекарств
-(`csv_export`, лимит «всё время» — 5000 записей). Сообщение выбора периода
-редактируется, файлы отправляются новыми сообщениями.
+(7 / 30 / всё время / «📆 Свой период») → три файла документами: измерения,
+приёмы лекарств и события (`csv_export`, лимит «всё время» — 5000 записей).
+Сообщение выбора периода редактируется, файлы отправляются новыми сообщениями.
 
-«Экспорт PDF» → период (7 / 30 / всё время) → один PDF-отчёт (`pdf_report`):
-на время генерации сообщение выбора периода становится «Готовлю отчёт…»,
+«Экспорт PDF» → период (7 / 30 / всё время / «📆 Свой период») → один
+PDF-отчёт (`pdf_report`): на время генерации сообщение выбора периода
+становится «Готовлю отчёт за ДД.ММ–ДД.ММ…» (для датированных периодов),
 после отправки файла — снова экраном выбора периода. Пока отчёт пользователя
 готовится, повторные нажатия `pdf:*` новую выгрузку не запускают (§7.2).
+
+Свой период в выгрузках (2026-11-18, `doc/EXPORT-PERIOD-QUESTIONS.md`,
+R1–R4) — тот же календарь §6.5, но без лимита длины (только 5000 записей);
+после выбора дат — сразу генерация, ошибки — «📆 Изменить период» / «Назад».
+Календарь параметризуется сценарием (`CalendarTarget`): область callback'ов,
+лимит длины и действие по выбранным датам.
 """
 from __future__ import annotations
 
 import asyncio
+from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from typing import Optional
 from zoneinfo import ZoneInfo
@@ -282,18 +290,47 @@ def _parse_month(value: str) -> Optional[tuple[int, int]]:
 
 
 def _check_period(
-    first: date, last: date, today: date
+    first: date, last: date, today: date, max_days: Optional[int] = MAX_CUSTOM_DAYS
 ) -> tuple[Optional[tuple[date, date]], Optional[str]]:
     """Проверки своего периода (§6.5): (период, None) или (None, текст ошибки).
 
-    Обратный порядок дат — меняются местами; будущее и > 31 дня — ошибка.
+    Обратный порядок дат — меняются местами; будущее и длина сверх `max_days` —
+    ошибка. `max_days=None` — лимита длины нет (выгрузки, R3).
     """
     if first > today or last > today:
         return None, texts.STATS_CAL_FUTURE
     start, end = min(first, last), max(first, last)
-    if (end - start).days + 1 > MAX_CUSTOM_DAYS:
+    if max_days is not None and (end - start).days + 1 > max_days:
         return None, texts.STATS_CAL_TOO_LONG
     return (start, end), None
+
+
+@dataclass(frozen=True)
+class CalendarTarget:
+    """Сценарий календаря своего периода (§6.5, 2026-11-18, R2).
+
+    `area` — область callback'ов (`stats` / `pdf` / `csv`), `max_days` — лимит
+    длины периода (`None` — без ограничения, выгрузки — R3), `back` — callback
+    кнопки «Назад» (экран «За какой период» своего сценария).
+    """
+
+    area: str
+    max_days: Optional[int]
+    back: str
+
+
+#: Сценарии календаря: статистика и выгрузки (R1–R4).
+TARGETS: dict[str, CalendarTarget] = {
+    "stats": CalendarTarget("stats", MAX_CUSTOM_DAYS, "stats:periods"),
+    "pdf": CalendarTarget("pdf", None, "stats:pdf"),
+    "csv": CalendarTarget("csv", None, "stats:csv"),
+}
+
+
+def _target_of(data: Optional[str]) -> Optional[CalendarTarget]:
+    """Сценарий по префиксу callback_data (`pdf:day:…` → «pdf»); мусор — None."""
+    area = (data or "").split(":", 1)[0]
+    return TARGETS.get(area)
 
 
 def _parse_period(value: str, today: date) -> Optional[tuple[date, date]]:
@@ -312,9 +349,20 @@ def _period_key(start_day: date, end_day: date) -> str:
     return f"{start_day:%Y%m%d}:{end_day:%Y%m%d}"
 
 
-async def _broken(callback: CallbackQuery, *, large: bool = False) -> None:
-    """Битая или устаревшая callback_data — экран выбора периода (§6.5)."""
-    text, markup = _periods_screen(large)
+async def _broken(
+    callback: CallbackQuery, target: Optional[CalendarTarget] = None, *, large: bool = False
+) -> None:
+    """Битая или устаревшая callback_data — экран «За какой период» сценария (§6.5).
+
+    Без `target` — экран статистики (как прежде).
+    """
+    target = target or TARGETS["stats"]
+    if target.area == "stats":
+        text, markup = _periods_screen(large)
+    elif target.area == "pdf":
+        text, markup = texts.CSV_ASK, keyboards.pdf_period_kb()
+    else:
+        text, markup = texts.CSV_ASK, keyboards.csv_period_kb()
     await _show(callback, text, markup)  # type: ignore[arg-type]
     await callback.answer()
 
@@ -328,12 +376,15 @@ async def _show_calendar(
     *,
     large: bool = False,
     week_start: Optional[date] = None,
+    target: Optional[CalendarTarget] = None,
 ) -> None:
     """Экран календаря: обычный — сетка месяца, крупный — список недели (UI12).
 
     `week_start` — понедельник показываемой недели (крупный режим, UI12);
-    без него неделя выводится из `month` в `stats_calendar_kb`.
+    без него неделя выводится из `month` в `stats_calendar_kb`. `target` —
+    сценарий (область callback'ов и «Назад»); без него — статистика (§6.5).
     """
+    target = target or TARGETS["stats"]
     text = (
         texts.STATS_CAL_LAST.format(date=start.strftime("%d.%m"))
         if start is not None
@@ -342,28 +393,32 @@ async def _show_calendar(
     await _show(
         callback,
         text,
-        keyboards.stats_calendar_kb(year, month, today, start, large, week_start),
+        keyboards.stats_calendar_kb(
+            year, month, today, start, large, week_start,
+            area=target.area, back=target.back,
+        ),
     )
     await callback.answer()
 
 
-@router.callback_query(F.data == "stats:noop")
+@router.callback_query(F.data.in_({"stats:noop", "pdf:noop", "csv:noop"}))
 async def cb_stats_noop(callback: CallbackQuery) -> None:
-    """Заглушки календаря (месяц, дни недели, пустые клетки)."""
+    """Заглушки календаря (месяц, дни недели, пустые клетки) всех областей (§6.5)."""
     await callback.answer()
 
 
-@router.callback_query((F.data == "stats:cal") | F.data.startswith("stats:cal:"))
-async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> None:
-    """«📆 Свой период» и листание: `stats:cal[:m:{ГГГГММ}[:{с}]|w:{пн}[:{с}]]` (UI12, UI19).
+async def _handle_calendar(callback: CallbackQuery, session: AsyncSession) -> None:
+    """«📆 Свой период» и листание: `{area}:cal[:m:{ГГГГММ}[:{с}]|w:{пн}[:{с}]]`.
 
     Обычный режим — сетка месяца `:cal:m:`, крупный — список недели `:cal:w:`
     (пн — понедельник недели, `с` — выбранный первый день шага 2). Прежние
-    `stats:cal:{ГГГГММ}[:{с}]` принимаются как `:m:`-вариант (UI19).
+    `stats:cal:{ГГГГММ}[:{с}]` принимаются как `:m:`-вариант (UI19). Сценарий
+    (лимит длины, «Назад», действие по датам) — из области callback'ов (R2).
     """
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     today = _today(user)
     large = user.ui_large
+    target = _target_of(callback.data) or TARGETS["stats"]
     raw = (callback.data or "").split(":")[2:]
     kind = raw[0] if raw and raw[0] in ("m", "w") else "m"
     rest = raw[1:] if raw and raw[0] in ("m", "w") else raw
@@ -371,14 +426,15 @@ async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> N
         # «Свой период»: обычный — текущий месяц, крупный — неделя сегодняшнего (UI12).
         week_start = today - timedelta(days=today.weekday()) if large else None
         await _show_calendar(
-            callback, today.year, today.month, today, None, large=large, week_start=week_start
+            callback, today.year, today.month, today, None,
+            large=large, week_start=week_start, target=target,
         )
         return
     if kind == "w":
         week_start = _parse_day(rest[0]) if len(rest) in (1, 2) else None
         start = _parse_day(rest[1]) if len(rest) == 2 else None
         if week_start is None or (len(rest) == 2 and (start is None or start > today)):
-            await _broken(callback, large=user.ui_large)
+            await _broken(callback, target, large=user.ui_large)
             return
         await _show_calendar(
             callback,
@@ -388,6 +444,7 @@ async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> N
             start,
             large=large,
             week_start=week_start,
+            target=target,
         )
         return
     month = _parse_month(rest[0]) if len(rest) in (1, 2) else None
@@ -397,23 +454,59 @@ async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> N
         or month > (today.year, today.month)
         or (len(rest) == 2 and (start is None or start > today))
     ):
-        await _broken(callback, large=user.ui_large)
+        await _broken(callback, target, large=user.ui_large)
         return
-    await _show_calendar(callback, month[0], month[1], today, start, large=large)
+    await _show_calendar(callback, month[0], month[1], today, start, large=large, target=target)
 
 
-@router.callback_query(F.data.startswith("stats:day:"))
-async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Выбор дня: `stats:day:{д}` — первый, `stats:day:{с}:{д}` — последний (§6.5).
+@router.callback_query((F.data == "stats:cal") | F.data.startswith("stats:cal:"))
+async def cb_stats_calendar(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Календарь статистики: `stats:cal[:m:{ГГГГММ}[:{с}]|w:{пн}[:{с}]]` (UI12, UI19)."""
+    await _handle_calendar(callback, session)
+
+
+@router.callback_query(
+    F.data.in_({"pdf:custom", "csv:custom", "pdf:cal", "csv:cal"})
+    | F.data.startswith(("pdf:cal:", "csv:cal:"))
+)
+async def cb_export_calendar(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Календарь выгрузок (2026-11-18, R1/R2): `pdf:custom` / `csv:custom` и листание.
+
+    Вход «📆 Свой период» в вопросе периода выгрузки — тот же календарь §6.5,
+    но своей области: без лимита длины (R3), «Назад» — на вопрос периода.
+    """
+    await _handle_calendar(callback, session)
+
+
+async def _finish_period(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    target: CalendarTarget,
+    start: date,
+    end: date,
+) -> None:
+    """Период выбран: сводка или выгрузка — «куда вернуться с датами» (R2/R4)."""
+    if target.area == "pdf":
+        await _export_pdf(callback, session, user, start, end, custom=True)
+    elif target.area == "csv":
+        await _export_csv(callback, session, user, start, end, custom=True)
+    else:
+        await _send_summary(callback, session, user, start, end, custom=True)
+
+
+async def _handle_day(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выбор дня: `{area}:day:{д}` — первый, `{area}:day:{с}:{д}` — последний (§6.5).
 
     Ошибки проверки — всплывающим уведомлением, календарь остаётся на месте.
     """
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     today = _today(user)
+    target = _target_of(callback.data) or TARGETS["stats"]
     parts = (callback.data or "").split(":")[2:]
     picked = [_parse_day(part) for part in parts]
     if not 1 <= len(picked) <= 2 or any(day is None for day in picked):
-        await _broken(callback, large=user.ui_large)
+        await _broken(callback, target, large=user.ui_large)
         return
     if len(picked) == 1:
         first = picked[0]
@@ -431,15 +524,32 @@ async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
             first,
             large=user.ui_large,
             week_start=week_start,
+            target=target,
         )
         return
     first, last = picked
     assert first is not None and last is not None  # noqa: S101 — проверено выше
-    period, error = _check_period(first, last, today)
+    period, error = _check_period(first, last, today, target.max_days)
     if period is None:
         await callback.answer(error)
         return
-    await _send_summary(callback, session, user, period[0], period[1], custom=True)
+    await _finish_period(callback, session, user, target, period[0], period[1])
+
+
+@router.callback_query(F.data.startswith("stats:day:"))
+async def cb_stats_day(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выбор дня статистики: `stats:day:{д}` / `stats:day:{с}:{д}` (§6.5)."""
+    await _handle_day(callback, session)
+
+
+@router.callback_query(F.data.startswith(("pdf:day:", "csv:day:")))
+async def cb_export_day(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выбор дня выгрузки (R1/R2): `pdf:day:…` / `csv:day:…` → выгрузка за период.
+
+    Лимита длины нет (R3): годовой период берётся, проверяется только будущее
+    и лимит 5000 записей (§10, §10.1).
+    """
+    await _handle_day(callback, session)
 
 
 @router.callback_query(F.data.startswith("stats:days:"))
@@ -553,29 +663,63 @@ async def _all_time_range(
     return row[0].astimezone(tz).date(), row[1].astimezone(tz).date()
 
 
-@router.callback_query(F.data.in_({"csv:7", "csv:30", "csv:all"}))
-async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
-    """Выгрузка: три CSV документами (измерения, приёмы, события — §10)."""
-    period = callback.data.split(":", 1)[1]  # type: ignore[union-attr]
-    tg_id = callback.from_user.id
-    user = await measurements_service.get_or_create_user(session, tg_id)
+def _csv_is_empty(payload: bytes, kind: str, tz_name: str) -> bool:
+    """CSV без строк данных — только шапка (пустой период, §10, R4).
+
+    Сверка с пустым рендером того же вида: точнее, чем считать строки, —
+    поля с переводами строк разрывают подсчёт.
+    """
+    builder = {
+        CSV_KIND_MEASUREMENTS: csv_export.build_measurements_csv,
+        CSV_KIND_MEDS: csv_export.build_meds_csv,
+        CSV_KIND_EVENTS: csv_export.build_events_csv,
+    }[kind]
+    return payload == builder([], tz_name)
+
+
+async def _export_csv(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    start: Optional[date],
+    end: Optional[date],
+    *,
+    custom: bool,
+) -> None:
+    """Выгрузка: три CSV документами (измерения, приёмы, события — §10).
+
+    `start=None` — «всё время» (лимит 5000). `custom` — свой период (R3/R4):
+    ошибки лимита и пустого периода — «📆 Изменить период» / «Назад» вместо
+    обрыва сценария; пустой период — сообщение, файлы не отправляются.
+    """
+    retry = keyboards.export_retry_kb("csv") if custom else keyboards.csv_period_kb()
     today = datetime.now(ZoneInfo(user.timezone)).date()
-    if period == "all":
-        start: Optional[date] = None
-        end: Optional[date] = None
+    if start is None or end is None:
         limit: Optional[int] = csv_export.ALL_TIME_LIMIT
         range_start, range_end = await _all_time_range(session, user, today)
     else:
-        days = int(period)
-        range_start = today - timedelta(days=days - 1)
-        range_end = today
-        start, end, limit = range_start, range_end, None
+        # Свой период ограничен только лимитом 5000 записей (R3); 7/30 — как прежде.
+        limit = csv_export.ALL_TIME_LIMIT if custom else None
+        range_start, range_end = start, end
     content = await csv_export.export_measurements(session, user, start, end, limit=limit)
     meds = await csv_export.export_medications(session, user, start, end, limit=limit)
     events = await csv_export.export_events(session, user, start, end, limit=limit)
     if content is None or meds is None or events is None:
         await callback.message.edit_text(  # type: ignore[union-attr]
-            texts.CSV_TOO_MANY, reply_markup=keyboards.csv_period_kb()
+            texts.CSV_TOO_MANY, reply_markup=retry
+        )
+        await callback.answer()
+        return
+    if all(
+        _csv_is_empty(payload, kind, user.timezone)
+        for kind, payload in (
+            (CSV_KIND_MEASUREMENTS, content),
+            (CSV_KIND_MEDS, meds),
+            (CSV_KIND_EVENTS, events),
+        )
+    ):
+        await callback.message.edit_text(  # type: ignore[union-attr]
+            texts.PDF_EMPTY, reply_markup=retry
         )
         await callback.answer()
         return
@@ -600,6 +744,20 @@ async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
     await callback.answer()
 
 
+@router.callback_query(F.data.in_({"csv:7", "csv:30", "csv:all"}))
+async def cb_csv_export(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выгрузка CSV за фиксированный период (§10)."""
+    period = callback.data.split(":", 1)[1]  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    today = datetime.now(ZoneInfo(user.timezone)).date()
+    start: Optional[date] = None
+    end: Optional[date] = None
+    if period != "all":
+        end = today
+        start = today - timedelta(days=int(period) - 1)
+    await _export_csv(callback, session, user, start, end, custom=False)
+
+
 # ─────────────────────────── Экспорт PDF ───────────────────────────
 
 #: Пользователи, чей PDF-отчёт сейчас готовится: двойное нажатие — одна выгрузка.
@@ -613,13 +771,22 @@ async def cb_pdf_menu(callback: CallbackQuery) -> None:
     await callback.answer()
 
 
-@router.callback_query(F.data.in_({"pdf:7", "pdf:30", "pdf:all"}))
-async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
+async def _export_pdf(
+    callback: CallbackQuery,
+    session: AsyncSession,
+    user: User,
+    start: Optional[date],
+    end: Optional[date],
+    *,
+    custom: bool,
+) -> None:
     """Выгрузка PDF-отчёта документом (§10.1).
 
-    Данные читаются и транзакция закрывается до генерации и отправки файла;
-    PDF рисуется в thread pool (§7.2 п.7). Пустой период и лимит — текст
-    вместо файла на том же экране выбора периода.
+    `start=None` — «всё время». Данные читаются и транзакция закрывается до
+    генерации и отправки файла; PDF рисуется в thread pool (§7.2 п.7). Пустой
+    период и лимит — текст вместо файла; `custom` — свой период (R3/R4): на
+    время генерации «Готовлю отчёт за ДД.ММ–ДД.ММ…», ошибки — «📆 Изменить
+    период» / «Назад».
     """
     tg_id = callback.from_user.id
     if tg_id in _pdf_in_progress:
@@ -628,14 +795,13 @@ async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
     _pdf_in_progress.add(tg_id)
     try:
         await callback.answer()
-        await callback.message.edit_text(texts.PDF_PREPARING)  # type: ignore[union-attr]
-        period = callback.data.split(":", 1)[1]  # type: ignore[union-attr]
-        user = await measurements_service.get_or_create_user(session, tg_id)
-        start: Optional[date] = None
-        end: Optional[date] = None
-        if period != "all":
-            end = datetime.now(ZoneInfo(user.timezone)).date()
-            start = end - timedelta(days=int(period) - 1)
+        if start is not None and end is not None:
+            preparing = texts.PDF_PREPARING_PERIOD.format(
+                date_from=f"{start:%d.%m}", date_to=f"{end:%d.%m}"
+            )
+        else:
+            preparing = texts.PDF_PREPARING
+        await callback.message.edit_text(preparing)  # type: ignore[union-attr]
         problem: Optional[str] = None
         try:
             data = await pdf_report.collect_report(
@@ -651,7 +817,10 @@ async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
         await session.commit()  # транзакция закрыта до генерации и отправки
         if problem is not None:
             await callback.message.edit_text(  # type: ignore[union-attr]
-                problem, reply_markup=keyboards.pdf_period_kb()
+                problem,
+                reply_markup=(
+                    keyboards.export_retry_kb("pdf") if custom else keyboards.pdf_period_kb()
+                ),
             )
             return
         payload = await asyncio.to_thread(pdf_report.build_pdf, data)
@@ -666,3 +835,16 @@ async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
         )
     finally:
         _pdf_in_progress.discard(tg_id)
+
+
+@router.callback_query(F.data.in_({"pdf:7", "pdf:30", "pdf:all"}))
+async def cb_pdf_export(callback: CallbackQuery, session: AsyncSession) -> None:
+    """Выгрузка PDF-отчёта за фиксированный период (§10.1)."""
+    period = callback.data.split(":", 1)[1]  # type: ignore[union-attr]
+    user = await measurements_service.get_or_create_user(session, callback.from_user.id)
+    start: Optional[date] = None
+    end: Optional[date] = None
+    if period != "all":
+        end = datetime.now(ZoneInfo(user.timezone)).date()
+        start = end - timedelta(days=int(period) - 1)
+    await _export_pdf(callback, session, user, start, end, custom=False)

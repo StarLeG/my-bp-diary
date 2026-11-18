@@ -304,14 +304,14 @@ class TestCsv:
         )
 
     async def test_export_all_time_empty(
-        self, session, user, doc, cb_answer
+        self, session, user, edit, doc, cb_answer
     ) -> None:
-        today = today_of(user)
+        """Пустой период (R4, 2026-11-18): файлы не отправляются — сообщение
+        «За этот период записей нет» с выбором другого периода."""
         await stats.cb_csv_export(make_callback("csv:all", make_message()), session)
-        assert doc.await_count == 3
-        assert doc.await_args_list[0].args[0].filename == (
-            f"bp_diary_{today:%Y%m%d}-{today:%Y%m%d}.csv"
-        )
+        doc.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.PDF_EMPTY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.csv_period_kb()
 
     async def test_export_too_many(
         self, session, user, edit, doc, cb_answer, mocker
@@ -930,3 +930,79 @@ class TestDaysPagination:
         assert texts.BTN_SHOW_MORE.format(count=1) in labels
         assert f"stats:days:{key}:7" in callbacks
         assert f"stats:c:{key}" in callbacks  # «Назад» — к сводке своего периода
+
+
+# ─────────── Свой период выгрузок (2026-11-18, EXPORT-PERIOD R1–R4) ───────────
+
+
+class TestExportCustomPeriod:
+    """Календарь выгрузок: общий сценарий, своя область callback'ов (R1/R2)."""
+
+    @pytest.mark.parametrize(("entry", "area"), [("pdf:custom", "pdf"), ("csv:custom", "csv")])
+    async def test_entry_opens_area_calendar(
+        self, session, user, edit, cb_answer, entry, area
+    ) -> None:
+        """`pdf:custom` / `csv:custom` — календарь области: дни `{area}:day:…`,
+        «Назад» — на вопрос периода выгрузки (`stats:{area}`)."""
+        today = today_of(user)
+        await stats.cb_export_calendar(make_callback(entry, make_message()), session)
+        assert edit.call_args.args[0] == texts.STATS_CAL_FIRST
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.stats_calendar_kb(
+            today.year, today.month, today, area=area, back=f"stats:{area}"
+        )
+
+    async def test_csv_day_exports_three_files(
+        self, session, user, doc, cb_answer
+    ) -> None:
+        """Выбор дат → сразу три CSV-файла (R4), лимита длины нет (R3)."""
+        await add_row(session, user)
+        today = today_of(user)
+        start = today - timedelta(days=45)  # дольше 31 дня — берётся
+        await stats.cb_export_day(
+            make_callback(f"csv:day:{ymd(start)}:{ymd(today)}", make_message()), session
+        )
+        assert doc.await_count == 3
+        assert doc.await_args_list[0].args[0].filename == (
+            f"bp_diary_{start:%Y%m%d}-{today:%Y%m%d}.csv"
+        )
+
+    async def test_csv_empty_uses_retry_kb(
+        self, session, user, edit, doc, cb_answer
+    ) -> None:
+        """Пустой период (R4): сообщение + «Изменить период» / «Назад», без файлов."""
+        today = today_of(user)
+        await stats.cb_export_day(
+            make_callback(f"csv:day:{ymd(today)}:{ymd(today)}", make_message()), session
+        )
+        doc.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.PDF_EMPTY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.export_retry_kb("csv")
+
+    async def test_csv_custom_too_many_uses_retry_kb(
+        self, session, user, edit, doc, cb_answer, mocker
+    ) -> None:
+        """Свой период ограничен только лимитом 5000 (R3)."""
+        mocker.patch.object(csv_export, "ALL_TIME_LIMIT", 1)
+        await add_row(session, user)
+        await add_row(session, user, timestamp=utcnow() - timedelta(minutes=5))
+        today = today_of(user)
+        await stats.cb_export_day(
+            make_callback(f"csv:day:{ymd(today)}:{ymd(today)}", make_message()), session
+        )
+        doc.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.CSV_TOO_MANY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.export_retry_kb("csv")
+
+    @pytest.mark.parametrize(
+        ("data", "kb"),
+        [("pdf:cal:2025", "pdf"), ("csv:cal:2025", "csv")],
+    )
+    async def test_broken_shows_area_question(
+        self, session, user, edit, cb_answer, data, kb
+    ) -> None:
+        """Битая callback_data выгрузки — вопрос «За какой период» своей выгрузки."""
+        await stats.cb_export_calendar(make_callback(data, make_message()), session)
+        assert edit.call_args.args[0] == texts.CSV_ASK
+        assert edit.call_args.kwargs["reply_markup"] == (
+            keyboards.pdf_period_kb() if kb == "pdf" else keyboards.csv_period_kb()
+        )

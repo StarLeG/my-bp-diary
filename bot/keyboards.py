@@ -890,8 +890,9 @@ def stats_days_kb(
     return builder.as_markup()
 
 
-def _noop(text: str = " ") -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text, callback_data="stats:noop")
+def _noop(text: str = " ", area: str = "stats") -> InlineKeyboardButton:
+    """Кнопка-заглушка календаря; `area` — область callback'ов (§6.5, 2026-11-18)."""
+    return InlineKeyboardButton(text=text, callback_data=f"{area}:noop")
 
 
 def _week_calendar_rows(
@@ -926,7 +927,8 @@ def _week_calendar_rows(
             texts.CAL_WEEK_LABEL.format(
                 date_from=f"{week_start.day}.{week_start.month}",
                 date_to=f"{week_end.day}.{week_end.month}",
-            )
+            ),
+            area=area,
         )
     )
     if show_next:
@@ -947,10 +949,12 @@ def _week_calendar_rows(
             label = f"✓ {day_str}"
         else:
             label = f"{texts.STATS_CAL_WEEKDAYS[offset]} {day_str}"
-        if area == "stats" and start is not None:
-            data = f"stats:day:{start:%Y%m%d}:{day:%Y%m%d}"
-        else:
-            data = f"{area}:day:{day:%Y%m%d}"
+        # Шаг 2 — день уже выбран → `:day:{с}:{д}` завершает период (§6.5).
+        data = (
+            f"{area}:day:{start:%Y%m%d}:{day:%Y%m%d}"
+            if start is not None
+            else f"{area}:day:{day:%Y%m%d}"
+        )
         builder.row(InlineKeyboardButton(text=label, callback_data=data))
 
 
@@ -961,6 +965,8 @@ def stats_calendar_kb(
     start: Optional[date] = None,
     large: bool = False,
     week_start: Optional[date] = None,
+    area: str = "stats",
+    back: str = "stats:periods",
 ) -> InlineKeyboardMarkup:
     """Календарь своего периода (§6.5): шаг 1 — `start` не задан, шаг 2 — задан.
 
@@ -968,11 +974,14 @@ def stats_calendar_kb(
     кликабельны (проверка — на сервере); «▶» нет вперёд за неделю с сегодня;
     выбранный первый день — «[N]» (сетка) / «✓ 3.11» (неделя, UI12).
 
-    Крупный режим — список недели вместо сетки (UI12, Б): `stats:cal:w:{пн}`
-    (шаг 1) / `stats:cal:w:{пн}:{с}` (шаг 2), неделя — `week_start` (понедельник,
+    Крупный режим — список недели вместо сетки (UI12, Б): `{area}:cal:w:{пн}`
+    (шаг 1) / `{area}:cal:w:{пн}:{с}` (шаг 2), неделя — `week_start` (понедельник,
     иначе неделя 1-го числа `month`); обычный — сетка месяца
-    `stats:cal:m:{ГГГГММ}[:{с}]`. Прежние `stats:cal:{ГГГГММ}[:{с}]` хендлеры
+    `{area}:cal:m:{ГГГГММ}[:{с}]`. Прежние `stats:cal:{ГГГГММ}[:{с}]` хендлеры
     принимают как `:m:`-вариант (UI19).
+
+    `area` — область сценария (2026-11-18, §6.5): `stats` (по умолчанию),
+    `pdf` / `csv` (выгрузки); `back` — callback кнопки «Назад».
     """
     suffix = f":{start:%Y%m%d}" if start is not None else ""
     builder = InlineKeyboardBuilder()
@@ -982,29 +991,29 @@ def stats_calendar_kb(
         today_week = today - timedelta(days=today.weekday())
         _week_calendar_rows(
             builder,
-            area="stats",
+            area=area,
             week_start=week_start,
             start=start,
             show_prev=True,  # назад — без ограничений (UI12)
             show_next=week_start + timedelta(days=7) <= today_week,
             day_ok=lambda day: day <= today,  # будущее не выбирается (§6.5)
         )
-        builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="stats:periods"))
+        builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data=back))
         return builder.as_markup()
-    builder.row(_noop(f"{texts.STATS_CAL_MONTHS[month - 1]} {year}"))
-    builder.row(*(_noop(name) for name in texts.STATS_CAL_WEEKDAYS))
+    builder.row(_noop(f"{texts.STATS_CAL_MONTHS[month - 1]} {year}", area=area))
+    builder.row(*(_noop(name, area=area) for name in texts.STATS_CAL_WEEKDAYS))
     for week in calendar.Calendar(firstweekday=0).monthdayscalendar(year, month):
         row = []
         for day in week:
             if day == 0:
-                row.append(_noop())
+                row.append(_noop(area=area))
                 continue
             current = date(year, month, day)
             label = f"[{day}]" if current == start else str(day)
             data = (
-                f"stats:day:{start:%Y%m%d}:{current:%Y%m%d}"
+                f"{area}:day:{start:%Y%m%d}:{current:%Y%m%d}"
                 if start is not None
-                else f"stats:day:{current:%Y%m%d}"
+                else f"{area}:day:{current:%Y%m%d}"
             )
             row.append(InlineKeyboardButton(text=label, callback_data=data))
         builder.row(*row)
@@ -1014,7 +1023,7 @@ def stats_calendar_kb(
         nav.append(
             InlineKeyboardButton(
                 text=texts.BTN_CAL_PREV,
-                callback_data=f"stats:cal:m:{prev_year:04d}{prev_month:02d}{suffix}",
+                callback_data=f"{area}:cal:m:{prev_year:04d}{prev_month:02d}{suffix}",
             )
         )
     if (year, month) < (today.year, today.month):
@@ -1022,31 +1031,47 @@ def stats_calendar_kb(
         nav.append(
             InlineKeyboardButton(
                 text=texts.BTN_CAL_NEXT,
-                callback_data=f"stats:cal:m:{next_year:04d}{next_month:02d}{suffix}",
+                callback_data=f"{area}:cal:m:{next_year:04d}{next_month:02d}{suffix}",
             )
         )
     builder.row(*nav)  # хотя бы одна стрелка есть всегда: «◀» или «▶»
-    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="stats:periods"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data=back))
     return builder.as_markup()
 
 
 def csv_period_kb() -> InlineKeyboardMarkup:
-    """Период экспорта CSV: 7 дней / 30 дней / всё время."""
+    """Период экспорта CSV: 7 / 30 / всё время / 📆 Свой период (§10, 2026-11-18)."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_7_DAYS, callback_data="csv:7"))
     builder.row(InlineKeyboardButton(text=texts.BTN_30_DAYS, callback_data="csv:30"))
     builder.row(InlineKeyboardButton(text=texts.BTN_ALL_TIME, callback_data="csv:all"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CUSTOM_PERIOD, callback_data="csv:custom"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
     return builder.as_markup()
 
 
 def pdf_period_kb() -> InlineKeyboardMarkup:
-    """Период экспорта PDF: 7 дней / 30 дней / всё время (§10.1)."""
+    """Период экспорта PDF: 7 / 30 / всё время / 📆 Свой период (§10.1, 2026-11-18)."""
     builder = InlineKeyboardBuilder()
     builder.row(InlineKeyboardButton(text=texts.BTN_7_DAYS, callback_data="pdf:7"))
     builder.row(InlineKeyboardButton(text=texts.BTN_30_DAYS, callback_data="pdf:30"))
     builder.row(InlineKeyboardButton(text=texts.BTN_ALL_TIME, callback_data="pdf:all"))
+    builder.row(InlineKeyboardButton(text=texts.BTN_CUSTOM_PERIOD, callback_data="pdf:custom"))
     builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data="menu:back"))
+    return builder.as_markup()
+
+
+def export_retry_kb(area: str) -> InlineKeyboardMarkup:
+    """Ошибка выгрузки своего периода (R3/R4): «Изменить период» / «Назад».
+
+    `area` — `pdf` / `csv` (§6.5): «Изменить период» открывает календарь
+    заново (`{area}:custom`), «Назад» — вопрос «За какой период» (`stats:{area}`).
+    """
+    builder = InlineKeyboardBuilder()
+    builder.row(
+        InlineKeyboardButton(text=texts.BTN_CHANGE_PERIOD, callback_data=f"{area}:custom")
+    )
+    builder.row(InlineKeyboardButton(text=texts.BTN_BACK, callback_data=f"stats:{area}"))
     return builder.as_markup()
 
 

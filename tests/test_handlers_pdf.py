@@ -112,7 +112,13 @@ class TestPdfExport:
         await add_row(session, user, timedelta(hours=1), systolic=154)
         await stats.cb_pdf_export(make_callback(f"pdf:{days}"), session)
         start = today() - timedelta(days=days - 1)
-        assert edits(edit) == [texts.PDF_PREPARING, texts.CSV_ASK]
+        # «Готовлю отчёт за ДД.ММ–ДД.ММ…» — период виден сразу (R4, 2026-11-18).
+        assert edits(edit) == [
+            texts.PDF_PREPARING_PERIOD.format(
+                date_from=f"{start:%d.%m}", date_to=f"{today():%d.%m}"
+            ),
+            texts.CSV_ASK,
+        ]
         assert edit.call_args.kwargs["reply_markup"] == keyboards.pdf_period_kb()
         document = doc.call_args.args[0]
         assert document.filename == f"bp_diary_{start:%Y%m%d}-{today():%Y%m%d}.pdf"
@@ -139,7 +145,7 @@ class TestPdfExport:
         await add_row(session, user, timedelta(days=20))
         await stats.cb_pdf_export(make_callback("pdf:7"), session)
         doc.assert_not_awaited()
-        assert edits(edit) == [texts.PDF_PREPARING, "За этот период записей нет"]
+        assert texts.PDF_EMPTY in edits(edit)
         assert edit.call_args.kwargs["reply_markup"] == keyboards.pdf_period_kb()
         assert TG_ID not in stats._pdf_in_progress
 
@@ -201,9 +207,110 @@ class TestPdfExport:
         assert doc.await_count == 2
 
 
+# ─────────────────── Свой период (2026-11-18, R1–R4) ───────────────────
+
+
+def ymd(day) -> str:
+    return day.strftime("%Y%m%d")
+
+
+class TestPdfCustomPeriod:
+    """«📆 Свой период» выгрузки PDF: календарь §6.5 без лимита длины (R3)."""
+
+    async def test_custom_opens_calendar(self, session, user, edit, cb_answer) -> None:
+        """`pdf:custom` — календарь области pdf: дни `pdf:day:…`, «Назад» — вопрос."""
+        await stats.cb_export_calendar(make_callback("pdf:custom"), session)
+        assert edits(edit) == [texts.STATS_CAL_FIRST]
+        markup = edit.call_args.kwargs["reply_markup"]
+        callbacks = [b.callback_data for row in markup.inline_keyboard for b in row]
+        assert any(data.startswith("pdf:day:") for data in callbacks)
+        assert "stats:pdf" in callbacks  # «Назад» — на «За какой период»
+        assert not any(data.startswith("stats:") for data in callbacks if data != "stats:pdf")
+        cb_answer.assert_awaited_once_with()
+
+    async def test_two_days_flow(self, session, user, edit, doc, cb_answer) -> None:
+        """Тап-начало, тап-конец → сразу генерация (R4), «Готовлю…» с периодом."""
+        await add_row(session, user, timedelta(days=3))
+        await add_row(session, user, timedelta(days=1))
+        start, end = today() - timedelta(days=3), today()
+        await stats.cb_export_day(
+            make_callback(f"pdf:day:{ymd(start)}:{ymd(end)}"), session
+        )
+        assert edits(edit) == [
+            texts.PDF_PREPARING_PERIOD.format(
+                date_from=f"{start:%d.%m}", date_to=f"{end:%d.%m}"
+            ),
+            texts.CSV_ASK,
+        ]
+        assert doc.call_args.args[0].filename == (
+            f"bp_diary_{start:%Y%m%d}-{end:%Y%m%d}.pdf"
+        )
+        assert doc.call_args.kwargs["caption"] == (
+            f"Отчёт по давлению за {start:%d.%m}–{end:%d.%m}"
+        )
+
+    async def test_longer_than_31_days_ok(self, session, user, edit, doc, cb_answer) -> None:
+        """Лимита длины нет (R3): 91 день выгружается, как «всё время»."""
+        await add_row(session, user, timedelta(days=90))
+        await add_row(session, user, timedelta(hours=1))
+        start = today() - timedelta(days=90)
+        await stats.cb_export_day(
+            make_callback(f"pdf:day:{ymd(start)}:{ymd(today())}"), session
+        )
+        assert doc.await_count == 1
+        cb_answer.assert_awaited_once_with()  # без уведомления об ошибке
+
+    async def test_reversed_dates_swapped(self, session, user, edit, doc, cb_answer) -> None:
+        """Обратный порядок дат — меняются местами (§6.5, R2)."""
+        await add_row(session, user, timedelta(days=2))
+        await add_row(session, user, timedelta(hours=1))
+        start, end = today() - timedelta(days=2), today()
+        await stats.cb_export_day(
+            make_callback(f"pdf:day:{ymd(end)}:{ymd(start)}"), session
+        )
+        assert doc.call_args.args[0].filename == (
+            f"bp_diary_{start:%Y%m%d}-{end:%Y%m%d}.pdf"
+        )
+
+    async def test_future_day_toast(self, session, user, edit, doc, cb_answer) -> None:
+        """Будущее — всплывающее уведомление, без выгрузки (§6.5)."""
+        future = today() + timedelta(days=1)
+        await stats.cb_export_day(make_callback(f"pdf:day:{ymd(future)}"), session)
+        cb_answer.assert_awaited_once_with(texts.STATS_CAL_FUTURE)
+        doc.assert_not_awaited()
+
+    async def test_empty_uses_retry_kb(self, session, user, edit, doc, cb_answer) -> None:
+        """Пустой период (R4): «За этот период записей нет» + «Изменить период»."""
+        await stats.cb_export_day(
+            make_callback(f"pdf:day:{ymd(today())}:{ymd(today())}"), session
+        )
+        doc.assert_not_awaited()
+        assert edits(edit) == [texts.PDF_PREPARING_PERIOD.format(
+            date_from=f"{today():%d.%m}", date_to=f"{today():%d.%m}"
+        ), texts.PDF_EMPTY]
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.export_retry_kb("pdf")
+
+    async def test_too_many_uses_retry_kb(
+        self, session, user, edit, doc, cb_answer, monkeypatch
+    ) -> None:
+        """Лимит 5000 (R3): «Слишком много записей…» + «Изменить период» / «Назад»."""
+        monkeypatch.setattr(pdf_report, "REPORT_LIMIT", 1)
+        await add_row(session, user, timedelta(hours=2))
+        await add_row(session, user, timedelta(hours=1))
+        await stats.cb_export_day(
+            make_callback(f"pdf:day:{ymd(today())}:{ymd(today())}"), session
+        )
+        doc.assert_not_awaited()
+        assert edit.call_args.args[0] == texts.CSV_TOO_MANY
+        assert edit.call_args.kwargs["reply_markup"] == keyboards.export_retry_kb("pdf")
+
+
 def test_texts() -> None:
     assert texts.BTN_EXPORT_PDF == "Экспорт PDF"
     assert texts.PDF_PREPARING == "Готовлю отчёт…"
+    assert texts.PDF_PREPARING_PERIOD.format(date_from="12.10", date_to="20.10") == (
+        "Готовлю отчёт за 12.10–20.10…"
+    )
     assert texts.PDF_EMPTY == "За этот период записей нет"
     assert texts.PDF_FILE_CAPTION.format(date_from="01.10", date_to="30.10") == (
         "Отчёт по давлению за 01.10–30.10"

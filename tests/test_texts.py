@@ -261,7 +261,8 @@ class TestCanonicalTexts:
         assert texts.MEASUREMENT_UPDATED == "✅ Обновлено"
 
     def test_csv_too_many_text(self) -> None:
-        assert texts.CSV_TOO_MANY == "Слишком много записей, выберите 7 или 30 дней"
+        # С 2026-11-18 (R3): «7 или 30 дней» при своём периоде неверно.
+        assert texts.CSV_TOO_MANY == "Слишком много записей, выберите период поменьше"
 
     def test_admin_forbidden_canonical(self) -> None:
         # SPEC.md, §18: ответ на чужой запрос — «Доступ запрещен» (без «ё»).

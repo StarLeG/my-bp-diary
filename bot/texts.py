@@ -22,7 +22,7 @@ DEBOUNCE_NOTICE = "Уже записываю…"
 THROTTLE_NOTICE = "Слишком часто. Попробуйте ещё раз."
 DUPLICATE_MEASUREMENT = "Это давление уже записано"
 MENU_HINT = "Выберите пункт меню"
-CSV_TOO_MANY = "Слишком много записей, выберите 7 или 30 дней"
+CSV_TOO_MANY = "Слишком много записей, выберите период поменьше"
 NOT_YOUR_RECORD = "Такой записи нет"
 
 # ─────────────────── Визуальный канон (§11, 0.5.10) ───────────────────
@@ -141,6 +141,7 @@ BTN_ALL_TIME = "всё время"
 BTN_EXPORT_CSV = "Экспорт CSV"
 BTN_EXPORT_PDF = "Экспорт PDF"
 BTN_CUSTOM_PERIOD = "📆 Свой период"
+BTN_CHANGE_PERIOD = "📆 Изменить период"
 BTN_BY_DAYS = "📅 По дням"
 
 BTN_TARGETS = "Целевые значения"
@@ -611,6 +612,7 @@ CSV_FILE_CAPTION = "Дневник давления за период"
 # ─────────────────────────── Экспорт PDF (§10.1) ───────────────────────────
 
 PDF_PREPARING = "Готовлю отчёт…"
+PDF_PREPARING_PERIOD = "Готовлю отчёт за {date_from}–{date_to}…"
 PDF_EMPTY = "За этот период записей нет"
 PDF_FILE_CAPTION = "Отчёт по давлению за {date_from}–{date_to}"
 
