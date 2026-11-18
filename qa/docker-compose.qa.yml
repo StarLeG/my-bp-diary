@@ -78,7 +78,6 @@ services:
     env_file: ../.env
     environment:
       DB_PATH: /app/data/bot.sqlite3
-      CABINET_URL: http://cabinet:8000
       TELEGRAM_API_ID: ${TELEGRAM_API_ID}
       TELEGRAM_API_HASH: ${TELEGRAM_API_HASH}
       TELEGRAM_TEST_PHONE: ${TELEGRAM_TEST_PHONE}
