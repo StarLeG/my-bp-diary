@@ -204,6 +204,16 @@ class TestAddEvent:
         ]
         assert "Событие сохранено." in client.get("/?saved=event").text
 
+    def test_repeated_note_form_creates_one_row(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        form = _form("note", YESTERDAY, "13:20", note="Повтор формы")
+        for _ in range(2):
+            assert _location(_submit(client, "/events", form)) == "/?saved=event#history"
+        assert _sql(
+            settings, "SELECT COUNT(*) FROM diary_events WHERE user_id = ?", (user_id,)
+        ) == [(1,)]
+
     def test_add_future_moment_rejected(self, app_client, settings) -> None:
         """Будущий момент — единый текст §9 и `?error=event_future` (§16.2)."""
         client, user_id = app_client

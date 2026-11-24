@@ -459,15 +459,16 @@ async def cb_keypad(
     user = await measurements_service.get_or_create_user(session, callback.from_user.id)
     large = user.ui_large
     buf = (await state.get_data()).get(M_BUF, "")
-    if action.isdigit():
-        await state.update_data(**{M_BUF: _buf_add(buf, action)})
-        await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
-    elif action == "bksp":
-        await state.update_data(**{M_BUF: buf[:-1]})
-        await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
-    elif action == "clear":
-        await state.update_data(**{M_BUF: ""})
-        await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
+    if action.isdigit() or action in {"bksp", "clear"}:
+        if action.isdigit():
+            updated = _buf_add(buf, action)
+        elif action == "bksp":
+            updated = buf[:-1]
+        else:
+            updated = ""
+        if updated != buf:
+            await state.update_data(**{M_BUF: updated})
+            await _show_calc(callback.message, state, large=large)  # type: ignore[arg-type]
     elif action == "ok":
         error = await _finish(
             callback.message,  # type: ignore[arg-type]

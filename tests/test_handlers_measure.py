@@ -273,6 +273,8 @@ class TestKeypadBuffer:
         for digit in "2605":
             await tap(state, f"m:key:{digit}", session=session)
         assert (await state.get_data())[measure.M_BUF] == "260"
+        assert edit.await_count == 3
+        assert cb_answer.await_count == 4
 
     async def test_backspace(self, session, edit, cb_answer) -> None:
         state = make_state()

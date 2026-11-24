@@ -67,6 +67,7 @@ DEBOUNCE_EXACT = frozenset(
         "m:key:ok",
         "m:fact:done",
         "m:med:done",
+        "med:slots:done",
         "m:med:yes",
         "m:med:no",
         "add:time:now",
@@ -79,6 +80,7 @@ DEBOUNCE_PREFIXES = ("m:noremeasure:", "ev:save:", "add:sleep:", "d:pd:")
 EXEMPT_PREFIXES = (
     "m:fact:pick:",
     "m:med:pick:",
+    "med:slot:",
     "add:food:pick:",
     "d:pt:",
     "d:filt:",

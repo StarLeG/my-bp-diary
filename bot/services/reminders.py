@@ -40,6 +40,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from typing import Awaitable, Callable, Optional
@@ -133,6 +134,8 @@ async def insert_remeasure_row(
     user_id: int,
     delay_minutes: int,
     now: Optional[datetime] = None,
+    *,
+    intake_log_ids: Optional[list[int]] = None,
 ) -> bool:
     """Строка NULL-повтора замера **без job'а** — «кабинет пишет только строки» (§16.2).
 
@@ -156,7 +159,7 @@ async def insert_remeasure_row(
         )
     )
     stmt = insert(Reminder).from_select(
-        ["user_id", "type", "local_time", "next_trigger_time", "enabled", "measurement_id"],
+        ["user_id", "type", "local_time", "next_trigger_time", "enabled", "measurement_id", "intake_log_ids"],
         select(
             literal(user_id),
             literal(TYPE_REMEASURE),
@@ -164,6 +167,7 @@ async def insert_remeasure_row(
             literal(now + timedelta(minutes=delay_minutes)),
             literal(True),
             null(),
+            literal(json.dumps(intake_log_ids) if intake_log_ids else None),
         ).where(~duplicate),
     )
     result = await session.execute(stmt)
@@ -327,9 +331,11 @@ class RemindersService:
             if reminder is None:
                 return False
             reminder.enabled = False
+            reminder.followup_at = None
             await session.commit()
             reminder_id = reminder.id
         self._remove_job(reminder_id)
+        self._remove_job(reminder_id, followup=True)
         return True
 
     async def ensure_remeasure(
@@ -546,15 +552,15 @@ class RemindersService:
 
     # ─────────────────────────── Доставка ───────────────────────────
 
-    async def _fire(self, reminder_id: int, mode: str) -> None:
+    async def _fire(self, reminder_id: int, mode: str) -> bool:
         """Точка входа job'а: атомарный захват строки → отправка → перепланировка."""
         try:
             if mode == MODE_FOLLOWUP:
-                await self._deliver_followup(reminder_id)
-            else:
-                await self._deliver(reminder_id, mode)
+                return await self._deliver_followup(reminder_id)
+            return await self._deliver(reminder_id, mode)
         except Exception:  # noqa: BLE001 — job не должен ронять планировщик
             logger.exception("Ошибка доставки напоминания %s", reminder_id)
+            return False
 
     async def _deliver(self, reminder_id: int, mode: str) -> bool:
         """Основная логика доставки; возвращает True, если сообщение отправлено."""
@@ -676,6 +682,7 @@ class RemindersService:
                     .where(
                         Reminder.id == reminder_id,
                         Reminder.next_trigger_time == old_time,
+                        Reminder.enabled.is_(True),
                     )
                     .values(
                         next_trigger_time=next_time,
@@ -1011,7 +1018,7 @@ class RemindersService:
                 elif now - next_time > CATCHUP_WINDOW:
                     await self._drop_undelivered_remeasure(reminder_id)
                 else:
-                    await self._deliver(reminder_id, MODE_CATCHUP)
+                    await self._fire(reminder_id, MODE_CATCHUP)
                 continue
             if not enabled:
                 if job is not None:
@@ -1028,7 +1035,7 @@ class RemindersService:
                 if now - next_time > CATCHUP_WINDOW:
                     await self._reschedule_overdue_slot(reminder_id)
                 else:
-                    await self._deliver(reminder_id, MODE_CATCHUP)
+                    await self._fire(reminder_id, MODE_CATCHUP)
         await self._appointments_tick()
         # Живость бота для статус-строки лендинга (0.7.0, ST2-А): тик — пульс.
         heartbeat.write_status(self._status_path)
@@ -1087,14 +1094,14 @@ class RemindersService:
             elif now - reminder.followup_at > CATCHUP_WINDOW:
                 await self._drop_followup(reminder.id)
             else:
-                await self._deliver_followup(reminder.id)
+                await self._fire(reminder.id, MODE_FOLLOWUP)
         for reminder in reminders:
             if reminder.next_trigger_time <= now:
                 overdue = now - reminder.next_trigger_time > CATCHUP_WINDOW
                 if overdue and reminder.type != TYPE_REMEASURE:
                     await self._reschedule_overdue_slot(reminder.id)
                     continue
-                if not overdue and await self._deliver(reminder.id, MODE_CATCHUP):
+                if not overdue and await self._fire(reminder.id, MODE_CATCHUP):
                     sent += 1
                 elif reminder.type == TYPE_REMEASURE:
                     await self._drop_undelivered_remeasure(reminder.id)

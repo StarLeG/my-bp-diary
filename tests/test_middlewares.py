@@ -292,6 +292,20 @@ class TestThrottleMiddleware:
         assert await middleware(handler, make_callback("m:note"), {}) == "ok"
         assert handler.await_count == 2
 
+    async def test_medication_slots_and_confirm_pass_in_one_burst(self, answer_mock) -> None:
+        handler = AsyncMock(return_value="ok")
+        clock = FakeClock()
+        throttle = ThrottleMiddleware(clock=clock)
+        debounce = DebounceMiddleware(clock=clock)
+
+        async def route(event, data):
+            return await throttle(handler, event, data)
+
+        for key in ("med:slot:morning", "med:slot:evening", "med:slots:done"):
+            assert await debounce(route, make_callback(key), {}) == "ok"
+        assert await debounce(route, make_callback("med:slots:done"), {}) is None
+        assert handler.await_count == 3
+
     async def test_users_are_independent(self, answer_mock) -> None:
         handler = AsyncMock(return_value="ok")
         middleware = ThrottleMiddleware(clock=FakeClock())

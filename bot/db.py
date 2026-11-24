@@ -52,7 +52,8 @@ RETRY_BASE_DELAY = 0.05
 #:     §4.5, 0.6.2; правило правки standalone-строк в ЛК, M3 = В).
 #: 13 — закреплённое сообщение главного меню: `users.last_menu_message_id`
 #:     (§4.1, §6.2, 0.7.0, MU6: `/start` редактирует его вместо дублей).
-SCHEMA_VERSION = 14
+#: 15 — связь повтора из кабинета со строками журнала приёма.
+SCHEMA_VERSION = 15
 
 #: Колонки поколений 4–14 (`ALTER TABLE … ADD COLUMN`, §4.15, §4.1, §4.3, §4.5).
 _ADDED_COLUMNS = (
@@ -84,6 +85,7 @@ _ADDED_COLUMNS = (
         "CHECK (mode IN ('both', 'meds', 'pressure'))",
     ),
     ("reminders", "followup_at", "DATETIME"),
+    ("reminders", "intake_log_ids", "TEXT"),
     ("users", "followup_enabled", "BOOLEAN NOT NULL DEFAULT 1"),
     ("users", "reminders_paused_until", "DATE"),
     ("users", "ui_large", "BOOLEAN NOT NULL DEFAULT 0"),

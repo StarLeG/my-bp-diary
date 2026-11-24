@@ -25,6 +25,7 @@ import os
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from typing import Callable, Optional
 
 import aiosqlite
@@ -227,20 +228,17 @@ class BackupService:
         if not self._key:
             raise BackupError("BACKUP_ENCRYPTION_KEY не задан")
         self._backup_dir.mkdir(parents=True, exist_ok=True)
-        stamp = self._now().strftime(BACKUP_STAMP_FORMAT)
-        plain_path = self._backup_dir / f"{BACKUP_NAME_PREFIX}{stamp}.sqlite3"
+        created_at = self._now()
+        stamp = created_at.strftime(BACKUP_STAMP_FORMAT)
         enc_path = self._backup_dir / f"{BACKUP_NAME_PREFIX}{stamp}{BACKUP_NAME_SUFFIX}"
-        try:
+        with TemporaryDirectory(prefix=".backup-", dir=self._backup_dir) as work_dir:
+            plain_path = Path(work_dir) / "snapshot.sqlite3"
+            encrypted_tmp = Path(work_dir) / enc_path.name
             await self._vacuum_into(plain_path)
             if not await self._integrity_check(plain_path):
-                raise BackupError(f"Копия {plain_path.name} не прошла integrity_check")
-            encrypt_file(plain_path, enc_path, self._key)
-        except Exception:
-            enc_path.unlink(missing_ok=True)
-            raise
-        finally:
-            # Незашифрованная копия не остаётся на диске ни при каком исходе.
-            plain_path.unlink(missing_ok=True)
+                raise BackupError(f"Копия {enc_path.name} не прошла integrity_check")
+            encrypt_file(plain_path, encrypted_tmp, self._key)
+            encrypted_tmp.replace(enc_path)
 
         size_bytes = enc_path.stat().st_size
         uploaded_url: Optional[str] = None
@@ -253,14 +251,14 @@ class BackupService:
                 logger.warning("Off-site загрузка копии %s не удалась: %s", enc_path.name, exc)
         result = BackupResult(
             name=enc_path.name,
-            created_at=self._now(),
+            created_at=created_at,
             size_bytes=size_bytes,
             integrity_ok=True,
             uploaded_url=uploaded_url,
             upload_error=upload_error,
         )
         self._write_status(result)
-        removed = self.prune()
+        removed = self.prune(now=created_at)
         if removed:
             logger.info("Retention GFS: удалено копий — %s", len(removed))
         logger.info("Бэкап создан: %s (%s байт)", result.name, result.size_bytes)

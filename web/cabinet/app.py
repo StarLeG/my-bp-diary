@@ -19,6 +19,7 @@ CRUD лекарств, настройки напоминаний, добавле
 from __future__ import annotations
 
 import asyncio
+import json
 from contextlib import asynccontextmanager
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -32,7 +33,7 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from starlette.datastructures import FormData, UploadFile  # request.form() возвращает starlette-экземпляр
 from pydantic import ValidationError
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, insert, literal, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -74,6 +75,7 @@ from bot.services.measurements import (
 from bot.services.medications import MedicationNameConflictError, MedicationNotFoundError
 from bot.services.reminders import (
     DEFAULT_SLOT_TIMES,
+    TYPE_REMEASURE,
     enable_slot_row,
     insert_remeasure_row,
     next_slot_occurrence,
@@ -2356,8 +2358,25 @@ def create_app(
                 event.note = values["note"]
             await db.flush()
         else:
-            await events_service.create_event(
-                db, user, type_, moment, note=values["note"], payload=values["payload"]
+            minute = moment.replace(second=0, microsecond=0)
+            duplicate = select(DiaryEvent.id).where(
+                DiaryEvent.user_id == user.id,
+                DiaryEvent.type == type_,
+                DiaryEvent.measurement_id.is_(None),
+                DiaryEvent.moment >= minute,
+                DiaryEvent.moment < minute + timedelta(minutes=1),
+                DiaryEvent.note == values["note"],
+                DiaryEvent.payload == values["payload"],
+            ).exists()
+            await db.execute(
+                insert(DiaryEvent).from_select(
+                    ["user_id", "type", "moment", "note", "payload"],
+                    select(
+                        literal(user.id), literal(type_),
+                        literal(moment, type_=DiaryEvent.moment.type),
+                        literal(values["note"]), literal(values["payload"]),
+                    ).where(~duplicate),
+                )
             )
         await db.commit()
         return RedirectResponse(url="/?saved=event#history", status_code=303)
@@ -2463,7 +2482,7 @@ def create_app(
         slots = {
             med.id: med.slot for med in await medications_service.list_medications(db, user)
         }
-        any_taken = False
+        taken_log_ids: list[int] = []
         for slot in medications_service.SLOTS:
             slot_decisions = {
                 med_id: status
@@ -2481,10 +2500,12 @@ def create_app(
                 upgrade_skipped=True,
                 source="cabinet",
             )
-            any_taken = any_taken or bool(result.taken)
+            taken_log_ids.extend(result.taken_log_ids)
             await db.commit()  # короткие транзакции; лок приёмов берёт сервис
-        if any_taken and user.med_remeasure_delay:
-            await insert_remeasure_row(db, user.id, user.med_remeasure_delay)
+        if taken_log_ids and user.med_remeasure_delay:
+            await insert_remeasure_row(
+                db, user.id, user.med_remeasure_delay, intake_log_ids=taken_log_ids
+            )
             await db.commit()
         return RedirectResponse(url="/?saved=intake#history", status_code=303)
 
@@ -2535,7 +2556,23 @@ def create_app(
                 url=f"/?edit_int={log_id}&error=intake_measurement#history",
                 status_code=303,
             )
+        start, end = day_bounds_utc(user.timezone, moment.astimezone(ZoneInfo(user.timezone)).date())
         async with medications_service.intake_lock():
+            duplicate = await db.scalar(
+                select(MedicationLog.id)
+                .where(
+                    MedicationLog.user_id == user.id,
+                    MedicationLog.medication_id == log.medication_id,
+                    MedicationLog.id != log.id,
+                    MedicationLog.timestamp >= start,
+                    MedicationLog.timestamp < end,
+                )
+                .limit(1)
+            )
+            if duplicate is not None:
+                return RedirectResponse(
+                    url=f"/?edit_int={log_id}&error=intake_duplicate#history", status_code=303
+                )
             log.status = status
             log.timestamp = moment
             await db.flush()
@@ -2564,6 +2601,17 @@ def create_app(
         if denied is not None:
             return denied
         async with medications_service.intake_lock():
+            pending = await db.scalar(
+                select(Reminder).where(
+                    Reminder.user_id == user.id,
+                    Reminder.type == TYPE_REMEASURE,
+                    Reminder.measurement_id.is_(None),
+                    Reminder.enabled.is_(True),
+                    Reminder.intake_log_ids.is_not(None),
+                )
+            )
+            if pending is not None and log.id in json.loads(pending.intake_log_ids or "[]"):
+                await db.delete(pending)
             await db.delete(log)
             await db.flush()
             await db.commit()
@@ -2690,11 +2738,17 @@ def create_app(
             paused_until = today + timedelta(days=int(pause_raw) - 1)
         else:
             return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
+        delay_raw = str(form.get("med_remeasure_delay", ""))
+        if delay_raw not in ("", "30", "60", "120"):
+            return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
+        slot_settings = {}
         for slot in SLOT_ORDER:
             local_time = _normalize_hhmm(str(form.get(f"slot_{slot}_time", "")).strip())
             enabled = bool(form.get(f"slot_{slot}_enabled"))
             if enabled and local_time is None:
                 return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
+            slot_settings[slot] = (enabled, local_time)
+        for slot, (enabled, local_time) in slot_settings.items():
             reminder = (
                 await db.execute(
                     select(Reminder).where(
@@ -2722,6 +2776,7 @@ def create_app(
                     )
             elif reminder is not None:
                 reminder.enabled = False
+                reminder.followup_at = None
             if reminder is not None:
                 reminder.mode = modes[slot]
         followup_enabled = bool(form.get("followup_enabled"))
@@ -2731,13 +2786,7 @@ def create_app(
             )
         user.followup_enabled = followup_enabled
         user.reminders_paused_until = paused_until
-        delay_raw = str(form.get("med_remeasure_delay", ""))
-        if delay_raw == "":
-            user.med_remeasure_delay = None
-        elif delay_raw in ("30", "60", "120"):
-            user.med_remeasure_delay = int(delay_raw)
-        else:
-            return RedirectResponse(url="/?error=reminder#reminders", status_code=303)
+        user.med_remeasure_delay = int(delay_raw) if delay_raw else None
         await db.flush()
         return RedirectResponse(url="/?saved=reminder#reminders", status_code=303)
 

@@ -107,6 +107,7 @@ class SlotIntakeResult:
     """Итог отметки приёма за слот (для сообщения пользователю)."""
 
     taken: list[str] = field(default_factory=list)
+    taken_log_ids: list[int] = field(default_factory=list)
     skipped: list[str] = field(default_factory=list)
     already_logged: bool = False
     #: Подписи лекарств, уже отмеченных за этот день в слоте (§6.7, 0.5.4).
@@ -500,7 +501,7 @@ async def log_slot_intake(
             label = texts.fmt_med_item(medication.name, medication.dosage)
             if med_id in logged_today:
                 if upgrade_skipped and status == "taken" and logged_today[med_id] != "taken":
-                    await session.execute(
+                    updated = await session.execute(
                         update(MedicationLog)
                         .where(
                             MedicationLog.user_id == user.id,
@@ -510,7 +511,9 @@ async def log_slot_intake(
                             MedicationLog.timestamp < day_end,
                         )
                         .values(status="taken", timestamp=moment)
+                        .returning(MedicationLog.id)
                     )
+                    result.taken_log_ids.extend(updated.scalars())
                     new_logs += 1
                     result.taken.append(label)
                     continue
@@ -536,13 +539,15 @@ async def log_slot_intake(
                     literal(source),
                 ).where(~duplicate),
             )
-            inserted = await session.execute(stmt)
-            if inserted.rowcount == 0:
+            inserted = await session.execute(stmt.returning(MedicationLog.id))
+            log_id = inserted.scalar_one_or_none()
+            if log_id is None:
                 result.already.append(label)
                 continue  # конкурентно уже отметили — дубль не создаём
             new_logs += 1
             if status == "taken":
                 result.taken.append(label)
+                result.taken_log_ids.append(log_id)
             else:
                 result.skipped.append(label)
         await session.flush()

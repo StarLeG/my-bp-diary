@@ -328,6 +328,21 @@ class TestRemeasure:
         rows = _sql(settings, "SELECT COUNT(*) FROM reminders WHERE user_id = ?", (user_id,))
         assert rows == [(1,)]
 
+    def test_only_deleting_source_intake_cancels_remeasure(self, app_client, settings) -> None:
+        client, user_id = app_client
+        _register(client)
+        source_med = _insert_med(settings, user_id, "Лозартан", "50 мг", "morning")
+        other_med = _insert_med(settings, user_id, "Амлодипин", "10 мг", "evening")
+        for medication_id in (source_med, other_med):
+            _submit(client, "/intakes", _form(YESTERDAY, "08:00", {medication_id: "taken"}))
+        logs = dict(_sql(settings, "SELECT medication_id, id FROM medication_logs WHERE user_id = ?", (user_id,)))
+        for medication_id, remaining in ((other_med, 1), (source_med, 0)):
+            response = _submit(client, f"/intakes/{logs[medication_id]}/delete", {})
+            assert _location(response) == "/?saved=intake#history"
+            assert _sql(
+                settings, "SELECT COUNT(*) FROM reminders WHERE user_id = ?", (user_id,)
+            ) == [(remaining,)]
+
     def test_no_remeasure_without_delay(self, app_client, settings) -> None:
         """`users.med_remeasure_delay` не задан — строка повтора не ставится."""
         client, user_id = app_client

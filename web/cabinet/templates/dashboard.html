@@ -67,6 +67,8 @@
       <p class="alert alert-error">Время измерения не может быть в будущем</p>
     {% elif error == "intake" %}
       <p class="alert alert-error">Не удалось отметить приём: проверьте поля.</p>
+    {% elif error == "intake_duplicate" %}
+    <p class="flash error">На эту дату уже есть отметка о приёме этого лекарства.</p>
     {% elif error == "intake_measurement" %}
       <p class="alert alert-error">На это время уже есть измерение — отметьте приём в форме измерения</p>
     {% elif error == "intake_viewonly" %}

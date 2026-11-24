@@ -181,6 +181,8 @@ class Reminder(Base):
     measurement_id: Mapped[Optional[int]] = mapped_column(
         Integer, ForeignKey("measurements.id", ondelete="CASCADE"), nullable=True
     )
+    intake_log_ids: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    """JSON со строками приёма, из которых кабинет запланировал повтор замера."""
     last_message_id: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     """`message_id` последнего напоминания слота: у него снимаются кнопки при следующем (§6.7, 0.5.4)."""
     mode: Mapped[str] = mapped_column(

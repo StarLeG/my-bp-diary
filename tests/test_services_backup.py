@@ -154,6 +154,20 @@ class TestCreateBackup:
             await service.create_backup()
         assert list(backup_dir.iterdir()) == []
 
+    async def test_failed_retry_keeps_published_backup(self, db_file, tmp_path, mocker) -> None:
+        backup_dir = tmp_path / "backups"
+        service = make_service(db_file, backup_dir)
+        result = await service.create_backup()
+        published = backup_dir / result.name
+        original = published.read_bytes()
+
+        mocker.patch.object(service, "_integrity_check", return_value=False)
+        with pytest.raises(BackupError):
+            await service.create_backup()
+
+        assert published.read_bytes() == original
+        assert list(backup_dir.glob(".backup-*")) == []
+
     async def test_upload_success_sets_url(
         self, db_file: Path, tmp_path: Path, mocker
     ) -> None:
